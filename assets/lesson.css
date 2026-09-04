@@ -1,0 +1,223 @@
+/* Shared stylesheet for every lesson in this teaching workspace. Tufte-ish:
+   generous margins, a real sidenote column, serif reading text, quiet color. */
+
+@import url('https://fonts.googleapis.com/css2?family=Source+Serif+4:ital,opsz,wght@0,8..60,400;0,8..60,600;1,8..60,400&family=JetBrains+Mono:wght@400;500&display=swap');
+
+:root {
+  --bg: #fbfaf7;
+  --text: #1c1a17;
+  --text-muted: #6b6459;
+  --border: #ddd6c9;
+  --accent: #9a5b2e;
+  --accent-soft: #f1e4d3;
+  --code-bg: #f2efe7;
+  --sidenote: #83786a;
+  --win: #2f6d4f;
+  --win-soft: #e0efe6;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #17140f;
+    --text: #ece6db;
+    --text-muted: #a89e8c;
+    --border: #362f24;
+    --accent: #d99a5f;
+    --accent-soft: #332417;
+    --code-bg: #201b13;
+    --sidenote: #948a78;
+    --win: #6fbd93;
+    --win-soft: #1c2c21;
+  }
+}
+
+* { box-sizing: border-box; }
+
+html { background: var(--bg); }
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: "Source Serif 4", Georgia, "Times New Roman", serif;
+  font-size: 19px;
+  line-height: 1.6;
+  margin: 0;
+  padding: 4rem 2rem 6rem;
+}
+
+.lesson {
+  max-width: 40rem;
+  margin: 0 auto;
+  position: relative;
+}
+
+.eyebrow {
+  font-family: "JetBrains Mono", ui-monospace, monospace;
+  font-size: 0.7rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  margin: 0 0 0.6rem;
+}
+
+h1 {
+  font-size: 2.1rem;
+  font-weight: 600;
+  line-height: 1.2;
+  margin: 0 0 0.3rem;
+}
+
+.subtitle {
+  color: var(--text-muted);
+  font-style: italic;
+  font-size: 1.1rem;
+  margin: 0 0 2.5rem;
+}
+
+h2 {
+  font-size: 1.35rem;
+  font-weight: 600;
+  margin: 2.5rem 0 0.8rem;
+  border-top: 1px solid var(--border);
+  padding-top: 1.8rem;
+}
+
+h1 + h2, .subtitle + h2 { border-top: none; padding-top: 0; }
+
+p { margin: 0 0 1.1rem; }
+
+a { color: var(--accent); }
+
+strong { font-weight: 600; }
+
+code {
+  font-family: "JetBrains Mono", ui-monospace, monospace;
+  font-size: 0.82em;
+  background: var(--code-bg);
+  padding: 0.1em 0.35em;
+  border-radius: 3px;
+}
+
+pre {
+  font-family: "JetBrains Mono", ui-monospace, monospace;
+  font-size: 0.85rem;
+  line-height: 1.55;
+  background: var(--code-bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 1rem 1.2rem;
+  overflow-x: auto;
+  margin: 0 0 1.3rem;
+}
+pre code { background: none; padding: 0; }
+
+.filename {
+  font-family: "JetBrains Mono", monospace;
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  margin: 0 0 -0.6rem;
+}
+
+/* Sidenotes: float into the right margin on wide viewports, sit inline
+   (as a small aside) on narrow ones. */
+.sidenote-wrap { position: relative; }
+.sidenote {
+  font-family: "JetBrains Mono", monospace;
+  font-size: 0.78rem;
+  line-height: 1.5;
+  color: var(--sidenote);
+}
+@media (min-width: 78rem) {
+  .lesson { max-width: 40rem; }
+  .sidenote {
+    position: absolute;
+    left: calc(100% + 2.2rem);
+    top: 0;
+    width: 14rem;
+  }
+}
+@media (max-width: 77.99rem) {
+  .sidenote {
+    display: block;
+    border-left: 2px solid var(--border);
+    padding-left: 0.9rem;
+    margin: 0.6rem 0 1.3rem;
+  }
+}
+
+.callout {
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  background: var(--accent-soft);
+  border-radius: 0 6px 6px 0;
+  padding: 0.9rem 1.2rem;
+  margin: 0 0 1.3rem;
+  font-size: 0.95rem;
+}
+.callout p:last-child { margin-bottom: 0; }
+
+.source {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.9rem 1.2rem;
+  margin: 0 0 1.3rem;
+  font-size: 0.9rem;
+}
+.source .label {
+  font-family: "JetBrains Mono", monospace;
+  font-size: 0.68rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  margin: 0 0 0.4rem;
+}
+
+.check {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 1.1rem 1.3rem;
+  margin: 0 0 1.1rem;
+}
+.check .q {
+  font-weight: 600;
+  margin: 0 0 0.7rem;
+}
+.check details {
+  font-size: 0.92rem;
+}
+.check summary {
+  cursor: pointer;
+  color: var(--accent);
+  font-family: "JetBrains Mono", monospace;
+  font-size: 0.78rem;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+}
+.check .answer {
+  margin-top: 0.7rem;
+  padding-top: 0.7rem;
+  border-top: 1px dashed var(--border);
+}
+
+.nav {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-top: 3rem;
+  padding-top: 1.5rem;
+  border-top: 1px solid var(--border);
+  font-family: "JetBrains Mono", monospace;
+  font-size: 0.82rem;
+}
+
+.ask {
+  margin-top: 2.5rem;
+  padding-top: 1.5rem;
+  border-top: 1px solid var(--border);
+  color: var(--text-muted);
+  font-size: 0.92rem;
+  font-style: italic;
+}
+
+ul, ol { margin: 0 0 1.1rem; padding-left: 1.4rem; }
+li { margin-bottom: 0.4rem; }
