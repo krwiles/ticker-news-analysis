@@ -1,0 +1,168 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 3 — The /health Aggregation Endpoint</title>
+<link rel="stylesheet" href="../assets/lesson.css">
+</head>
+<body>
+<div class="lesson">
+
+  <p class="eyebrow">Lesson 3 of 8 · ticker-news-analysis stack (plumbing arc)</p>
+  <h1>The <code>/health</code> aggregation endpoint</h1>
+  <p class="subtitle">One path operation, three real checks, and why it doesn't just return <code>{"ok": true}</code>.</p>
+
+  <h2>Why a real check instead of a stub</h2>
+  <p>
+    The easy version of this endpoint is one line: <code>return {"status": "ok"}</code>. It would satisfy "the
+    API responded," but it would tell you nothing true about the database, Redis, or the worker — a status page
+    built on that is decoration, not a status page. <code>health.py</code> does the more honest thing: it actually
+    talks to each dependency and reports what happened.
+  </p>
+
+  <p class="filename">backend/src/ticker_backend/health.py</p>
+  <pre><code>async def check_db() -> dict:
+    try:
+        async with _engine.connect() as conn:
+            await conn.execute(text("SELECT 1"))
+        return {"status": "ok"}
+    except Exception as exc:
+        return {"status": "error", "detail": str(exc)}</code></pre>
+
+  <p>
+    <code>_engine</code> is a SQLAlchemy <strong>async engine</strong> — the connection-managing object the rest of
+    the app (starting lesson 6) will use for every database interaction. <code>SELECT 1</code> is the smallest
+    possible real query: not asking about any table, just "can I round-trip a query through this connection at
+    all." That's genuinely different from checking "is the TCP port open" — a database can accept connections
+    while refusing queries (out of connections, out of disk, mid-failover).
+  </p>
+
+  <div class="sidenote-wrap">
+    <p>
+      Notice what <em>doesn't</em> happen on failure: no exception escapes <code>check_db()</code>. A health
+      check that crashes with a 500 on the one dependency that's actually down is worse than useless — it hides
+      the truth ("db is down") behind a different truth ("the health check itself is broken").
+    </p>
+    <span class="sidenote">This is a real design principle, not specific to this project: monitoring code should
+    fail soft. Catch, report, move on.</span>
+  </div>
+
+  <h2>Three checks, three different kinds of "alive"</h2>
+  <p>
+    Each check answers a differently-shaped question, because each dependency fails differently:
+  </p>
+  <ul>
+    <li><strong>Database</strong> — binary. A query either round-trips or it doesn't (<code>ok</code> / <code>error</code>).</li>
+    <li><strong>Redis</strong> — also binary, via <code>await client.ping()</code>, redis-py's own liveness call.</li>
+    <li><strong>Worker</strong> — <em>not</em> binary. There's no direct question to ask a process with no server
+    (lesson 4 covers why). Instead: read the timestamp it last wrote, and reason about its age.</li>
+  </ul>
+
+  <p class="filename">backend/src/ticker_backend/health.py</p>
+  <pre><code>WORKER_STALE_AFTER_SECONDS = 30
+
+async def check_worker(client: Redis | None) -> dict:
+    raw = await client.get(WORKER_HEARTBEAT_KEY)
+    if raw is None:
+        return {"status": "error", "detail": "no heartbeat recorded yet"}
+
+    age_seconds = round(time.time() - float(raw), 1)
+    if age_seconds > WORKER_STALE_AFTER_SECONDS:
+        return {"status": "stale", "age_seconds": age_seconds}
+    return {"status": "ok", "age_seconds": age_seconds}</code></pre>
+
+  <div class="callout">
+    <p>
+      Three possible worker states, not two: <code>error</code> (never checked in — maybe it never started),
+      <code>stale</code> (checked in once, but not recently — maybe it's wedged or crashed mid-loop), and
+      <code>ok</code> (checked in recently). <code>30</code> seconds against a <code>5</code>-second heartbeat
+      interval (lesson 4) is deliberate slack — one or two missed beats shouldn't flip the status page red.
+    </p>
+  </div>
+
+  <h2>A simplification worth naming, not hiding</h2>
+  <p>
+    <code>check_redis()</code> opens a brand-new Redis connection on every single call to <code>/health</code>,
+    then closes it a few lines later:
+  </p>
+  <pre><code>async def check_redis() -> tuple[dict, Redis | None]:
+    client = Redis.from_url(settings.redis_url)
+    try:
+        await client.ping()
+        return {"status": "ok"}, client
+    ...</code></pre>
+  <p>
+    A production system would keep one shared, pooled client alive for the app's whole lifetime instead of
+    opening a fresh connection per request — cheaper, and it's what <code>_engine</code> above already does
+    correctly for the database (an engine manages its own connection pool). This is the honest exception: fine
+    for a health check hit once every five seconds, worth flagging as the thing to fix if this pattern ever spreads
+    to a real, frequently-called endpoint.
+  </p>
+
+  <h2>The aggregation itself: sequential, on purpose</h2>
+  <pre><code>@router.get("/health")
+async def health() -> dict:
+    db_status = await check_db()
+    redis_status, redis_client = await check_redis()
+    worker_status = await check_worker(redis_client)
+    ...
+    return {"api": ..., "db": db_status, "redis": redis_status, "worker": worker_status}</code></pre>
+  <p>
+    Three <code>await</code>s in a row means three round trips <em>in sequence</em>, not in parallel —
+    <code>asyncio.gather()</code> could run them concurrently and shave a few milliseconds off. For an endpoint
+    polled every 5 seconds by one browser tab, that's not a real cost; the simpler, more obviously-correct code
+    won here. Worth knowing <code>gather</code> exists for the day this endpoint's checks get slower or more
+    numerous.
+  </p>
+
+  <div class="sidenote-wrap">
+    <p>This is what a real response looks like, captured from the running stack:</p>
+    <span class="sidenote">Real output, not a hypothetical — this is the actual contract the frontend (lesson 8) codes against.</span>
+  </div>
+  <pre><code>{"api":{"status":"ok"},"db":{"status":"ok"},"redis":{"status":"ok"},"worker":{"status":"ok","age_seconds":2.1}}</code></pre>
+
+  <h2>Check your understanding</h2>
+
+  <div class="check">
+    <p class="q">Q1. The worker process crashes. Redis and Postgres are both fine. What does <code>/health</code>
+    report for <code>worker</code>, and roughly how long after the crash?</p>
+    <details>
+      <summary>Reveal answer</summary>
+      <p class="answer"><code>stale</code> once the heartbeat key is more than 30 seconds old (up to ~35s after
+      the crash, worst case) — not immediately, and not <code>error</code>, since a heartbeat was written before.</p>
+    </details>
+  </div>
+
+  <div class="check">
+    <p class="q">Q2. Why does <code>check_db()</code> catch <code>Exception</code> and return a dict instead of
+    letting FastAPI turn a database error into a 500 response?</p>
+    <details>
+      <summary>Reveal answer</summary>
+      <p class="answer">A 500 on <code>/health</code> would only tell you the health check itself broke — not
+      which dependency is actually down. Catching and reporting per-check is what lets one bad dependency show up
+      as one red tile instead of taking the whole endpoint down.</p>
+    </details>
+  </div>
+
+  <div class="source">
+    <p class="label">Primary sources</p>
+    <p>
+      <a href="https://docs.sqlalchemy.org/en/20/orm/extensions/asyncio.html">SQLAlchemy docs — Asynchronous I/O</a>
+      (engines, connections) ·
+      <a href="https://redis-py.readthedocs.io/en/stable/examples/asyncio_examples.html">redis-py docs — asyncio support</a>
+      · <a href="https://docs.python.org/3/library/asyncio-task.html#asyncio.gather">Python docs — <code>asyncio.gather</code></a>
+    </p>
+  </div>
+
+  <p class="ask">Anything unclear about the staleness threshold, the fail-soft pattern, or the sequential-vs-gather
+  trade-off? Ask your teacher (this agent).</p>
+
+  <div class="nav">
+    <a href="0002-fastapi-serving-api-and-ui.html">← Lesson 2: FastAPI serving the API and UI</a>
+    <a href="0004-arq-cron-heartbeat.html">Next → ARQ's cron/heartbeat mechanism</a>
+  </div>
+
+</div>
+</body>
+</html>

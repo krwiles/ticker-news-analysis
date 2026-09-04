@@ -1,0 +1,179 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 5 — How Docker Compose Wires It All Together</title>
+<link rel="stylesheet" href="../assets/lesson.css">
+</head>
+<body>
+<div class="lesson">
+
+  <p class="eyebrow">Lesson 5 of 8 · ticker-news-analysis stack (plumbing arc — capstone)</p>
+  <h1>How docker-compose wires it all together</h1>
+  <p class="subtitle">Networking, startup order, and persistence — the parts of the skeleton that aren't Python or React at all.</p>
+
+  <h2>Service names are hostnames</h2>
+  <p>
+    Recall <code>config.py</code>'s default: <code>postgresql+asyncpg://...@db:5432/...</code>. <code>db</code> is
+    not a placeholder — it's the literal hostname the api/ui/worker containers use to reach Postgres, and it
+    resolves because compose puts every service in the file on one shared network and registers each service's
+    <em>name</em> as its DNS name on that network automatically. No IP addresses, no manual network config —
+    <code>redis://redis:6379</code> works for the identical reason.
+  </p>
+  <div class="sidenote-wrap">
+    <p>This only works <em>between</em> containers. From your host machine's browser, <code>db</code> means
+    nothing — that's why the compose file also maps <code>5432:5432</code> to the host, a separate concern from
+    the container-to-container networking above.</p>
+    <span class="sidenote">Two different audiences, two different addressing schemes: containers talk to each
+    other by service name; your host talks to containers by <code>localhost:&lt;mapped port&gt;</code>.</span>
+  </div>
+
+  <h2>Port mapping: <code>HOST:CONTAINER</code></h2>
+  <p class="filename">docker-compose.yml</p>
+  <pre><code>ui:
+    ports:
+      - "3000:8000"
+  api:
+    ports:
+      - "8000:8000"
+  worker:
+    # no ports: block at all</code></pre>
+  <p>
+    Both <code>ui</code> and <code>api</code> run the identical <code>uvicorn</code> command internally, listening
+    on container port <code>8000</code> (lesson 1). The left side of <code>"3000:8000"</code> is what <em>your
+    machine</em> sees; the right side is what the container itself is bound to. That's the entire reason
+    <code>localhost:3000</code> and <code>localhost:8000</code> reach two different containers despite both
+    containers listening on the same internal port — the host-side mapping is what actually differs.
+    <code>worker</code> has no <code>ports:</code> block at all: nothing outside the compose network ever needs to
+    reach it directly, so nothing is exposed.
+  </p>
+
+  <h2>Startup order isn't file order — it's <code>depends_on</code> + real healthchecks</h2>
+  <pre><code>db:
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+x-app: &app
+  depends_on:
+    db:
+      condition: service_healthy
+    redis:
+      condition: service_healthy</code></pre>
+  <p>
+    <code>pg_isready</code> is Postgres's own CLI tool for "can this server actually accept connections yet" —
+    genuinely different from "is the container running," which can be true seconds before Postgres has finished
+    initializing. <code>condition: service_healthy</code> on <code>api</code>/<code>ui</code>/<code>worker</code>
+    (inherited from the <code>x-app</code> anchor lesson 1 introduced) means compose won't even start those
+    containers until <code>db</code>'s healthcheck passes — not "started," <em>healthy</em>.
+  </p>
+  <p>This is visible directly in compose's own startup log:</p>
+  <pre><code>Container db-1     Starting
+Container redis-1  Starting
+Container db-1      Waiting
+Container redis-1   Waiting
+Container db-1      Healthy
+Container redis-1   Healthy
+Container api-1     Starting   ← only now, after both report Healthy
+Container worker-1  Starting
+Container ui-1       Starting</code></pre>
+
+  <div class="callout">
+    <p>
+      Without this, the api container could boot, try its first database connection during startup, and crash
+      before Postgres finished initializing — a real, common Docker Compose failure mode this project structurally
+      avoids.
+    </p>
+  </div>
+
+  <h2>Persistence: why <code>db</code> has a volume and <code>redis</code> doesn't</h2>
+  <pre><code>services:
+  db:
+    volumes:
+      - db-data:/var/lib/postgresql/data
+  redis:
+    # no volumes: block
+
+volumes:
+  db-data:</code></pre>
+  <p>
+    <code>db-data</code> is a named volume — storage that outlives the container. Stop and recreate the
+    <code>db</code> container (<code>docker compose up</code> again after a rebuild, say) and the data is still
+    there, because the volume, not the container, is what actually holds it. <code>redis</code> gets no such
+    volume on purpose: everything it's storing right now (the worker's heartbeat key) is meant to be disposable —
+    losing it just means the status page shows "worker: error" for a few seconds until the next heartbeat, not a
+    real problem worth persisting through restarts.
+  </p>
+
+  <h2>The env vars come from <code>.env</code>, automatically</h2>
+  <p>
+    <code>${POSTGRES_USER}</code>, <code>${POSTGRES_PASSWORD}</code>, <code>${POSTGRES_DB}</code> throughout the
+    file aren't set anywhere in <code>docker-compose.yml</code> itself — compose reads a <code>.env</code> file in
+    the same directory automatically and substitutes them in, which is also why <code>.env</code> is gitignored
+    (secrets) while <code>.env.example</code> (no real secrets, just the shape) is committed.
+  </p>
+
+  <h2>Check your understanding</h2>
+
+  <div class="check">
+    <p class="q">Q1. You curl <code>db:5432</code> from your host machine's terminal (not from inside a container).
+    Does it work?</p>
+    <details>
+      <summary>Reveal answer</summary>
+      <p class="answer">No — <code>db</code> only resolves on the compose network, between containers. From the
+      host you'd need <code>localhost:5432</code>, which works only because of the explicit port mapping in the
+      compose file.</p>
+    </details>
+  </div>
+
+  <div class="check">
+    <p class="q">Q2. You run <code>docker compose down</code> then <code>docker compose up</code> again. Is the
+    worker's last heartbeat still in Redis? Is last week's Postgres data still there?</p>
+    <details>
+      <summary>Reveal answer</summary>
+      <p class="answer">The heartbeat is gone (Redis has no volume — a fresh container starts empty). The
+      Postgres data survives, because it lives in the <code>db-data</code> named volume, not in the container
+      itself.</p>
+    </details>
+  </div>
+
+  <div class="source">
+    <p class="label">Primary sources</p>
+    <p>
+      <a href="https://docs.docker.com/compose/compose-file/05-services/#healthcheck">Docker Compose docs — healthcheck</a>
+      · <a href="https://docs.docker.com/compose/compose-file/05-services/#depends_on">Docker Compose docs — depends_on</a>
+      · <a href="https://docs.docker.com/compose/networking/">Docker Compose docs — networking</a> (service-name DNS) ·
+      <a href="https://docs.docker.com/engine/storage/volumes/">Docker docs — volumes</a>
+    </p>
+  </div>
+
+  <p class="ask">Anything unclear about the healthy-vs-started distinction, or the volume/no-volume split? Ask your
+  teacher (this agent).</p>
+
+  <div class="callout" style="margin-top:2.5rem;">
+    <p>
+      <strong>End of the plumbing arc.</strong> Lessons 1–5 now cover the whole skeleton end to end: one image in
+      three modes, how it serves both the API and the UI, the one endpoint that reports on everything, how the
+      worker proves it's alive with nothing to poll, and how compose wires all five containers together. That was
+      the goal — understand how these pieces communicate before business logic starts filling in.
+    </p>
+    <p>
+      <strong>Next step is not another lesson.</strong> It's specing some basic features — resuming the
+      <code>grill-with-docs</code> domain-modeling round that got set aside when this walking-skeleton detour
+      started (ticker scope, news sources, what "analysis" produces, the first real entities). Lessons 6–8
+      (FastAPI+SQLAlchemy with a real table, React fundamentals, React Router) get modeled after whatever comes
+      out of that spec, not built ahead of it.
+    </p>
+  </div>
+
+  <div class="nav">
+    <a href="0004-arq-cron-heartbeat.html">← Lesson 4: ARQ's cron/heartbeat mechanism</a>
+    <span>Arc 2 waits on the feature spec — see above</span>
+  </div>
+
+</div>
+</body>
+</html>

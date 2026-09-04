@@ -1,0 +1,156 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 2 — FastAPI: Serving Both the API and the UI</title>
+<link rel="stylesheet" href="../assets/lesson.css">
+</head>
+<body>
+<div class="lesson">
+
+  <p class="eyebrow">Lesson 2 of 8 · ticker-news-analysis stack</p>
+  <h1>FastAPI: serving both the API and the UI</h1>
+  <p class="subtitle">What's actually inside <code>create_app()</code> — path operations, routers, and the SPA fallback.</p>
+
+  <h2>Path operations: the actual unit of FastAPI</h2>
+  <p>
+    Lesson 1 showed <code>api</code> mode as "the branch that doesn't call <code>app.frontend()</code>." What it
+    <em>does</em> instead is serve whatever <strong>path operations</strong> got registered — FastAPI's term for
+    "a function tied to a URL and an HTTP method." Every one of these starts as a plain decorated function:
+  </p>
+
+  <p class="filename">backend/src/ticker_backend/health.py</p>
+  <pre><code>router = APIRouter()
+
+@router.get("/health")
+async def health() -> dict:
+    db_status = await check_db()
+    redis_status, redis_client = await check_redis()
+    worker_status = await check_worker(redis_client)
+    ...
+    return {"api": {...}, "db": db_status, "redis": redis_status, "worker": worker_status}</code></pre>
+
+  <p>
+    <code>@router.get("/health")</code> is the whole registration: HTTP method (<code>GET</code>), path
+    (<code>/health</code>), and the function to call. Return a Python <code>dict</code> and FastAPI serializes it
+    to JSON automatically — no separate serializer to write or configure.
+  </p>
+
+  <div class="sidenote-wrap">
+    <p>
+      An <code>APIRouter</code> is a bucket of path operations that can be built in one file and wired into the
+      app elsewhere. Right now there's exactly one router (<code>health_router</code>), but the pattern is what
+      lets a real app split by feature — a <code>tickers</code> router, an <code>articles</code> router — without
+      one giant <code>main.py</code>.
+    </p>
+    <span class="sidenote">This is the seam lesson 5 will use: a new <code>tickers.py</code> module with its own
+    <code>APIRouter</code>, included the same way.</span>
+  </div>
+
+  <p class="filename">backend/src/ticker_backend/main.py</p>
+  <pre><code>def create_app() -> FastAPI:
+    app = FastAPI(title="ticker-news-analysis", version="0.1.0")
+    app.include_router(health_router)
+    ...</code></pre>
+
+  <p>
+    <code>include_router</code> copies every path operation the router defined onto the app. This is <em>all</em>
+    that <code>api</code> mode does — it's <code>ui</code> mode that adds one more line.
+  </p>
+
+  <h2>Low-priority routes: how <code>app.frontend()</code> avoids a fight over <code>/health</code></h2>
+  <p>
+    In <code>ui</code> mode, the same app also calls <code>app.frontend("/", directory=STATIC_DIR)</code>, which
+    hands out the built React files. Naively, mounting something at <code>"/"</code> sounds like it should swallow
+    every path — including <code>/health</code>. It doesn't, and the reason is worth being precise about, because
+    it's a real design choice FastAPI made, not an accident of file order:
+  </p>
+
+  <div class="callout">
+    <p>
+      <code>app.frontend()</code> routes are explicitly <strong>low-priority</strong>. FastAPI always checks normal
+      path operations first, <em>regardless of where <code>app.frontend()</code> was called relative to them</em>.
+      Move the call to the top of <code>create_app()</code> and <code>/health</code> would still win.
+    </p>
+  </div>
+
+  <p>
+    That's a deliberate improvement over the older pattern (mounting <code>StaticFiles(html=True)</code> directly),
+    which <em>did</em> depend on registration order — mount it before your routes and it would have swallowed
+    them. The comment in <code>main.py</code> calls this out directly: that's the bug class this API was built to
+    make impossible.
+  </p>
+
+  <h2>The SPA fallback, and how it actually decides</h2>
+  <p>
+    When a request doesn't match a real file in the build <em>or</em> a path operation, <code>app.frontend()</code>
+    has to decide: 404, or serve <code>index.html</code> so React Router can take over client-side? It looks at the
+    request's <code>Accept</code> header — not the URL shape — to tell a browser navigating to a page apart from,
+    say, a fetch for a missing asset:
+  </p>
+
+  <div class="sidenote-wrap">
+    <p>Verified directly against the running container, not just read from source:</p>
+    <span class="sidenote">Empirical check beats a docs skim — this is what actually happened when it ran.</span>
+  </div>
+
+  <pre><code>$ curl -o /dev/null -w "%{http_code}\n" http://localhost:3000/some/client/route
+404
+
+$ curl -o /dev/null -w "%{http_code}\n" -H "Accept: text/html" http://localhost:3000/some/client/route
+200</code></pre>
+
+  <p>
+    A real browser always sends <code>Accept: text/html</code> (or similar) when navigating, so this is invisible
+    in practice — but it's why a bare <code>curl</code> with no headers looked "broken" during testing when it
+    wasn't. The rule: no matching file or route, and the request looks like a page navigation → serve
+    <code>index.html</code>, status 200. Otherwise → 404.
+  </p>
+
+  <h2>Check your understanding</h2>
+
+  <div class="check">
+    <p class="q">Q1. You move <code>app.frontend("/", directory=STATIC_DIR)</code> to the very first line inside
+    <code>create_app()</code>, before <code>include_router(health_router)</code>. Does <code>/health</code> still
+    work?</p>
+    <details>
+      <summary>Reveal answer</summary>
+      <p class="answer">Yes. <code>app.frontend()</code> routes are always low-priority regardless of registration
+      order, so normal path operations are checked first either way.</p>
+    </details>
+  </div>
+
+  <div class="check">
+    <p class="q">Q2. A request comes in for <code>/nonexistent-file.png</code> with no special <code>Accept</code>
+    header (like a plain <code>curl</code>). What status code, and why?</p>
+    <details>
+      <summary>Reveal answer</summary>
+      <p class="answer">404. It doesn't match a real file or a path operation, and without <code>Accept:
+      text/html</code> it isn't recognized as a page-navigation request, so it doesn't qualify for the
+      index.html fallback either.</p>
+    </details>
+  </div>
+
+  <div class="source">
+    <p class="label">Primary sources</p>
+    <p>
+      <a href="https://fastapi.tiangolo.com/tutorial/first-steps/">FastAPI docs — First Steps</a> (path operations) ·
+      <a href="https://fastapi.tiangolo.com/tutorial/bigger-applications/">FastAPI docs — Bigger Applications</a>
+      (<code>APIRouter</code>) · the installed package's own <code>app.frontend.__doc__</code> for
+      <code>app.frontend()</code>'s exact fallback semantics, since it's new enough (June 2026) that not every
+      tutorial page reflects it yet.
+    </p>
+  </div>
+
+  <p class="ask">Anything here unclear — the low-priority routing, the Accept-header fallback? Ask your teacher
+  (this agent).</p>
+
+  <div class="nav">
+    <a href="0001-multi-mode-container-pattern.html">← Lesson 1: Multi-mode container pattern</a>
+    <a href="0003-health-aggregation-endpoint.html">Next → The /health aggregation endpoint</a>
+  </div>
+
+</div>
+</body>
+</html>

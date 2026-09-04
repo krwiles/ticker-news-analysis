@@ -1,0 +1,140 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 4 — ARQ's Cron/Heartbeat Mechanism</title>
+<link rel="stylesheet" href="../assets/lesson.css">
+</head>
+<body>
+<div class="lesson">
+
+  <p class="eyebrow">Lesson 4 of 8 · ticker-news-analysis stack (plumbing arc)</p>
+  <h1>ARQ's cron/heartbeat mechanism</h1>
+  <p class="subtitle">A process with no server has to prove it's alive by pushing, not by answering.</p>
+
+  <h2>What ARQ actually is</h2>
+  <p>
+    ARQ is a Redis-backed job queue for Python's <code>asyncio</code> — the thing that runs code
+    <em>later</em> or <em>on a schedule</em>, outside the request/response cycle FastAPI handles. Think of it as
+    the asyncio-native, Redis-only sibling of Celery: fewer moving parts, one broker (Redis, which this project
+    already runs), no separate message-broker service to stand up.
+  </p>
+
+  <p class="filename">backend/src/ticker_backend/worker.py</p>
+  <pre><code>class WorkerSettings:
+    cron_jobs = [cron(heartbeat, second=set(range(0, 60, 5)))]
+    redis_settings = RedisSettings.from_dsn(settings.redis_url)</code></pre>
+
+  <div class="sidenote-wrap">
+    <p>
+      <code>WorkerSettings</code> is never instantiated anywhere in this codebase — it's a plain class used purely
+      as a bag of config attributes. The command <code>arq ticker_backend.worker.WorkerSettings</code> (the
+      <code>worker</code> service's compose <code>command:</code>, from lesson 1) is ARQ's own CLI: it imports
+      that dotted path, reads the class attributes off it, and starts a worker process configured accordingly.
+    </p>
+    <span class="sidenote">A "config as a bare class" convention shows up a lot in Python (Django settings modules
+    do the same thing) — there's no framework magic instantiating it, ARQ's CLI just reads class attributes directly.</span>
+  </div>
+
+  <h2>Cron scheduling is wall-clock, not "every N seconds since start"</h2>
+  <p>
+    <code>cron(heartbeat, second=set(range(0, 60, 5)))</code> means: run <code>heartbeat</code> whenever the
+    wall-clock second is <code>0, 5, 10, 15, ... 55</code> — every real-world second that's a multiple of 5. That's
+    a genuinely different thing from "wait 5 seconds after the worker starts, then repeat." If the worker starts
+    at <code>:02</code>, the first heartbeat fires at <code>:05</code> — three seconds later, not five — and every
+    heartbeat after that lands on a clean multiple of 5, regardless of exactly when the process happened to boot.
+  </p>
+  <div class="callout">
+    <p>
+      This matters beyond this one heartbeat: any future cron job in this project (say, "fetch news every hour on
+      the hour") gets the same wall-clock alignment for free, which a naive <code>while True: sleep(3600)</code>
+      loop would <em>not</em> give you — that drifts based on exactly when the process started.
+    </p>
+  </div>
+
+  <h2>The job function, and <code>ctx</code></h2>
+  <pre><code>async def heartbeat(ctx: dict) -> None:
+    await ctx["redis"].set(WORKER_HEARTBEAT_KEY, str(time.time()))
+    log.info("worker.heartbeat")</code></pre>
+  <p>
+    Every ARQ job function takes one argument, <code>ctx</code> — a dict ARQ builds and hands to each job,
+    carrying (among other things) an already-connected Redis client at <code>ctx["redis"]</code>. That client is
+    an <code>ArqRedis</code>, which is a subclass of the same <code>redis.asyncio.Redis</code> lesson 3 used — so
+    it supports ordinary commands like <code>.set()</code> directly, on top of whatever ARQ itself needs it for
+    (enqueueing and tracking jobs).
+  </p>
+
+  <div class="sidenote-wrap">
+    <p>
+      Worth contrasting directly with lesson 3's <code>check_redis()</code>, which opens a brand-new Redis
+      connection on every call. <code>heartbeat()</code> does the opposite — it reuses the one connection ARQ
+      already manages for the whole worker process. That's the "production-shaped" version of the pattern lesson 3
+      flagged as a simplification.
+    </p>
+    <span class="sidenote">Same library, two different lifetimes — short-lived-per-request vs long-lived-per-process. Both are real, correct patterns for their situation.</span>
+  </div>
+
+  <h2>Why a heartbeat, not a health check</h2>
+  <p>
+    <code>/health</code> (lesson 3) works by <em>asking</em> — the api container reaches out to the database and
+    Redis and waits for an answer. That only works because those two have something listening. The worker has no
+    server at all: nothing to connect to, no port to ask. So it inverts the relationship — instead of being asked
+    "are you alive," it periodically <em>announces</em> "I was alive as of this timestamp," and leaves interpreting
+    that announcement to whoever's asking (the api container's <code>check_worker()</code>, which reads the
+    timestamp and reasons about its age).
+  </p>
+
+  <p>Real log output from the running container:</p>
+  <pre><code>worker-1  | 17:47:30:   1.01s → cron:heartbeat()
+worker-1  | {"event": "worker.heartbeat", "timestamp": "2026-09-04T17:47:30...", "level": "info"}
+worker-1  | 17:47:30:   0.00s ← cron:heartbeat ●
+worker-1  | 17:47:35:   1.01s → cron:heartbeat()</code></pre>
+  <p>
+    Note the real gap: <code>17:47:30</code> to <code>17:47:35</code> — five seconds apart, landing on the clean
+    multiples the cron schedule promised.
+  </p>
+
+  <h2>Check your understanding</h2>
+
+  <div class="check">
+    <p class="q">Q1. The worker container starts at <code>14:00:03</code>. At what wall-clock time does the first
+    heartbeat fire?</p>
+    <details>
+      <summary>Reveal answer</summary>
+      <p class="answer"><code>14:00:05</code> — two seconds after start, the next clean multiple of 5, not
+      <code>14:00:08</code> (which "5 seconds after start" would imply).</p>
+    </details>
+  </div>
+
+  <div class="check">
+    <p class="q">Q2. Why can <code>heartbeat()</code> just call <code>ctx["redis"].set(...)</code> directly, while
+    <code>check_redis()</code> in lesson 3 has to create a client first with <code>Redis.from_url(...)</code>?</p>
+    <details>
+      <summary>Reveal answer</summary>
+      <p class="answer">ARQ already builds and manages a long-lived Redis connection for the whole worker process
+      and hands it to every job via <code>ctx["redis"]</code>. The api container's health check has no equivalent
+      long-lived client sitting around, so it opens one itself, per call.</p>
+    </details>
+  </div>
+
+  <div class="source">
+    <p class="label">Primary sources</p>
+    <p>
+      <a href="https://arq-docs.helpmanual.io/">ARQ docs</a> — <code>WorkerSettings</code>, <code>cron_jobs</code>,
+      and <code>ctx</code> · <a href="https://github.com/python-arq/arq">ARQ source</a>, for the exact
+      <code>cron()</code> scheduling semantics referenced above.
+    </p>
+  </div>
+
+  <p class="ask">Anything unclear about the wall-clock cron alignment or the two different Redis-connection
+  lifetimes? Ask your teacher (this agent).</p>
+
+  <div class="nav">
+    <a href="0003-health-aggregation-endpoint.html">← Lesson 3: The /health aggregation endpoint</a>
+    <a href="0005-docker-compose-wiring.html">Next → How docker-compose wires it all together</a>
+  </div>
+
+</div>
+</body>
+</html>
