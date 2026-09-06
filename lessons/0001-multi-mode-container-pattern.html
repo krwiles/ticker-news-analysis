@@ -69,13 +69,17 @@
   <p class="filename">backend/src/ticker_backend/main.py</p>
   <pre><code>def create_app() -> FastAPI:
     app = FastAPI(title="ticker-news-analysis", version="0.1.0")
-    app.include_router(health_router)
 
-    if settings.app_mode == "ui":
+    if settings.app_mode == "api":
+        app.include_router(health_router)         # the full JSON aggregate
+    else:
+        app.include_router(ui_health_router)      # a trivial self-check only
         app.frontend("/", directory=STATIC_DIR)   # serve the React build
-    # else: api mode — just the JSON routes above
 
     return app</code></pre>
+  <p class="sidenote" style="position:static;border:none;padding:0;margin:0 0 1.3rem;">
+    Each branch gets a genuinely different router now, not the same one twice — lesson 2 covers exactly why.
+  </p>
 
   <div class="sidenote-wrap">
     <p>

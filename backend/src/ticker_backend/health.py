@@ -76,3 +76,15 @@ async def health() -> dict:
         "redis": redis_status,
         "worker": worker_status,
     }
+
+
+# ui mode gets its own router with a trivial self-check — NOT the full
+# aggregate above. Each container should only report on what it actually is;
+# aggregating the whole system's health belongs to the one container that's
+# meant to be asked for it. See docs/adr/0002-cors-over-shared-health-router.md.
+ui_router = APIRouter()
+
+
+@ui_router.get("/health")
+async def ui_health() -> dict:
+    return {"status": "ok"}

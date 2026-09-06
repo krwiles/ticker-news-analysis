@@ -51,20 +51,43 @@ async def health() -> dict:
   <p class="filename">backend/src/ticker_backend/main.py</p>
   <pre><code>def create_app() -> FastAPI:
     app = FastAPI(title="ticker-news-analysis", version="0.1.0")
-    app.include_router(health_router)
-    ...</code></pre>
+
+    if settings.app_mode == "api":
+        app.add_middleware(CORSMiddleware, allow_origins=[settings.ui_origin], ...)
+        app.include_router(health_router)       # the full aggregate
+    else:
+        app.include_router(ui_health_router)    # a trivial self-check only
+        app.frontend("/", directory=STATIC_DIR)
+
+    return app</code></pre>
 
   <p>
-    <code>include_router</code> copies every path operation the router defined onto the app. This is <em>all</em>
-    that <code>api</code> mode does — it's <code>ui</code> mode that adds one more line.
+    <code>include_router</code> copies every path operation the router defined onto the app —
+    <strong>a different router per mode</strong>, not the same one twice. That "different router" part wasn't
+    the original design; it's a fix, and the story of why is worth knowing.
   </p>
 
-  <h2>Low-priority routes: how <code>app.frontend()</code> avoids a fight over <code>/health</code></h2>
+  <div class="callout">
+    <p>
+      Earlier, <code>include_router(health_router)</code> ran unconditionally — both modes got the exact same
+      full aggregate. Because the frontend's fetch was a <em>relative</em> URL (<code>fetch("/health")</code>),
+      the browser was actually calling whichever container served the page — <code>ui</code> — not
+      <code>api</code> at all, and it only ever looked like it worked because <code>ui</code> happened to expose
+      an identical copy of the aggregate by accident. See
+      <code>docs/adr/0002-cors-over-shared-health-router.md</code> for the full reasoning; the short version: each
+      container should only report on what it actually is, so <code>ui</code> now gets a trivial
+      <code>{"status": "ok"}</code>, <code>api</code> keeps the one real aggregate, and the frontend calls
+      <code>api</code>'s origin explicitly — which makes it a genuine cross-origin request, which is what the
+      <code>CORSMiddleware</code> line is for.
+    </p>
+  </div>
+
+  <h2>Low-priority routes: how <code>app.frontend()</code> avoids a fight over its own container's routes</h2>
   <p>
     In <code>ui</code> mode, the same app also calls <code>app.frontend("/", directory=STATIC_DIR)</code>, which
     hands out the built React files. Naively, mounting something at <code>"/"</code> sounds like it should swallow
-    every path — including <code>/health</code>. It doesn't, and the reason is worth being precise about, because
-    it's a real design choice FastAPI made, not an accident of file order:
+    every path — including the trivial <code>/health</code> route just above it. It doesn't, and the reason is
+    worth being precise about, because it's a real design choice FastAPI made, not an accident of file order:
   </p>
 
   <div class="callout">
@@ -111,9 +134,8 @@ $ curl -o /dev/null -w "%{http_code}\n" -H "Accept: text/html" http://localhost:
   <h2>Check your understanding</h2>
 
   <div class="check">
-    <p class="q">Q1. You move <code>app.frontend("/", directory=STATIC_DIR)</code> to the very first line inside
-    <code>create_app()</code>, before <code>include_router(health_router)</code>. Does <code>/health</code> still
-    work?</p>
+    <p class="q">Q1. In the <code>ui</code> branch, you move <code>app.frontend("/", directory=STATIC_DIR)</code>
+    above <code>include_router(ui_health_router)</code>. Does <code>ui</code>'s <code>/health</code> still work?</p>
     <details>
       <summary>Reveal answer</summary>
       <p class="answer">Yes. <code>app.frontend()</code> routes are always low-priority regardless of registration
@@ -132,6 +154,18 @@ $ curl -o /dev/null -w "%{http_code}\n" -H "Accept: text/html" http://localhost:
     </details>
   </div>
 
+  <div class="check">
+    <p class="q">Q3. A request for <code>/health</code> arrives at the <code>api</code> container with header
+    <code>Origin: http://evil.example.com</code>. Does the server refuse the request?</p>
+    <details>
+      <summary>Reveal answer</summary>
+      <p class="answer">No — the server still responds 200. CORS isn't enforced by the server rejecting the
+      request; it's enforced by the <em>browser</em>, which withholds the response body from JavaScript on that
+      origin because the response's <code>Access-Control-Allow-Origin</code> header doesn't match. A non-browser
+      client (like <code>curl</code>) never enforces this at all.</p>
+    </details>
+  </div>
+
   <div class="source">
     <p class="label">Primary sources</p>
     <p>
@@ -139,7 +173,8 @@ $ curl -o /dev/null -w "%{http_code}\n" -H "Accept: text/html" http://localhost:
       <a href="https://fastapi.tiangolo.com/tutorial/bigger-applications/">FastAPI docs — Bigger Applications</a>
       (<code>APIRouter</code>) · the installed package's own <code>app.frontend.__doc__</code> for
       <code>app.frontend()</code>'s exact fallback semantics, since it's new enough (June 2026) that not every
-      tutorial page reflects it yet.
+      tutorial page reflects it yet · <a href="https://fastapi.tiangolo.com/tutorial/cors/">FastAPI docs — CORS</a>
+      · <a href="https://developer.mozilla.org/en-US/docs/Web/HTTP/Guides/CORS">MDN — Cross-Origin Resource Sharing</a>
     </p>
   </div>
 

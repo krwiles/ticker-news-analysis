@@ -35,8 +35,10 @@ module.exports = (_env, argv) => {
     devServer: {
       port: 3000,
       historyApiFallback: true,
-      // The api container is what the skeleton page actually talks to.
-      proxy: [{ context: ["/health"], target: "http://localhost:8000" }],
+      // No proxy needed: src/config.ts calls the api container's origin
+      // directly (http://localhost:8000), and the api container's CORS
+      // config allows this dev server's origin in. See
+      // docs/adr/0002-cors-over-shared-health-router.md.
     },
     devtool: isProduction ? false : "eval-source-map",
   };
