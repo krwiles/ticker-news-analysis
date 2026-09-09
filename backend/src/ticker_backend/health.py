@@ -11,9 +11,9 @@ import structlog
 from fastapi import APIRouter
 from redis.asyncio import Redis
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import create_async_engine
 
 from ticker_backend.config import settings
+from ticker_backend.db import engine
 
 log = structlog.get_logger()
 router = APIRouter()
@@ -24,12 +24,10 @@ router = APIRouter()
 WORKER_HEARTBEAT_KEY = "worker:heartbeat"
 WORKER_STALE_AFTER_SECONDS = 30
 
-_engine = create_async_engine(settings.database_url, pool_pre_ping=True)
-
 
 async def check_db() -> dict:
     try:
-        async with _engine.connect() as conn:
+        async with engine.connect() as conn:
             await conn.execute(text("SELECT 1"))
         return {"status": "ok"}
     except Exception as exc:  # noqa: BLE001 - report any failure, don't crash the health check

@@ -1,0 +1,174 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 6 — The Headline Model and Migration</title>
+<link rel="stylesheet" href="../assets/lesson.css">
+</head>
+<body>
+<div class="lesson">
+
+  <p class="eyebrow">Lesson 6 of 12 · ticker-news-analysis stack (feature arc — first slice)</p>
+  <h1>The <code>Headline</code> model and migration</h1>
+  <p class="subtitle">The first real table in this project — and the first time two different tools need two different connection strings to the same database.</p>
+
+  <h2>Why <code>dbmate</code>, not Alembic</h2>
+  <p>
+    SQLAlchemy is an ORM — it maps Python classes onto tables, it doesn't create or alter those tables itself.
+    Most FastAPI+SQLAlchemy projects reach for <a href="https://alembic.sqlalchemy.org/">Alembic</a>, which
+    generates migrations <em>from</em> your models by diffing them against the database. This project's stack
+    was chosen to learn a specific insider list instead, which named <code>dbmate</code> explicitly: a
+    framework-independent tool that migrates via plain <code>.sql</code> files you write by hand, with a
+    <code>-- migrate:up</code> / <code>-- migrate:down</code> pair per file.
+  </p>
+  <p class="filename">db/migrations/20260909125433_create_headlines.sql</p>
+  <pre><code>-- migrate:up
+CREATE TABLE headlines (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    ticker TEXT NOT NULL,
+    title TEXT NOT NULL,
+    url TEXT NOT NULL,
+    category TEXT NOT NULL CHECK (category IN ('news', 'filing')),
+    provider TEXT NOT NULL,
+    raw_content TEXT,
+    published_at TIMESTAMPTZ NOT NULL,
+    fetched_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE UNIQUE INDEX headlines_url_idx ON headlines (url);
+CREATE INDEX headlines_ticker_published_at_idx ON headlines (ticker, published_at DESC);
+
+-- migrate:down
+DROP TABLE headlines;</code></pre>
+  <div class="callout">
+    <p>
+      The trade-off, honestly: Alembic keeps migrations and models from drifting apart automatically. With
+      <code>dbmate</code>, the SQL above and the Python model below have to be kept in sync by hand — real cost,
+      accepted for matching the actual insider stack list rather than substituting a more common tool.
+    </p>
+  </div>
+
+  <h2>Two different <code>DATABASE_URL</code>s, on purpose</h2>
+  <p>
+    <code>dbmate</code> runs on your host machine, not inside a container — so it needs
+    <code>postgres://ticker:ticker@localhost:5432/ticker?sslmode=disable</code>, reaching Postgres through the
+    port docker-compose maps to your Mac. The app itself needs
+    <code>postgresql+asyncpg://ticker:ticker@db:5432/ticker</code> — a different URL <em>scheme</em>
+    (<code>+asyncpg</code> tells SQLAlchemy which driver to use) and a different <em>host</em>
+    (<code>db</code>, the compose network name from lesson 5, not <code>localhost</code>).
+  </p>
+  <div class="sidenote-wrap">
+    <p>
+      Both are named <code>DATABASE_URL</code>, and that's not a collision: <code>docker-compose.yml</code> sets
+      the app's version directly in each service's <code>environment:</code> block, which always wins over
+      whatever's in <code>.env</code> for a container. <code>dbmate</code>, running on the host, reads
+      <code>.env</code>'s copy directly. Two tools, two audiences, one file, no actual conflict — but worth
+      knowing explicitly, because the symptom of missing this is a confusing "connection refused" that has
+      nothing to do with Postgres actually being down.
+    </p>
+    <span class="sidenote">Same shape as lesson 5's service-name-vs-localhost split, one layer up.</span>
+  </div>
+
+  <h2>SQLAlchemy 2.0's <code>Mapped</code> / <code>mapped_column</code> style</h2>
+  <p class="filename">backend/src/ticker_backend/models.py</p>
+  <pre><code>class Headline(Base):
+    __tablename__ = "headlines"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")
+    )
+    ticker: Mapped[str] = mapped_column(Text)
+    category: Mapped[Literal["news", "filing"]] = mapped_column(Text)
+    published_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    fetched_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )</code></pre>
+  <p>
+    <code>Mapped[X]</code> is the Python-side type; <code>mapped_column(...)</code> is the actual column
+    definition. Using <code>Literal["news", "filing"]</code> for <code>category</code> — rather than plain
+    <code>str</code> — gets a type checker to flag a typo'd category at write time, even though the column
+    itself is just <code>TEXT</code> underneath.
+  </p>
+
+  <h2>Why a server-generated UUID</h2>
+  <p>
+    <code>server_default=text("gen_random_uuid()")</code> means Postgres generates the id, not Python —
+    <code>gen_random_uuid()</code> has been built into Postgres since version 13, no extension required. The
+    database becomes the single source of truth for identity, and SQLAlchemy fetches the generated value back
+    via <code>RETURNING</code> after insert, so <code>headline.id</code> is populated immediately without a
+    second round trip.
+  </p>
+
+  <h2><code>category</code>: a <code>CHECK</code> constraint, not a native enum</h2>
+  <p>
+    Postgres has real enum types, but they're awkward to evolve — adding a new value means an
+    <code>ALTER TYPE</code>, and older Postgres versions couldn't even do that inside a transaction. A
+    <code>CHECK</code> constraint on a plain <code>TEXT</code> column is one line to change later
+    (<code>ALTER TABLE ... DROP CONSTRAINT ... ADD CONSTRAINT ...</code>), at the cost of the allowed values
+    living outside Python's type system — which the <code>Literal</code> hint above claws part of that back.
+  </p>
+
+  <h2>Verification: real output, not a hypothetical</h2>
+  <p>A real insert/query round trip against the running <code>api</code> container:</p>
+  <pre><code>&gt;&gt;&gt; Inserted: Headline(ticker='AAPL', category='news', title='Apple reports record quarter')
+&gt;&gt;&gt; Generated id: 407a8b34-6211-4e9e-8133-158efd1a2a2e
+&gt;&gt;&gt; fetched_at (server default): 2026-09-09 12:56:38.408636+00:00
+&gt;&gt;&gt; Queried back: Headline(ticker='AAPL', category='news', title='Apple reports record quarter')</code></pre>
+  <p>And the <code>CHECK</code> constraint actually holding, not just existing in the migration file:</p>
+  <pre><code>&gt;&gt;&gt; Rejected as expected: IntegrityError
+&lt;class 'asyncpg.exceptions.CheckViolationError'&gt;: new row for relation "headlines" violates
+check constraint "headlines_category_check"</code></pre>
+  <div class="callout">
+    <p>
+      One more small thing fixed while writing this lesson: <code>health.py</code> had its own separate
+      <code>create_async_engine(...)</code> for its one-line <code>SELECT 1</code>, duplicating the engine
+      <code>db.py</code> now provides for real ORM sessions. Consolidated onto one shared engine — verified by
+      hitting <code>/health</code> afterward and confirming <code>db: ok</code> still comes back.
+    </p>
+  </div>
+
+  <h2>Check your understanding</h2>
+
+  <div class="check">
+    <p class="q">Q1. <code>category</code> is a plain <code>TEXT</code> column. Why does inserting
+    <code>category='rumor'</code> fail at the database level rather than just at the Python/Pydantic level?</p>
+    <details>
+      <summary>Reveal answer</summary>
+      <p class="answer">The migration adds <code>CHECK (category IN ('news', 'filing'))</code> directly on the
+      column. Even a raw <code>INSERT</code> from <code>psql</code>, bypassing Python entirely, would be
+      rejected — the constraint lives in Postgres, not in the ORM.</p>
+    </details>
+  </div>
+
+  <div class="check">
+    <p class="q">Q2. You run <code>dbmate up</code> from your Mac's terminal. Which <code>DATABASE_URL</code>
+    does it use — the one in <code>docker-compose.yml</code>, or the one in <code>.env</code>?</p>
+    <details>
+      <summary>Reveal answer</summary>
+      <p class="answer"><code>.env</code>'s. <code>dbmate</code> runs on the host, outside docker-compose
+      entirely — it never sees <code>docker-compose.yml</code>'s <code>environment:</code> block, which only
+      applies to containers.</p>
+    </details>
+  </div>
+
+  <div class="source">
+    <p class="label">Primary sources</p>
+    <p>
+      <a href="https://docs.sqlalchemy.org/en/20/orm/declarative_tables.html">SQLAlchemy docs — declarative mapping with <code>Mapped</code></a> ·
+      <a href="https://github.com/amacneil/dbmate">dbmate — GitHub</a> ·
+      <a href="https://www.postgresql.org/docs/current/ddl-constraints.html#DDL-CONSTRAINTS-CHECK-CONSTRAINTS">Postgres docs — CHECK constraints</a>
+    </p>
+  </div>
+
+  <p class="ask">Anything unclear about the two-<code>DATABASE_URL</code> split, or the CHECK-vs-enum trade-off?
+  Ask your teacher (this agent).</p>
+
+  <div class="nav">
+    <a href="0005-docker-compose-wiring.html">← Lesson 5: How docker-compose wires it all together</a>
+    <span>Next → Lesson 7: The provider-fetch job (not yet written)</span>
+  </div>
+
+</div>
+</body>
+</html>
