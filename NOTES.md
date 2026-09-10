@@ -56,7 +56,9 @@ added after a post-exploration architecture review — see ADR 0004 and ADR 0005
    into one `Headline` shape, upserting by URL for dedup — written in a flat `providers.py` module and
    registered as an **ARQ job** in `worker`'s `WorkerSettings.functions`, per ADR 0004 (not a plain function
    called directly — deliberately routed through ARQ for hands-on job-enqueue practice). Verify by enqueueing
-   it directly (not yet from `/search`) and checking Postgres for real fetched rows.
+   it directly (not yet from `/search`) and checking Postgres for real fetched rows. ✅ built (plan:
+   `docs/plans/0007-*.md`) — also added a `companies` cache table (CIK lookup) beyond the original plan, and
+   found/fixed two real bugs live (EDGAR had no date filter; filing titles were redundant).
 8. **The `/api/search` endpoint** — enqueues lesson 7's job and awaits its result (10s timeout, per ADR 0004
    and spec 0001), maps the outcome to the success/partial/complete-failure status model, including the
    job-timeout case. `/health` also moves to `/api/health` here for consistency. Verify with `curl`, same style

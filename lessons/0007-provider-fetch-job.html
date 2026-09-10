@@ -1,0 +1,156 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 7 — The Provider-Fetch Job</title>
+<link rel="stylesheet" href="../assets/lesson.css">
+</head>
+<body>
+<div class="lesson">
+
+  <p class="eyebrow">Lesson 7 of 12 · ticker-news-analysis stack (feature arc)</p>
+  <h1>The provider-fetch job</h1>
+  <p class="subtitle">ARQ's actual job-enqueue pattern, two real bugs a live check caught that reading the code never would have, and a caching design built to never write garbage in the first place.</p>
+
+  <h2>The project's first real ARQ job</h2>
+  <p>
+    Every job so far has been <code>cron_jobs</code> — scheduled, nobody asks for it. This lesson adds
+    <code>functions</code>: work triggered on demand, by something enqueueing it.
+  </p>
+  <p class="filename">worker.py</p>
+  <pre><code>async def fetch_headlines_job(ctx: dict, ticker: str) -> dict:
+    return await fetch_and_persist_headlines(ticker)
+
+class WorkerSettings:
+    functions = [fetch_headlines_job]   # new
+    cron_jobs = [cron(heartbeat, second=set(range(0, 60, 5)))]</code></pre>
+  <p>
+    <code>fetch_headlines_job</code> is a thin wrapper — the real logic (<code>fetch_and_persist_headlines</code>,
+    in <code>providers.py</code>) takes no ARQ <code>ctx</code> at all. That's deliberate: a plain function is
+    callable directly from a test (lesson 9) without spinning up a worker, and it's the same function a future
+    scheduled watchlist feature will trigger via <code>cron_jobs</code> instead — one job, two different
+    triggers, per ADR 0004.
+  </p>
+  <p>Enqueueing and awaiting a result, for real, against the running stack:</p>
+  <pre><code>job = await redis.enqueue_job('fetch_headlines_job', 'AMZN')
+result = await job.result(timeout=90)
+# {'status': 'success', 'providers': {'edgar': 'ok', 'finnhub': 'ok'}, 'headline_count': 249}</code></pre>
+
+  <h2>Caching a CIK without ever writing a garbage row</h2>
+  <p>
+    Fetching EDGAR filings needs a company's CIK, and SEC only offers that as one giant file covering every
+    public company — expensive to re-fetch on every search. <code>companies</code> caches it. The interesting
+    part is <em>when</em> a row gets written:
+  </p>
+  <ol>
+    <li>SEC's mapping recognizes the ticker → row written immediately, <code>cik</code> and <code>company_name</code> both populated.</li>
+    <li>SEC's mapping doesn't recognize it, but Finnhub still returns real headlines → row written <em>now</em>, with <code>cik</code>/<code>company_name</code> null — a real, permanent state, not a placeholder.</li>
+    <li>Neither provider returns anything → no row, ever.</li>
+  </ol>
+  <p>
+    Verified live: searching a nonsense ticker (<code>ZZZQX</code>) created <strong>zero</strong> rows in either
+    <code>companies</code> or <code>headlines</code>. No cleanup job needed for fake/typo'd tickers — the
+    sequencing means nothing bad is ever written, rather than writing first and pruning later.
+  </p>
+
+  <h2>Two bugs a live check caught that reading the code wouldn't have</h2>
+  <p>
+    Both of these passed a code review in my own head. Neither survived contact with a real API response.
+  </p>
+  <div class="callout">
+    <p>
+      <strong>Bug 1 — no date filter on EDGAR filings.</strong> EDGAR's "recent filings" feed returns a
+      company's most recent filings of <em>any age</em> — up to ~1000, spanning years. Filtering by form type
+      alone isn't filtering by time. First real run against AAPL returned <strong>159 filings going back to
+      2015</strong>, silently violating spec 0001's "past week" requirement. Fixed with the same kind of cutoff
+      Finnhub's <code>from</code>/<code>to</code> params already handled — just missing on the EDGAR side.
+    </p>
+  </div>
+  <div class="callout">
+    <p>
+      <strong>Bug 2 — useless filing titles.</strong> The plan assumed <code>primaryDocDescription</code> would
+      give a real description. Verified live, it just restates the form type: <code>"10-Q: 10-Q"</code>,
+      <code>"8-K: 8-K"</code>. Fixed with an explicit lookup table
+      (<code>"8-K" → "Current Report (Material Event)"</code>) instead of trusting the field name's implication.
+    </p>
+  </div>
+  <p>Confirmed fixed, against a real AMZN 8-K filed the day before this lesson was written:</p>
+  <pre><code>title: "8-K: Current Report (Material Event)"
+url:   https://www.sec.gov/Archives/edgar/data/1018724/000101872426000036/amzn-20260908.htm
+published_at: 2026-09-09 20:28:21+00</code></pre>
+
+  <h2>Provider vs. Outlet, for real</h2>
+  <p>
+    Finnhub's own response has a <code>source</code> field — the actual original publisher (<code>"Yahoo"</code>,
+    <code>"ChartMill"</code>) — separate from Finnhub itself, which is just the API being called. This is exactly
+    the <code>Provider</code>/<code>Outlet</code> split from <code>CONTEXT.md</code>, confirmed against a real
+    response rather than designed in the abstract:
+  </p>
+  <pre><code>{"provider": "finnhub", "outlet": "Yahoo", "title": "Apple's Foldable Duo Represents ...",
+ "summary": "Apple (AAPL) new foldable iPhone represents a \"notable form-..."}</code></pre>
+
+  <h2>Dependency injection, applied without a framework</h2>
+  <p>
+    Every fetch function takes its externals as parameters — <code>client: httpx.AsyncClient</code>,
+    <code>session_factory=async_session_factory</code> — instead of importing them. No FastAPI, no
+    <code>Depends()</code>, since this runs inside an ARQ job, not a request. Same principle, applied by hand:
+    lesson 9's tests will pass in a mocked client and a test-database session factory, with zero changes to the
+    functions themselves.
+  </p>
+
+  <h2>A judgment call worth naming, not hiding</h2>
+  <p>
+    Finnhub returns <code>403 Forbidden</code> — not an empty list — for a ticker it doesn't recognize, with the
+    message <code>"You don't have access to this resource"</code>. That phrasing is genuinely ambiguous: it
+    reads like a permissions problem, which it could also legitimately be (a revoked key, a plan restriction),
+    not just "this ticker doesn't exist." Rather than guess, a 403 stays classified as a real
+    <code>"error"</code> — the honest cost is a plain typo shows <code>partial_failure</code> instead of a
+    cleaner "not found," but the alternative risks silently hiding a genuine access problem as if it were just
+    an empty result.
+  </p>
+
+  <h2>Check your understanding</h2>
+
+  <div class="check">
+    <p class="q">Q1. Why does <code>fetch_and_persist_headlines</code> take no ARQ <code>ctx</code> argument,
+    even though it only ever runs as a job?</p>
+    <details>
+      <summary>Reveal answer</summary>
+      <p class="answer">So it's callable directly — from a test with no worker running (lesson 9), or later from
+      a <code>cron_jobs</code> entry for the watchlist feature. <code>worker.py</code>'s
+      <code>fetch_headlines_job</code> is the only thing that knows ARQ exists at all.</p>
+    </details>
+  </div>
+
+  <div class="check">
+    <p class="q">Q2. A ticker is real and Finnhub has news for it, but SEC's mapping doesn't recognize it. What
+    ends up in <code>companies</code>?</p>
+    <details>
+      <summary>Reveal answer</summary>
+      <p class="answer">A row with <code>cik</code> and <code>company_name</code> both null — written only
+      because Finnhub returned real headlines that needed somewhere to point via the foreign key. That's a
+      legitimate permanent state, not a bug to fix later.</p>
+    </details>
+  </div>
+
+  <div class="source">
+    <p class="label">Primary sources</p>
+    <p>
+      <a href="https://www.sec.gov/os/webmaster-faq#developers">SEC EDGAR — developer/API FAQ</a> ·
+      <a href="https://finnhub.io/docs/api/company-news">Finnhub docs — Company News</a> ·
+      <a href="https://arq-docs.helpmanual.io/">ARQ docs — jobs and functions</a>
+    </p>
+  </div>
+
+  <p class="ask">Anything unclear about the companies-caching sequencing, or why the 403 stays an error? Ask
+  your teacher (this agent).</p>
+
+  <div class="nav">
+    <a href="0006-headline-model-and-migration.html">← Lesson 6: The Headline model and migration</a>
+    <span>Next → Lesson 8: The /api/search endpoint (not yet written)</span>
+  </div>
+
+</div>
+</body>
+</html>
