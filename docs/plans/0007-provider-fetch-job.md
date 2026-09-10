@@ -27,16 +27,24 @@ that lesson 9 can call and test directly without spinning up a worker or a serve
   than letting a malformed response crash silently — the orchestrator (next) decides what a failure here means.
 - `fetch_finnhub_news(client: httpx.AsyncClient, ticker: str) -> list[dict]` — same shape, calls Finnhub's
   company-news endpoint with `settings.finnhub_api_key`, `category="news"`, `provider="finnhub"`.
-- `fetch_and_persist_headlines(ticker: str) -> dict` — the orchestrator spec 0001 and ADR 0004 describe:
+- `fetch_and_persist_headlines(ticker: str, session_factory=async_session_factory) -> dict` — the orchestrator
+  spec 0001 and ADR 0004 describe:
   - Opens one `httpx.AsyncClient`, runs both fetch functions via `asyncio.gather(..., return_exceptions=True)`
     — concurrent, and one provider's exception doesn't cancel the other's in-flight call (this is *why*
     `return_exceptions=True` matters here, not just `gather` alone).
   - For each provider that succeeded: upserts its normalized rows into `headlines` via SQLAlchemy's
     `postgresql.insert(...).on_conflict_do_update(index_elements=["url"], ...)` — the actual dedup-by-URL
-    mechanism spec 0001 requires, using `db.py`'s shared `async_session_factory`.
+    mechanism spec 0001 requires.
   - Returns `{"status": "success" | "partial_failure" | "complete_failure", "providers": {"edgar": "ok"|"error",
     "finnhub": "ok"|"error"}, "headline_count": N}` — this is the exact shape lesson 8's endpoint will read to
     build its success/partial/complete-failure response.
+
+  **`session_factory` is a parameter with a default, not a direct import of `db.py`'s
+  `async_session_factory`.** Same reasoning as `Depends()` in FastAPI routes, applied where `Depends()` itself
+  doesn't reach — there's no FastAPI request cycle inside an ARQ job. Real callers (the worker wrapper below)
+  never pass it explicitly and get the real database; lesson 9's tests pass a test-database session factory
+  instead, without needing to monkeypatch an import. This is dependency injection without a framework — just
+  "accept it as an argument" instead of "reach out and import a global."
 
 **4. `worker.py` gets a thin ARQ wrapper**, not the business logic itself:
 ```python
@@ -48,9 +56,10 @@ class WorkerSettings:
     cron_jobs = [cron(heartbeat, second=set(range(0, 60, 5)))]
     redis_settings = RedisSettings.from_dsn(settings.redis_url)
 ```
-Keeping `fetch_and_persist_headlines` itself free of `ctx` is deliberate — it's what makes it callable directly
-from a test (lesson 9) or, later, from a `cron_jobs` entry for the future watchlist feature, without any ARQ
-plumbing in the way.
+Keeping `fetch_and_persist_headlines` itself free of `ctx`, and taking `session_factory` as an injectable
+parameter rather than importing one, is what makes it callable directly from a test (lesson 9) or, later, from
+a `cron_jobs` entry for the future watchlist feature — without any ARQ plumbing, or a hardcoded database, in
+the way.
 
 ## Verification (before moving to lesson 8)
 
