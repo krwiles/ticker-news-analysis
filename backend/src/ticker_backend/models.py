@@ -18,6 +18,26 @@ from sqlalchemy.orm import Mapped, mapped_column
 from ticker_backend.db import Base
 
 
+class Company(Base):
+    """The persisted record a Ticker identifies — see CONTEXT.md.
+
+    `cik`/`company_name` are nullable and that's deliberate: a row only ever
+    gets created once some provider has confirmed the ticker is real (see
+    providers.py's sequencing), and a null cik means "Finnhub covers this
+    ticker but SEC's own mapping doesn't" — a real, permanent state, not a
+    placeholder waiting to be backfilled.
+    """
+
+    __tablename__ = "companies"
+
+    ticker: Mapped[str] = mapped_column(Text, primary_key=True)
+    cik: Mapped[str | None] = mapped_column(Text, default=None)
+    company_name: Mapped[str | None] = mapped_column(Text, default=None)
+
+    def __repr__(self) -> str:
+        return f"Company(ticker={self.ticker!r}, cik={self.cik!r}, company_name={self.company_name!r})"
+
+
 class Headline(Base):
     """One piece of tracked news content about a Ticker — see CONTEXT.md.
 
@@ -36,6 +56,8 @@ class Headline(Base):
     url: Mapped[str] = mapped_column(Text, unique=True)
     category: Mapped[Literal["news", "filing"]] = mapped_column(Text)
     provider: Mapped[str] = mapped_column(Text)
+    outlet: Mapped[str | None] = mapped_column(Text, default=None)
+    summary: Mapped[str | None] = mapped_column(Text, default=None)
     raw_content: Mapped[str | None] = mapped_column(Text, default=None)
     published_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     fetched_at: Mapped[datetime] = mapped_column(

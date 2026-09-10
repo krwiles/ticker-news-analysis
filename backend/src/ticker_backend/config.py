@@ -17,6 +17,10 @@ class Settings(BaseSettings):
     # page served by the ui container (both are localhost, different ports).
     # Only this one origin is allowed in — see the CORS setup in main.py.
     ui_origin: str = "http://localhost:3000"
+    finnhub_api_key: str = ""
+    # SEC requires a descriptive User-Agent identifying the app + a contact
+    # email on every request — not a secret, just a compliance string.
+    sec_edgar_user_agent: str = "TickerNewsAnalysis contact@example.com"
 
 
 settings = Settings()

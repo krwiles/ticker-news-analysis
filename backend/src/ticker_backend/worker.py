@@ -1,8 +1,8 @@
 """ARQ worker entrypoint (`worker` mode — see config.app_mode).
 
-Runs no business jobs yet. The only thing it does is prove it's alive by
-writing a heartbeat to Redis every 5 seconds, which the api container's
-/health endpoint reads to report worker status on the skeleton page.
+Proves it's alive by writing a heartbeat to Redis every 5 seconds (read by
+the api container's /health endpoint), and — as of lesson 7 — runs the
+provider-fetch job triggered by /api/search (see ADR 0004).
 """
 
 import time
@@ -14,6 +14,7 @@ from arq.connections import RedisSettings
 from ticker_backend.config import settings
 from ticker_backend.health import WORKER_HEARTBEAT_KEY
 from ticker_backend.logging import configure_logging
+from ticker_backend.providers import fetch_and_persist_headlines
 
 configure_logging()
 log = structlog.get_logger()
@@ -24,6 +25,14 @@ async def heartbeat(ctx: dict) -> None:
     log.info("worker.heartbeat")
 
 
+async def fetch_headlines_job(ctx: dict, ticker: str) -> dict:
+    """Thin ARQ wrapper — the actual logic stays framework-agnostic in
+    providers.py so it's callable directly from a test (lesson 9) or, later,
+    from a cron_jobs entry for the future watchlist feature."""
+    return await fetch_and_persist_headlines(ticker)
+
+
 class WorkerSettings:
+    functions = [fetch_headlines_job]
     cron_jobs = [cron(heartbeat, second=set(range(0, 60, 5)))]
     redis_settings = RedisSettings.from_dsn(settings.redis_url)
