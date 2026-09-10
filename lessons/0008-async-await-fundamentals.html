@@ -1,0 +1,174 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 8 — Async/Await, Python and TypeScript</title>
+<link rel="stylesheet" href="../assets/lesson.css">
+</head>
+<body>
+<div class="lesson">
+
+  <p class="eyebrow">Lesson 8 of 13 · ticker-news-analysis stack (feature arc)</p>
+  <h1>Async/await, Python and TypeScript side by side</h1>
+  <p class="subtitle">You've been writing this since lesson 2. Here's why it's shaped the way it is — and the one place Python and JS quietly disagree.</p>
+
+  <div class="callout">
+    <p>
+      Inserted out of order on purpose: this underpins <code>main.py</code>, <code>health.py</code>,
+      <code>providers.py</code>'s <code>asyncio.gather</code>, and the frontend's own <code>fetch</code> calls —
+      all already written before this lesson existed. Better late than never; nothing here changes what you've
+      already built, it explains why it works.
+    </p>
+  </div>
+
+  <h2>Calling an async function does not run it — in Python</h2>
+  <p>
+    This is the single biggest gotcha for anyone coming from JavaScript, and it's worth being precise:
+  </p>
+  <pre><code># Python
+async def check_db() -> dict:
+    print("running!")
+    ...
+
+coro = check_db()   # nothing printed yet — this is just a coroutine object
+await coro          # NOW it actually runs</code></pre>
+  <pre><code>// TypeScript
+async function checkDb(): Promise&lt;object&gt; {
+    console.log("running!");
+    ...
+}
+
+const p = checkDb(); // "running!" already printed — JS starts executing
+                      // synchronously up to the first await, THEN returns
+                      // a pending Promise
+await p;</code></pre>
+  <p>
+    Same keywords, genuinely different semantics. A Python coroutine is inert until something drives it —
+    <code>await</code>, or scheduling it on the event loop. A JS <code>async function</code> starts running
+    immediately, like any other function call, and only <em>pauses</em> at its first <code>await</code>. Reading
+    Python code with JS intuition here will give you the wrong mental model of execution order.
+  </p>
+
+  <h2>The event loop: one thread, cooperative switching</h2>
+  <p>
+    Both languages are single-threaded for this — <code>asyncio</code> doesn't give you real parallelism, and
+    neither does JS's event loop. What actually happens: the loop runs one piece of code until it hits an
+    <code>await</code>, then switches to whatever else is ready, and comes back later when the awaited thing
+    resolves. It's cooperative multitasking on one thread, not threads or CPU cores doing work simultaneously.
+  </p>
+  <div class="sidenote-wrap">
+    <p>
+      One real difference: JS's event loop is baked into the runtime and is just always running — you never
+      "start" it. Python's is a real object you (usually) start explicitly, though FastAPI/Uvicorn and ARQ both
+      do this for you — you've never had to call <code>asyncio.run()</code> yourself in this project.
+    </p>
+    <span class="sidenote">This is why <code>main.py</code> and <code>worker.py</code> never mention an event
+    loop directly — the frameworks own that part.</span>
+  </div>
+
+  <h2>Where this actually helps: I/O-bound, not CPU-bound</h2>
+  <p>
+    You've already built the textbook example. Lesson 7's <code>providers.py</code>:
+  </p>
+  <pre><code>edgar_result, finnhub_result = await asyncio.gather(
+    fetch_edgar_filings(client, company.cik, ticker),
+    fetch_finnhub_news(client, ticker),
+    return_exceptions=True,
+)</code></pre>
+  <p>
+    Both calls spend almost all their time <em>waiting</em> on a network response — the CPU is idle, not busy.
+    That's exactly when async pays off: while one request waits, the loop runs the other. The direct TypeScript
+    equivalent is <code>Promise.all</code>:
+  </p>
+  <pre><code>const [edgarResult, finnhubResult] = await Promise.all([
+    fetchEdgarFilings(client, company.cik, ticker),
+    fetchFinnhubNews(client, ticker),
+]);</code></pre>
+  <div class="callout">
+    <p>
+      <strong>Async does nothing for CPU-bound work, in either language.</strong> If a function is actually
+      crunching — a tight loop, image processing, heavy computation — there's no "waiting" for the loop to fill
+      with other work. The single thread is just busy the whole time, `await` or not. Python's answer for that
+      is <code>multiprocessing</code> (separate processes, side-stepping the GIL below); Node's is
+      <code>worker_threads</code> (separate isolated contexts). Neither is <code>asyncio</code>/plain
+      <code>async</code>/<code>await</code>.
+    </p>
+  </div>
+
+  <h2>Why <code>await</code> is contagious</h2>
+  <p>
+    Once one function needs to <code>await</code> something, its caller generally has to be <code>async</code>
+    too, all the way up. It's why <code>main.py</code>'s path operations, <code>health.py</code>'s three checks,
+    and now every function in <code>providers.py</code> are all <code>async def</code> — the chain starts at one
+    real I/O wait (a DB query, an HTTP call) and propagates upward through every caller. Same in TypeScript:
+    <code>fetchHealth</code> in <code>health.ts</code> is <code>async</code> specifically because it
+    <code>await</code>s <code>fetch(...)</code>, and <code>StatusPage.tsx</code>'s <code>poll</code> function is
+    <code>async</code> because it awaits <code>fetchHealth()</code>.
+  </p>
+
+  <h2>The one real divergence: why does Python even have this?</h2>
+  <p>
+    JS has always been single-threaded in its core execution model — <code>async</code>/<code>await</code> is
+    just cleaner syntax over what <code>Promise</code>/<code>.then()</code> already did, with no alternative
+    story for concurrency needed. Python is different: Python <em>does</em> have real OS threads
+    (<code>threading</code>), but the GIL (Global Interpreter Lock) means only one thread ever executes Python
+    bytecode at a time regardless of how many threads you spawn — so threads don't actually help with
+    CPU-bound work, and they're relatively heavyweight for I/O-bound work too. <code>asyncio</code> exists as a
+    <em>cheaper</em> way to handle many concurrent I/O waits on one thread, without needing OS threads at all.
+    JS never needed that argument — it just never had real shared-memory threads in the first place.
+  </p>
+
+  <h2>When not to reach for async — a checklist</h2>
+  <ul>
+    <li>Is this waiting on something external (network, disk, a database)? → async genuinely helps.</li>
+    <li>Is this crunching numbers or looping over large data in memory? → async does nothing; the thread is
+      busy, not idle. Reach for multiprocessing (Python) or worker threads (Node) instead.</li>
+    <li>Is this a one-off script with no concurrent work happening? → plain synchronous code is simpler and
+      loses nothing — async has a real readability/complexity cost when there's nothing to overlap.</li>
+  </ul>
+
+  <h2>Check your understanding</h2>
+
+  <div class="check">
+    <p class="q">Q1. In Python, <code>result = fetch_finnhub_news(client, ticker)</code> (no <code>await</code>)
+    — has the HTTP request been sent yet?</p>
+    <details>
+      <summary>Reveal answer</summary>
+      <p class="answer">No. <code>result</code> is just a coroutine object; none of the function's code has run.
+      The equivalent line in TypeScript <em>would</em> have already started executing up to its first
+      <code>await</code> — this is the core Python/JS divergence from this lesson.</p>
+    </details>
+  </div>
+
+  <div class="check">
+    <p class="q">Q2. Would rewriting <code>fetch_edgar_filings</code> to do heavy in-memory JSON parsing of a
+    huge response with <code>async</code>/<code>await</code> make that parsing step faster?</p>
+    <details>
+      <summary>Reveal answer</summary>
+      <p class="answer">No. Parsing is CPU-bound — the thread is busy computing, not waiting on anything. Async
+      only overlaps <em>waiting</em> time; it can't parallelize work that's actually using the CPU the whole
+      time.</p>
+    </details>
+  </div>
+
+  <div class="source">
+    <p class="label">Primary sources</p>
+    <p>
+      <a href="https://docs.python.org/3/library/asyncio-task.html">Python docs — Coroutines and Tasks</a> ·
+      <a href="https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Statements/async_function">MDN — async function</a> ·
+      <a href="https://docs.python.org/3/glossary.html#term-global-interpreter-lock">Python docs — Global Interpreter Lock</a>
+    </p>
+  </div>
+
+  <p class="ask">Anything unclear about the coroutine-vs-Promise timing difference, or the GIL's role? Ask your
+  teacher (this agent).</p>
+
+  <div class="nav">
+    <a href="0007-provider-fetch-job.html">← Lesson 7: The provider-fetch job</a>
+    <span>Next → Lesson 9: The /api/search endpoint (not yet written)</span>
+  </div>
+
+</div>
+</body>
+</html>

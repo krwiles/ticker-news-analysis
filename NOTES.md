@@ -42,10 +42,11 @@ completion — see `docs/specs/0001-first-feature.md` ("News Search"), `CONTEXT.
 modeled directly on that spec, not invented placeholders.
 
 ### Arc 2 — applying it to a real feature (modeled on `docs/specs/0001-first-feature.md`)
-Broken into smaller slices than originally planned (was 3 lessons, now 7) — per-lesson rhythm mirrors arc 1's:
+Broken into smaller slices than originally planned (was 3 lessons, now 8) — per-lesson rhythm mirrors arc 1's:
 a short concept intro immediately before building that slice, then verify it against the live stack before
-moving on. Each lesson should end with something real and pokeable, not just theory. Lesson 9 (testing) was
-added after a post-exploration architecture review — see ADR 0004 and ADR 0005.
+moving on. Each lesson should end with something real and pokeable, not just theory. Lesson 10 (testing) was
+added after a post-exploration architecture review — see ADR 0004 and ADR 0005. Lesson 8 (async/await
+fundamentals) was added after lesson 7, once a real teaching gap surfaced.
 
 6. **The `Headline` model + migration** — SQLAlchemy 2.x async ORM mapped onto the entity `CONTEXT.md` already
    defines (ticker, title, url, raw content, `category`, published timestamp; `sentiment` fields nullable for
@@ -59,22 +60,33 @@ added after a post-exploration architecture review — see ADR 0004 and ADR 0005
    it directly (not yet from `/search`) and checking Postgres for real fetched rows. ✅ built (plan:
    `docs/plans/0007-*.md`) — also added a `companies` cache table (CIK lookup) beyond the original plan, and
    found/fixed two real bugs live (EDGAR had no date filter; filing titles were redundant).
-8. **The `/api/search` endpoint** — enqueues lesson 7's job and awaits its result (10s timeout, per ADR 0004
+8. **Async/await fundamentals, Python and TypeScript side by side** — inserted after lesson 7 (2026-09-10):
+   `async`/`await` has been load-bearing since lesson 2 (every FastAPI route, `asyncio.gather` in lesson 7,
+   `AsyncSession`, `httpx.AsyncClient`) with no dedicated lesson on *why* it's shaped the way it is — a real
+   gap, caught late rather than not at all. Coroutines vs. calling a function (`async def` does nothing until
+   `await`ed), the event loop (single-threaded, cooperative — not real parallelism), I/O-bound vs. CPU-bound
+   (lesson 7's `asyncio.gather` as the concrete already-built example of where this genuinely helps; async does
+   *nothing* for CPU-bound work), why `await` is contagious up the call stack. Taught against JS `Promise`/
+   `async function` (already known from Angular/TypeScript) rather than from zero, same translation-table
+   instinct as React — including the one real divergence worth naming: Python's GIL is part of *why*
+   `asyncio` exists (a cheap alternative to OS threads for I/O-bound work), where JS's single-threaded model
+   has no GIL story at all. Ends with a concrete "when not to reach for async" checklist. ✅ built.
+9. **The `/api/search` endpoint** — enqueues lesson 7's job and awaits its result (10s timeout, per ADR 0004
    and spec 0001), maps the outcome to the success/partial/complete-failure status model, including the
    job-timeout case. `/health` also moves to `/api/health` here for consistency. Verify with `curl`, same style
    as lesson 2.
-9. **Testing the search feature** — `pytest` + `pytest-asyncio`, `httpx`'s test client, `respx` for mocking
-   EDGAR/Finnhub, a dedicated `ticker_test` database (ADR 0005). Unit tests for the Eastern-time/DST today-vs-
-   recent boundary and the dedup/CHECK-constraint behavior; an integration test for `/api/search` end to end
-   with mocked providers; failure-path tests (partial, complete, job-timeout). Verify by watching a test fail
-   when you deliberately break the logic it covers, then pass again once fixed — proof the test is meaningful,
-   not just green by accident.
-10. **React fundamentals, from Angular** — components, JSX, hooks (`useState`/`useEffect`) mapped via the
-    translation table above, built against the search bar + a first pass at rendering results from lesson 8's
+10. **Testing the search feature** — `pytest` + `pytest-asyncio`, `httpx`'s test client, `respx` for mocking
+    EDGAR/Finnhub, a dedicated `ticker_test` database (ADR 0005). Unit tests for the Eastern-time/DST today-vs-
+    recent boundary and the dedup/CHECK-constraint behavior; an integration test for `/api/search` end to end
+    with mocked providers; failure-path tests (partial, complete, job-timeout). Verify by watching a test fail
+    when you deliberately break the logic it covers, then pass again once fixed — proof the test is meaningful,
+    not just green by accident.
+11. **React fundamentals, from Angular** — components, JSX, hooks (`useState`/`useEffect`) mapped via the
+    translation table above, built against the search bar + a first pass at rendering results from lesson 9's
     endpoint.
-11. **React Router + how the UI actually works** — the data-loading pattern, router setup in `App.tsx`, tying
-    back to lesson 3's `/health` endpoint and lesson 8's new endpoint from the frontend side.
-12. **Today/Recent, category badges, and the Refresh button** — the UI polish that makes the feature match the
+12. **React Router + how the UI actually works** — the data-loading pattern, router setup in `App.tsx`, tying
+    back to lesson 3's `/health` endpoint and lesson 9's new endpoint from the frontend side.
+13. **Today/Recent, category badges, and the Refresh button** — the UI polish that makes the feature match the
     spec end to end: two recency lists, a badge per entry, a manual re-fetch, and the success/partial/failure
     status display. Capstone of arc 2 — after this, spec 0001 is fully built, not just modeled.
 
