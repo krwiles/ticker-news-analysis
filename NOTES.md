@@ -74,7 +74,10 @@ fundamentals) was added after lesson 7, once a real teaching gap surfaced.
 9. **The `/api/search` endpoint** — enqueues lesson 7's job and awaits its result (10s timeout, per ADR 0004
    and spec 0001), maps the outcome to the success/partial/complete-failure status model, including the
    job-timeout case. `/health` also moves to `/api/health` here for consistency. Verify with `curl`, same style
-   as lesson 2.
+   as lesson 2. ✅ built (plan: `docs/plans/0009-*.md`) — real bug found live: a plain default parameter
+   (`session_factory=async_session_factory`, fine in `providers.py`) crashes every request as a FastAPI route
+   parameter, since FastAPI introspects those; needed `Depends()` instead. Verified the worker-down case for
+   real (stopped the container) — graceful fallback to existing Postgres data confirmed, not just assumed.
 10. **Testing the search feature** — `pytest` + `pytest-asyncio`, `httpx`'s test client, `respx` for mocking
     EDGAR/Finnhub, a dedicated `ticker_test` database (ADR 0005). Unit tests for the Eastern-time/DST today-vs-
     recent boundary and the dedup/CHECK-constraint behavior; an integration test for `/api/search` end to end

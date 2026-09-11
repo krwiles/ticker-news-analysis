@@ -1,0 +1,141 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 9 — The /api/search Endpoint</title>
+<link rel="stylesheet" href="../assets/lesson.css">
+</head>
+<body>
+<div class="lesson">
+
+  <p class="eyebrow">Lesson 9 of 13 · ticker-news-analysis stack (feature arc)</p>
+  <h1>The <code>/api/search</code> endpoint</h1>
+  <p class="subtitle">Two steps, not one — and the FastAPI-specific gotcha that broke every single request until it was found live.</p>
+
+  <h2>Not one step — enqueue, <em>then</em> query</h2>
+  <p>
+    Easy to under-specify: lesson 7's job result is just a summary
+    (<code>{"status", "providers", "headline_count"}</code>) — it never hands back the actual headlines, because
+    it already persisted them. So this endpoint does two genuinely separate things in sequence:
+  </p>
+  <ol>
+    <li>Enqueue and await the fetch job — makes sure Postgres has fresh data for this ticker.</li>
+    <li>Query Postgres directly for that ticker's past week, split it, and shape the response.</li>
+  </ol>
+  <p>
+    A timeout in step 1 doesn't skip step 2 — the endpoint still returns whatever Postgres already has (from an
+    earlier successful search, say), while honestly reporting <code>complete_failure</code>. Graceful
+    degradation, not silence. Verified live by stopping the <code>worker</code> container entirely:
+  </p>
+  <pre><code>status: complete_failure  providers: {}  today: 52  recent: 192</code></pre>
+  <p>Real, existing data still came back — nothing was lost just because the fetch step failed.</p>
+
+  <h2>FastAPI's <code>Depends()</code>, for real this time</h2>
+  <p>
+    <code>Depends()</code> has come up in conversation for a while; this is the first lesson that actually uses
+    it. The ARQ Redis pool is created once, at app startup, the same lifetime reasoning as <code>db.py</code>'s
+    <code>engine</code>:
+  </p>
+  <pre><code>@asynccontextmanager
+async def api_lifespan(app: FastAPI):
+    app.state.arq_redis = await create_pool(RedisSettings.from_dsn(settings.redis_url))
+    yield
+    await app.state.arq_redis.aclose()
+
+async def get_arq_redis(request: Request) -> ArqRedis:
+    return request.app.state.arq_redis
+
+@router.get("/api/search")
+async def search(ticker: str, arq_redis: ArqRedis = Depends(get_arq_redis), ...):</code></pre>
+  <p>
+    Only wired in for <code>api</code> mode — <code>ui</code> never enqueues a job, so it has no reason to hold
+    a Redis pool open for its whole process lifetime.
+  </p>
+
+  <div class="callout">
+    <p>
+      <strong>A real bug, live, on the very first request.</strong> <code>providers.py</code>'s functions take
+      <code>session_factory=async_session_factory</code> as a plain default parameter — that's fine, because
+      nothing inspects them. This endpoint copied that pattern and every request crashed:
+      <code>TypeError: cannot pickle 'module' object</code>. The reason: a FastAPI <em>path operation</em>'s
+      parameters are actively introspected by the framework itself — to validate the request and build the
+      OpenAPI docs. A raw <code>async_sessionmaker</code> object as a bare default isn't something FastAPI knows
+      how to treat as request data, and it broke trying to deep-copy it. The fix is the same
+      <code>Depends()</code> pattern as the Redis pool above — a tiny function returning the value, not the
+      value itself as a default:
+    </p>
+  </div>
+  <pre><code>def get_session_factory():
+    return async_session_factory
+
+async def search(..., session_factory = Depends(get_session_factory)):</code></pre>
+  <p>
+    The rule this leaves behind: <strong>plain-default dependency injection only works on functions nothing
+    inspects.</strong> <code>providers.py</code>'s functions qualify — they're just called directly. A FastAPI
+    route never does — <code>Depends()</code> is mandatory there, not a style preference.
+  </p>
+
+  <h2>The Today/Recent split — same injection principle, applied on purpose this time</h2>
+  <pre><code>def split_today_recent(headlines: list[Headline], now: datetime) -> tuple[list[dict], list[dict]]:
+    today_date = now.astimezone(EASTERN).date()
+    ...</code></pre>
+  <p>
+    <code>now</code> is a parameter here too — not <code>datetime.now()</code> called inside the function. Same
+    reasoning as <code>client</code>/<code>session_factory</code> in lesson 7: lesson 10's tests need to check
+    the Eastern-midnight/DST boundary against a fixed fake time, not wait for real midnight to arrive.
+  </p>
+
+  <h2>A quieter bug: an empty error message</h2>
+  <p>
+    Verified during the worker-down test above: the log line for a failed job read
+    <code>{"error": "", ...}</code> — blank. <code>asyncio.TimeoutError()</code> carries no message at all, so
+    <code>str(exc)</code> is just an empty string. The fix records the exception's own type alongside its
+    (possibly empty) message: <code>f"{type(exc).__name__}: {exc}"</code> — now a timeout is visibly a timeout in
+    the logs, not just a blank field someone has to guess about later.
+  </p>
+
+  <h2>Check your understanding</h2>
+
+  <div class="check">
+    <p class="q">Q1. Why does <code>session_factory=async_session_factory</code> work fine in
+    <code>providers.py</code> but crash as a FastAPI route parameter?</p>
+    <details>
+      <summary>Reveal answer</summary>
+      <p class="answer"><code>providers.py</code>'s functions are called directly — nothing inspects their
+      signatures. FastAPI actively inspects every path-operation parameter to build request validation and
+      OpenAPI docs; a non-JSON-friendly object as a bare default breaks that. <code>Depends()</code> tells
+      FastAPI "don't treat this as request data."</p>
+    </details>
+  </div>
+
+  <div class="check">
+    <p class="q">Q2. The fetch job times out. Does <code>/api/search</code> return an empty response?</p>
+    <details>
+      <summary>Reveal answer</summary>
+      <p class="answer">No — it still runs step 2 (the Postgres query) regardless, and returns whatever's
+      already there, with <code>status: "complete_failure"</code> reflecting the job problem honestly rather
+      than hiding it.</p>
+    </details>
+  </div>
+
+  <div class="source">
+    <p class="label">Primary sources</p>
+    <p>
+      <a href="https://fastapi.tiangolo.com/tutorial/dependencies/">FastAPI docs — Dependencies</a> ·
+      <a href="https://fastapi.tiangolo.com/advanced/events/">FastAPI docs — Lifespan events</a> ·
+      <a href="https://arq-docs.helpmanual.io/#jobs">ARQ docs — Job results and timeouts</a>
+    </p>
+  </div>
+
+  <p class="ask">Anything unclear about why <code>Depends()</code> is mandatory here but optional in
+  <code>providers.py</code>? Ask your teacher (this agent).</p>
+
+  <div class="nav">
+    <a href="0008-async-await-fundamentals.html">← Lesson 8: Async/await fundamentals</a>
+    <span>Next → Lesson 10: Testing the search feature (not yet written)</span>
+  </div>
+
+</div>
+</body>
+</html>
