@@ -60,7 +60,7 @@ async def check_worker(client: Redis | None) -> dict:
     return {"status": "ok", "age_seconds": age_seconds}
 
 
-@router.get("/health")
+@router.get("/api/health")
 async def health() -> dict:
     db_status = await check_db()
     redis_status, redis_client = await check_redis()

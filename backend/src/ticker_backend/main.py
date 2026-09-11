@@ -12,6 +12,8 @@ from ticker_backend.config import settings
 from ticker_backend.health import router as health_router
 from ticker_backend.health import ui_router as ui_health_router
 from ticker_backend.logging import configure_logging
+from ticker_backend.search import api_lifespan
+from ticker_backend.search import router as search_router
 
 configure_logging()
 log = structlog.get_logger()
@@ -20,7 +22,10 @@ STATIC_DIR = Path(__file__).resolve().parent.parent.parent / "static"
 
 
 def create_app() -> FastAPI:
-    app = FastAPI(title="ticker-news-analysis", version="0.1.0")
+    # Only api mode enqueues jobs -- ui has no reason to hold an ARQ Redis
+    # pool open for its whole lifetime.
+    lifespan = api_lifespan if settings.app_mode == "api" else None
+    app = FastAPI(title="ticker-news-analysis", version="0.1.0", lifespan=lifespan)
 
     # Explicit three-way match, not `if api ... else ui`: `worker` mode should
     # never reach this function at all — it's selected entirely by
@@ -45,6 +50,7 @@ def create_app() -> FastAPI:
                 allow_headers=["*"],
             )
             app.include_router(health_router)
+            app.include_router(search_router)
         case "ui":
             log.info("app.mode", mode="ui", static_dir=str(STATIC_DIR))
             # Trivial per-container liveness only — the full aggregate lives

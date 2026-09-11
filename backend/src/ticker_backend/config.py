@@ -21,6 +21,9 @@ class Settings(BaseSettings):
     # SEC requires a descriptive User-Agent identifying the app + a contact
     # email on every request — not a secret, just a compliance string.
     sec_edgar_user_agent: str = "TickerNewsAnalysis contact@example.com"
+    # How long /api/search waits on the fetch job before treating it as a
+    # complete failure — see ADR 0004 and spec 0001.
+    job_timeout_seconds: int = 10
 
 
 settings = Settings()
