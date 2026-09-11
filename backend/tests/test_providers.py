@@ -1,0 +1,217 @@
+"""Provider tests, mocked at the HTTP layer with respx -- using the real
+response shapes captured live in lessons 7/8, not invented fixtures. See
+docs/plans/0010-testing-search-feature.md."""
+
+from datetime import datetime, timedelta, timezone
+
+import httpx
+import pytest
+import respx
+from sqlalchemy import select
+
+from ticker_backend.models import Company, Headline
+from ticker_backend.providers import (
+    ProviderFetchError,
+    fetch_and_persist_headlines,
+    fetch_edgar_filings,
+    fetch_finnhub_news,
+    get_company,
+)
+
+TICKERS_JSON = {"0": {"cik_str": 320193, "ticker": "AAPL", "title": "Apple Inc."}}
+
+
+def _edgar_filing(form: str, days_ago: int, accession: str):
+    dt = datetime.now(timezone.utc) - timedelta(days=days_ago)
+    return {
+        "form": form,
+        "filingDate": dt.date().isoformat(),
+        "acceptanceDateTime": dt.isoformat().replace("+00:00", "Z"),
+        "accessionNumber": accession,
+        "primaryDocument": "doc.htm",
+        "primaryDocDescription": form,
+    }
+
+
+def _edgar_submissions(filings: list[dict]) -> dict:
+    keys = ["form", "filingDate", "acceptanceDateTime", "accessionNumber", "primaryDocument", "primaryDocDescription"]
+    return {"filings": {"recent": {k: [f[k] for f in filings] for k in keys}}}
+
+
+@respx.mock
+async def test_edgar_date_filter_regression(test_session_factory):
+    """Named regression test for the exact bug found live in lesson 7:
+    EDGAR's feed returns filings of any age -- form-type filtering alone
+    isn't enough. This must keep only the filing inside the 7-day window."""
+    respx.get("https://data.sec.gov/submissions/CIK0000320193.json").mock(
+        return_value=httpx.Response(
+            200,
+            json=_edgar_submissions(
+                [
+                    _edgar_filing("10-Q", days_ago=3000, accession="0001-old-10q"),  # too old
+                    _edgar_filing("8-K", days_ago=1, accession="0001-recent-8k"),  # keep
+                    _edgar_filing("4", days_ago=1, accession="0001-recent-form4"),  # wrong type
+                ]
+            ),
+        )
+    )
+    async with httpx.AsyncClient() as client:
+        filings = await fetch_edgar_filings(client, cik="320193", ticker="AAPL")
+
+    assert len(filings) == 1
+    assert "0001recent8k" in filings[0]["url"]  # dashes stripped from the accession number, by design
+    assert filings[0]["category"] == "filing"
+    assert filings[0]["outlet"] is None
+    assert filings[0]["summary"] is None
+
+
+@respx.mock
+async def test_finnhub_maps_source_and_summary(test_session_factory):
+    respx.get("https://finnhub.io/api/v1/company-news").mock(
+        return_value=httpx.Response(
+            200,
+            json=[
+                {
+                    "category": "company",
+                    "datetime": 1789055298,
+                    "headline": "A real headline",
+                    "id": 1,
+                    "image": "https://example.com/x.png",
+                    "related": "AAPL",
+                    "source": "Yahoo",
+                    "summary": "A short summary blurb.",
+                    "url": "https://finnhub.io/api/news?id=abc",
+                }
+            ],
+        )
+    )
+    async with httpx.AsyncClient() as client:
+        articles = await fetch_finnhub_news(client, ticker="AAPL")
+
+    assert len(articles) == 1
+    assert articles[0]["outlet"] == "Yahoo"
+    assert articles[0]["summary"] == "A short summary blurb."
+    assert articles[0]["category"] == "news"
+    assert articles[0]["provider"] == "finnhub"
+
+
+@respx.mock
+async def test_finnhub_403_raises_typed_error(test_session_factory):
+    respx.get("https://finnhub.io/api/v1/company-news").mock(
+        return_value=httpx.Response(403, json={"error": "You don't have access to this resource."})
+    )
+    async with httpx.AsyncClient() as client:
+        with pytest.raises(ProviderFetchError):
+            await fetch_finnhub_news(client, ticker="ZZZQX")
+
+
+@respx.mock
+async def test_partial_failure_when_one_provider_errors(test_session_factory):
+    respx.get("https://www.sec.gov/files/company_tickers.json").mock(
+        return_value=httpx.Response(200, json=TICKERS_JSON)
+    )
+    respx.get("https://data.sec.gov/submissions/CIK0000320193.json").mock(
+        return_value=httpx.Response(200, json=_edgar_submissions([_edgar_filing("8-K", 1, "0001-a")]))
+    )
+    respx.get("https://finnhub.io/api/v1/company-news").mock(return_value=httpx.Response(500))
+
+    result = await fetch_and_persist_headlines("AAPL", session_factory=test_session_factory)
+
+    assert result["status"] == "partial_failure"
+    assert result["providers"] == {"edgar": "ok", "finnhub": "error"}
+
+
+@respx.mock
+async def test_dedup_by_url_on_second_fetch(test_session_factory):
+    respx.get("https://www.sec.gov/files/company_tickers.json").mock(
+        return_value=httpx.Response(200, json=TICKERS_JSON)
+    )
+    respx.get("https://data.sec.gov/submissions/CIK0000320193.json").mock(
+        return_value=httpx.Response(200, json=_edgar_submissions([_edgar_filing("8-K", 1, "0001-a")]))
+    )
+    respx.get("https://finnhub.io/api/v1/company-news").mock(return_value=httpx.Response(200, json=[]))
+
+    await fetch_and_persist_headlines("AAPL", session_factory=test_session_factory)
+    await fetch_and_persist_headlines("AAPL", session_factory=test_session_factory)
+
+    async with test_session_factory() as session:
+        rows = (await session.execute(select(Headline).where(Headline.ticker == "AAPL"))).scalars().all()
+    assert len(rows) == 1
+
+
+@respx.mock
+async def test_no_company_row_when_both_providers_empty(test_session_factory):
+    respx.get("https://www.sec.gov/files/company_tickers.json").mock(
+        return_value=httpx.Response(200, json={"0": {"cik_str": 1, "ticker": "REAL", "title": "Real Co"}})
+    )
+    respx.get("https://finnhub.io/api/v1/company-news").mock(return_value=httpx.Response(200, json=[]))
+
+    result = await fetch_and_persist_headlines("ZZZQX", session_factory=test_session_factory)
+
+    assert result["headline_count"] == 0
+    async with test_session_factory() as session:
+        company = await session.get(Company, "ZZZQX")
+    assert company is None
+
+
+@respx.mock
+async def test_company_row_created_with_null_cik_when_only_finnhub_has_data(test_session_factory):
+    respx.get("https://www.sec.gov/files/company_tickers.json").mock(
+        return_value=httpx.Response(200, json={"0": {"cik_str": 1, "ticker": "OTHER", "title": "Other Co"}})
+    )
+    respx.get("https://finnhub.io/api/v1/company-news").mock(
+        return_value=httpx.Response(
+            200,
+            json=[
+                {
+                    "category": "company",
+                    "datetime": int(datetime.now(timezone.utc).timestamp()),
+                    "headline": "Some real news",
+                    "id": 1,
+                    "related": "FOREIGNCO",
+                    "source": "Reuters",
+                    "summary": "Summary.",
+                    "url": "https://example.com/a",
+                }
+            ],
+        )
+    )
+
+    result = await fetch_and_persist_headlines("FOREIGNCO", session_factory=test_session_factory)
+
+    assert result["status"] == "success"
+    async with test_session_factory() as session:
+        company = await session.get(Company, "FOREIGNCO")
+    assert company is not None
+    assert company.cik is None
+    assert company.company_name is None
+
+
+async def test_category_check_constraint_rejects_invalid_value(test_session_factory):
+    async with test_session_factory() as session:
+        session.add(
+            Headline(
+                ticker="AAPL",
+                title="bad",
+                url="https://example.com/bad-category",
+                category="rumor",
+                provider="finnhub",
+                published_at=datetime.now(timezone.utc),
+            )
+        )
+        with pytest.raises(Exception, match="CheckViolationError|violates check constraint"):
+            await session.commit()
+
+
+async def test_get_company_uses_cache_not_a_second_lookup(test_session_factory):
+    async with test_session_factory() as session:
+        session.add(Company(ticker="AAPL", cik="320193", company_name="Apple Inc."))
+        await session.commit()
+
+    # No respx mock registered at all -- if get_company tried a real HTTP
+    # call instead of reading the cache, this would raise a connection error.
+    async with httpx.AsyncClient() as client:
+        info = await get_company("AAPL", client, test_session_factory)
+
+    assert info.cik == "320193"
+    assert info.company_name == "Apple Inc."
