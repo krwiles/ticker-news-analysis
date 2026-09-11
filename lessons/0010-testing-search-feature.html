@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 10 — Testing the Search Feature</title>
+<link rel="stylesheet" href="../assets/lesson.css">
+</head>
+<body>
+<div class="lesson">
+
+  <p class="eyebrow">Lesson 10 of 13 · ticker-news-analysis stack (feature arc)</p>
+  <h1>Testing the search feature</h1>
+  <p class="subtitle">The project's first tests — and proof, twice over, that a test that always passes isn't actually testing anything.</p>
+
+  <h2>The payoff of every "inject it, don't import it" decision so far</h2>
+  <p>
+    Every fetch function (lesson 7) takes its externals as parameters — <code>client</code>,
+    <code>session_factory</code>. <code>split_today_recent</code> (lesson 9) takes <code>now</code> as a
+    parameter. None of that was for its own sake — this lesson is why. Every single test below passes in a fake
+    or a test-database version of these, with <strong>zero changes to the application code</strong>:
+  </p>
+  <pre><code>await fetch_and_persist_headlines("AAPL", session_factory=test_session_factory)
+split_today_recent(headlines, now=datetime(2026, 1, 15, 4, 30, tzinfo=timezone.utc))</code></pre>
+
+  <h2>A real platform gap, found running the suite for the first time</h2>
+  <div class="callout">
+    <p>
+      The very first test run failed with <code>ValueError: the greenlet library is required</code>.
+      SQLAlchemy's async engine needs <code>greenlet</code>, and it's normally pulled in transitively — but its
+      dependency marker lists Linux's <code>aarch64</code> for ARM, not macOS's own <code>arm64</code> string.
+      The Docker container (Linux) got it for free; this Mac, running pytest directly for the first time, didn't.
+      Fixed by declaring <code>greenlet</code> as a direct dependency instead of trusting the transitive marker
+      — <a href="https://docs.sqlalchemy.org/en/20/orm/extensions/asyncio.html#greenlet-dependency">SQLAlchemy's
+      own docs</a> recommend exactly this for cross-platform safety.
+    </p>
+  </div>
+
+  <h2>A pytest-asyncio pitfall: session-scoped engines don't survive test boundaries</h2>
+  <p>
+    A session-scoped async engine fixture crashed on the <em>second</em> test with
+    <code>RuntimeError: Event loop is closed</code>. pytest-asyncio gives each test function its own event loop
+    by default — an engine created on test 1's loop is orphaned by the time test 2 runs on a different one.
+    Fixed by making the engine fixture function-scoped instead of fighting loop-scope configuration:
+  </p>
+  <pre><code>@pytest.fixture  # not scope="session"
+def test_session_factory():
+    engine = create_async_engine(TEST_ASYNC_URL, pool_pre_ping=True)
+    return async_sessionmaker(engine, expire_on_commit=False)</code></pre>
+
+  <h2>The real foreign key caught a lazy test fixture</h2>
+  <p>
+    A test helper inserted a <code>Headline</code> directly without a matching <code>Company</code> row first —
+    and <code>headlines.ticker</code>'s real foreign key (lesson 7) rejected it, exactly as it should. The fix
+    was the test helper, not the constraint:
+  </p>
+  <pre><code>await session.merge(Company(ticker=ticker))   # added -- the FK applies to test data too
+session.add(Headline(...))</code></pre>
+
+  <h2>The lesson's actual point: proving a test can fail</h2>
+  <p>The lesson 7 date-filter bug, reintroduced on purpose:</p>
+  <pre><code>assert len(filings) == 1
+AssertionError: assert 2 == 1</code></pre>
+  <p>
+    Caught immediately, and — checked deliberately — the other 16 tests stayed green while this one failed.
+    Reverted, all 17 pass again.
+  </p>
+
+  <div class="callout">
+    <p>
+      <strong>A second, more honest discovery from the same exercise.</strong> A test named
+      <code>test_dst_aware_not_a_hardcoded_offset_winter_est</code> was deliberately broken by swapping the real
+      timezone for plain UTC — and it <em>didn't fail</em>. Its own <code>now</code>/headline pair happened to
+      land on the same calendar date under either interpretation, so it only ever proved "some timezone exists,"
+      never "the correct one is used." A test with a name that overpromises is worse than an honest gap — it
+      would have hidden a real DST bug behind a false sense of coverage. Fixed by constructing a pair that
+      genuinely straddles the EST/EDT boundary (a wrong <code>-4</code> pushes <code>now</code> into the next
+      calendar day while leaving the headline on the previous one) — verified this version *does* fail against
+      a hardcoded <code>-4</code>, then reverted.
+    </p>
+  </div>
+
+  <h2>Check your understanding</h2>
+
+  <div class="check">
+    <p class="q">Q1. Why is <code>test_session_factory</code> function-scoped instead of session-scoped, even
+    though that means recreating the engine for every single test?</p>
+    <details>
+      <summary>Reveal answer</summary>
+      <p class="answer">An async engine is bound to the event loop it was created on. pytest-asyncio gives each
+      test its own loop by default, so a session-scoped engine becomes unusable ("Event loop is closed") the
+      moment a second test tries to use it.</p>
+    </details>
+  </div>
+
+  <div class="check">
+    <p class="q">Q2. What did the broken DST test actually prove about the *original* version of that test,
+    before it was strengthened?</p>
+    <details>
+      <summary>Reveal answer</summary>
+      <p class="answer">That its assertion would have passed under either the correct offset or a wrong one --
+      it was verifying "conversion happens," not "the correct EST/EDT offset is used." A passing test isn't
+      proof of correctness by itself; it has to be shown capable of failing for the right reason too.</p>
+    </details>
+  </div>
+
+  <div class="source">
+    <p class="label">Primary sources</p>
+    <p>
+      <a href="https://docs.pytest.org/en/stable/">pytest docs</a> ·
+      <a href="https://pytest-asyncio.readthedocs.io/en/latest/reference/fixtures.html">pytest-asyncio docs — fixtures and event loop scope</a> ·
+      <a href="https://lundberg.github.io/respx/">respx docs</a> ·
+      <a href="https://docs.sqlalchemy.org/en/20/orm/extensions/asyncio.html#greenlet-dependency">SQLAlchemy docs — the greenlet dependency</a>
+    </p>
+  </div>
+
+  <p class="ask">Anything unclear about why the DST test needed strengthening, or the event-loop-scope issue?
+  Ask your teacher (this agent).</p>
+
+  <div class="nav">
+    <a href="0009-api-search-endpoint.html">← Lesson 9: The /api/search endpoint</a>
+    <span>Next → Lesson 11: React fundamentals, from Angular (not yet written)</span>
+  </div>
+
+</div>
+</body>
+</html>

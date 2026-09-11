@@ -83,7 +83,14 @@ fundamentals) was added after lesson 7, once a real teaching gap surfaced.
     recent boundary and the dedup/CHECK-constraint behavior; an integration test for `/api/search` end to end
     with mocked providers; failure-path tests (partial, complete, job-timeout). Verify by watching a test fail
     when you deliberately break the logic it covers, then pass again once fixed — proof the test is meaningful,
-    not just green by accident.
+    not just green by accident. ✅ built (plan: `docs/plans/0010-*.md`) — 17 tests, all passing. Real platform
+    gap found: `greenlet` (needed by SQLAlchemy's async engine) has a dependency marker that lists Linux's
+    `aarch64` but not macOS's own `arm64`, so it silently didn't install on this Mac; fixed by declaring it
+    directly. Also found: a session-scoped async engine fixture breaks across pytest-asyncio's per-test event
+    loops (fixed: function-scoped instead); a test fixture forgot the real `headlines` FK needs a `companies`
+    row first. Best finding: a DST test named for what it claimed to prove didn't actually prove it (both
+    interpretations landed on the same date) — caught by deliberately breaking it and watching it *not* fail,
+    then strengthened to a pair that genuinely distinguishes EST from EDT.
 11. **React fundamentals, from Angular** — components, JSX, hooks (`useState`/`useEffect`) mapped via the
     translation table above, built against the search bar + a first pass at rendering results from lesson 9's
     endpoint.
