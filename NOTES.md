@@ -107,10 +107,15 @@ fundamentals) was added after lesson 7, once a real teaching gap surfaced.
     stub, not MSW (smaller footprint for a first pass — same "targeted, not overbuilt" reasoning ADR 0005 used
     to defer this whole decision). Test files co-located (`Component.test.tsx` beside `Component.tsx`), not a
     separate `frontend/tests/` directory. (plan: `docs/plans/0012-*.md`)
-13. **React Router + how the UI actually works** — the data-loading pattern, router setup in `App.tsx`
-    (including a proper explanation of the `/search` route lesson 11 added ahead of this lesson, one-line
-    addition to the existing pattern with no new concepts introduced at the time), tying back to lesson 3's
-    `/health` endpoint and lesson 9's new endpoint from the frontend side.
+13. **React Router + how the UI actually works** — two real, previously-missing pieces: (1) a `Layout`
+    component (nav + `<Outlet />`, React Router's near-literal translation of Angular's `<router-outlet>`)
+    wrapping both routes so `/` and `/search` are actually navigable via `<Link>`, not just reachable by typing
+    a URL; (2) `useSearchParams` makes the URL the real source of truth for "what's being searched" — the
+    data-loading pattern named in this lesson's original scope, and this project's declarative-mode answer to
+    what Angular resolvers do. Submitting a search writes `?ticker=` to the URL (uppercased — canonical form);
+    visiting `/search?ticker=AAPL` (or any case — the backend already normalizes, see `search.py`) directly
+    auto-fetches with zero manual interaction. Sets up lesson 14's Refresh button for free: "the currently-shown
+    ticker" (spec 0001's own phrase) is just `searchParams.get("ticker")`. (plan: `docs/plans/0013-*.md`)
 14. **Today/Recent, category badges, and the Refresh button** — the UI polish that makes the feature match the
     spec end to end: two recency lists, a badge per entry, a manual re-fetch, and the success/partial/failure
     status display. Capstone of arc 2 — after this, spec 0001 is fully built, not just modeled.
