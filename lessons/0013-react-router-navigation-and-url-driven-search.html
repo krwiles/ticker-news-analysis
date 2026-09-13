@@ -1,0 +1,172 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 13 — React Router: Navigation and URL-Driven Search</title>
+<link rel="stylesheet" href="../assets/lesson.css">
+</head>
+<body>
+<div class="lesson">
+
+  <p class="eyebrow">Lesson 13 of 14 · ticker-news-analysis stack (feature arc)</p>
+  <h1>React Router: navigation, and the data-loading pattern</h1>
+  <p class="subtitle">Two things that were quietly missing since lesson 11: a way to actually get between the two pages, and a URL that means something.</p>
+
+  <div class="callout">
+    <p>
+      Since lesson 11, <code>/</code> and <code>/search</code> both worked — but only if you typed the URL
+      yourself. Nothing linked them, and <code>/search</code> only ever did anything after a manual form
+      submit. Both get fixed here, for real, not just explained.
+    </p>
+  </div>
+
+  <h2><code>&lt;Outlet /&gt;</code>: the closest one-to-one match in the whole translation table</h2>
+  <p>
+    <code>frontend/src/components/Layout.tsx</code> is new — a nav bar plus one thing:
+  </p>
+  <pre><code>export function Layout() {
+  return (
+    &lt;div&gt;
+      &lt;nav&gt;
+        &lt;Link to="/"&gt;Status&lt;/Link&gt;
+        &lt;Link to="/search"&gt;Search&lt;/Link&gt;
+      &lt;/nav&gt;
+      &lt;Outlet /&gt;
+    &lt;/div&gt;
+  );
+}</code></pre>
+  <p>
+    <code>&lt;Outlet /&gt;</code> means "render whichever child route matched" — which is <em>almost literally</em>
+    Angular's <code>&lt;router-outlet&gt;</code>, right down to the name. <code>App.tsx</code> nests both existing
+    routes under it:
+  </p>
+  <pre><code>&lt;Routes&gt;
+  &lt;Route element={&lt;Layout /&gt;}&gt;
+    &lt;Route path="/" element={&lt;StatusPage /&gt;} /&gt;
+    &lt;Route path="/search" element={&lt;SearchPage /&gt;} /&gt;
+  &lt;/Route&gt;
+&lt;/Routes&gt;</code></pre>
+  <p>
+    And <code>&lt;Link to="/search"&gt;</code>, not a plain <code>&lt;a href="/search"&gt;</code> — the whole
+    reason a router library exists. A plain anchor tag would trigger a full page reload (a fresh
+    <code>index.html</code>, a fresh React app boot); <code>Link</code> intercepts the click and navigates
+    client-side instead, which is provably true, not just claimed: <code>StatusPage</code>'s 5-second poll
+    interval doesn't reset when you navigate away and back through the nav.
+  </p>
+
+  <h2>The data-loading pattern: the URL is the actual source of truth</h2>
+  <p>
+    Before this lesson, <code>/search</code> only ever fetched in response to a form submit.
+    <code>SearchPage.tsx</code> now uses <code>useSearchParams</code> so the URL drives it instead:
+  </p>
+  <pre><code>const [searchParams, setSearchParams] = useSearchParams();
+const urlTicker = searchParams.get("ticker");
+
+useEffect(() =&gt; {
+  if (urlTicker) {
+    runSearch(urlTicker);
+  }
+}, [urlTicker]);
+
+function handleSearch(ticker: string) {
+  setSearchParams({ ticker: ticker.toUpperCase() });
+  // the effect above picks up the resulting param change and fetches --
+  // one fetch-triggering path, not two copies of it
+}</code></pre>
+  <p>
+    Visit <code>/search?ticker=AAPL</code> directly — a shared link, a bookmark, browser Back/Forward — and it
+    loads for real, with zero manual interaction. That's the actual "data-loading pattern" named in this
+    lesson's scope: the route's own URL state drives what data loads, not just a click handler.
+  </p>
+  <div class="sidenote-wrap">
+    <p>
+      Worth being precise rather than overclaiming the Angular parallel: this project uses React Router's
+      <em>declarative</em> mode (<code>RESOURCES.md</code>'s own note), which has no built-in resolver-style
+      route loader the way Angular's router does. <code>useSearchParams</code> + an effect is the idiomatic way
+      to get the same <em>outcome</em> in declarative mode — a real analogy, not the same mechanism.
+    </p>
+    <span class="sidenote">React Router's separate <em>data</em> mode does have real loaders — a different API this project doesn't use.</span>
+  </div>
+
+  <h2>Case handling: uppercase on write, anything works on read</h2>
+  <p>
+    Submitting normalizes once (<code>ticker.toUpperCase()</code>) before writing the URL — so the URL always
+    shows the canonical form. But visiting <code>/search?ticker=aapl</code> (lowercase, hand-typed or shared)
+    still works, with no extra frontend code at all: <code>search.py</code>'s endpoint already calls
+    <code>ticker.upper()</code> before anything else happens server-side, so passing the raw param straight
+    through to <code>fetchSearch</code> resolves correctly regardless of case. Verified with a real test rather
+    than left as an assumption — <code>SearchPage.test.tsx</code>'s
+    <code>"still functions when the URL's ticker is lowercase"</code> asserts <code>fetchSearch</code> gets
+    called with the untouched, lowercase value.
+  </p>
+
+  <h2>A real React gotcha: <code>initialValue</code> is a snapshot, not a binding</h2>
+  <div class="callout">
+    <p>
+      <code>SearchBar</code>'s <code>useState(initialValue ?? "")</code> only reads <code>initialValue</code>
+      <strong>once</strong>, at mount. If the URL's ticker changes later while the same <code>SearchBar</code>
+      instance stays mounted (browser Back to a previous search, say), the input would keep showing the
+      <em>old</em> ticker — a real, visible inconsistency with the results below it, unlike an Angular
+      <code>@Input()</code>, which <em>would</em> keep reflecting the latest value automatically.
+    </p>
+    <p>
+      Fixed with React's own recommended pattern for exactly this — not an effect that syncs state, but a
+      changing <code>key</code> that forces a clean remount:
+    </p>
+    <pre><code>&lt;SearchBar key={urlTicker ?? ""} initialValue={urlTicker ?? undefined} ... /&gt;</code></pre>
+    <p>
+      A different <code>key</code> means React treats it as a genuinely different component instance — the old
+      one unmounts (stale state and all), a fresh one mounts with the new <code>initialValue</code>. See
+      react.dev's own <a href="https://react.dev/learn/you-might-not-need-an-effect#resetting-all-state-when-a-prop-changes">"Resetting state when a prop changes"</a> — this is the case it's written for.
+    </p>
+  </div>
+
+  <h2>Check your understanding</h2>
+
+  <div class="check">
+    <p class="q">Q1. Why doesn't submitting the exact same ticker twice in the search bar trigger a second
+    fetch?</p>
+    <details>
+      <summary>Reveal answer</summary>
+      <p class="answer">Fetching is triggered by the URL's ticker param <em>changing</em> (the effect's
+      dependency). Submitting an unchanged value calls <code>setSearchParams</code> with the same value, so the
+      URL doesn't actually change, so the effect never re-fires. This is exactly why spec 0001 needs a separate
+      Refresh button (lesson 14) -- re-fetching the *same* ticker on demand needs its own explicit trigger, not
+      a side effect of resubmitting the search bar.</p>
+    </details>
+  </div>
+
+  <div class="check">
+    <p class="q">Q2. Why is <code>key={urlTicker}</code> the fix for the stale-input problem, rather than an
+    effect that calls <code>setTicker(initialValue)</code> when <code>initialValue</code> changes?</p>
+    <details>
+      <summary>Reveal answer</summary>
+      <p class="answer">Both would work, but <code>key</code> is react.dev's own recommended approach for
+      "reset a component's entire state when some external value changes" -- it lets the component's existing,
+      already-correct mount-time initialization do the work, rather than adding a second, effect-driven path
+      that duplicates what <code>useState(initialValue)</code> already does once.</p>
+    </details>
+  </div>
+
+  <div class="source">
+    <p class="label">Primary sources</p>
+    <p>
+      <a href="https://reactrouter.com/start/declarative/routing">React Router docs — Routing (declarative mode)</a> ·
+      <a href="https://reactrouter.com/start/declarative/url-values#url-search-params">React Router docs — useSearchParams</a> ·
+      <a href="https://react.dev/learn/you-might-not-need-an-effect#resetting-all-state-when-a-prop-changes">react.dev — Resetting state when a prop changes</a> ·
+      <a href="https://angular.dev/guide/routing/common-router-tasks">angular.dev — Common Router tasks</a> (the comparison point)
+    </p>
+  </div>
+
+  <p class="ask">Anything unclear about why the URL-as-source-of-truth pattern works the way it does, or the
+  <code>key</code>-based reset? Ask your teacher (this agent).</p>
+
+  <div class="nav">
+    <a href="0012-testing-react-components.html">← Lesson 12: Testing React components</a>
+    <span>Next → Lesson 14: Today/Recent, badges, and Refresh (not yet written)</span>
+  </div>
+
+</div>
+</body>
+</html>
