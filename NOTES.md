@@ -98,9 +98,15 @@ fundamentals) was added after lesson 7, once a real teaching gap surfaced.
     lesson 13 is where routing itself becomes the lesson. (plan: `docs/plans/0011-*.md`)
 12. **Testing React components** — inserted after lesson 11 (2026-09-11), mirroring how lessons 8 and 10 got
     added mid-arc once a real teaching gap surfaced rather than being pre-planned: ADR 0005 deliberately
-    deferred the frontend testing-tool decision (Jest/Vitest vs. Testing Library, etc.) to exactly this point
-    ("when the React lessons actually begin") rather than deciding it in the abstract. Tests `SearchBar` and
-    `HeadlineList`, built in lesson 11.
+    deferred the frontend testing-tool decision to exactly this point ("when the React lessons actually
+    begin") rather than deciding it in the abstract. Resolved: **Vitest + React Testing Library** (matches
+    this project's already-modern-ESM `tsconfig`, no separate transform config needed, unlike Jest). Tests all
+    four of lesson 11's new files — `SearchBar`, `HeadlineList`, `search.ts`'s `fetchSearch`, and `SearchPage`
+    — deliberately extending past `NOTES.md`'s original narrower wording to mirror lesson 10's two-layer shape
+    (pure-component tests + an HTTP-boundary mock + one integration test one layer up). Mocking: global `fetch`
+    stub, not MSW (smaller footprint for a first pass — same "targeted, not overbuilt" reasoning ADR 0005 used
+    to defer this whole decision). Test files co-located (`Component.test.tsx` beside `Component.tsx`), not a
+    separate `frontend/tests/` directory. (plan: `docs/plans/0012-*.md`)
 13. **React Router + how the UI actually works** — the data-loading pattern, router setup in `App.tsx`
     (including a proper explanation of the `/search` route lesson 11 added ahead of this lesson, one-line
     addition to the existing pattern with no new concepts introduced at the time), tying back to lesson 3's
