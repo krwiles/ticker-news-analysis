@@ -117,8 +117,14 @@ fundamentals) was added after lesson 7, once a real teaching gap surfaced.
     auto-fetches with zero manual interaction. Sets up lesson 14's Refresh button for free: "the currently-shown
     ticker" (spec 0001's own phrase) is just `searchParams.get("ticker")`. (plan: `docs/plans/0013-*.md`)
 14. **Today/Recent, category badges, and the Refresh button** — the UI polish that makes the feature match the
-    spec end to end: two recency lists, a badge per entry, a manual re-fetch, and the success/partial/failure
-    status display. Capstone of arc 2 — after this, spec 0001 is fully built, not just modeled.
+    spec end to end: two recency lists (stops merging `today`/`recent` into one), a real `CategoryBadge`
+    component (blue News / purple Filing, replacing plain text), a `SearchStatus` component showing all three
+    states — including `success` ("All sources responded.") shown deliberately, not just the failure cases, so
+    a user actually knows fresh data was fetched — and a Refresh button that calls the existing `runSearch`
+    directly (lesson 13 built this hook point on purpose). Both new components are extracted, not inline, same
+    reasoning `StatusTile` was: a small enum-to-(color,label) mapping worth testing in isolation. Capstone of
+    arc 2 — after this, spec 0001 is fully built, not just modeled. ✅ built (plan: `docs/plans/0014-*.md`) —
+    38 tests passing, all green. Arc 2 is complete.
 
 ## Preferences
 - Wants an example data table created once the spec round produces a real entity to model it on (lesson 6 above), not before — don't front-load schema/domain work into earlier lessons. Satisfied: spec 0001 + `CONTEXT.md` now exist, arc 2 is modeled on them.
