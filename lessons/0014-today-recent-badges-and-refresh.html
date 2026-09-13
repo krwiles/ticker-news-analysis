@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 14 — Today/Recent, Badges, and Refresh</title>
+<link rel="stylesheet" href="../assets/lesson.css">
+</head>
+<body>
+<div class="lesson">
+
+  <p class="eyebrow">Lesson 14 of 14 · ticker-news-analysis stack (feature arc — capstone)</p>
+  <h1>Today/Recent, category badges, and the Refresh button</h1>
+  <p class="subtitle">The arc-2 capstone: spec 0001 goes from modeled to actually built.</p>
+
+  <div class="callout">
+    <p>
+      Before this lesson, three real gaps remained against <code>docs/specs/0001-first-feature.md</code>:
+      <code>SearchPage.tsx</code> merged <code>today</code>/<code>recent</code> into one list, category showed
+      as plain text, and there was no Refresh button at all. All three close here — see
+      <code>docs/plans/0014-*.md</code>'s completeness checklist for the full spec-by-spec accounting.
+    </p>
+  </div>
+
+  <h2>Stopping the merge — the backend's guarantee was there all along</h2>
+  <p>
+    <code>split_today_recent</code> (lesson 9) has guaranteed, since before the frontend even existed, that a
+    headline lands in exactly one of <code>today</code> or <code>recent</code> — DST-tested carefully in lesson
+    10. The frontend's own <code>[...results.today, ...results.recent]</code> line was quietly throwing that
+    guarantee away, presenting it back to the user as one undifferentiated list. Removing that line and
+    rendering two real, headed sections doesn't add a new guarantee — it just stops hiding the one that already
+    existed:
+  </p>
+  <pre><code>&lt;section&gt;
+  &lt;h2&gt;Today&lt;/h2&gt;
+  &lt;HeadlineList headlines={results.today} emptyMessage="No headlines today." /&gt;
+&lt;/section&gt;
+&lt;section&gt;
+  &lt;h2&gt;Recent&lt;/h2&gt;
+  &lt;HeadlineList headlines={results.recent} emptyMessage="No other headlines in the past week." /&gt;
+&lt;/section&gt;</code></pre>
+  <div class="callout">
+    <p>
+      <strong>The one guarantee that genuinely needed a new test, not just a rendering change:</strong> spec
+      0001 says an empty Today list is "normal, not a bug" — even when Recent has real entries right next to
+      it. That's not automatically true just because two sections exist; it needed its own test constructing
+      exactly that shape (empty <code>today</code>, populated <code>recent</code>) and asserting Today reads as
+      a plain, calm empty message, not broken or missing.
+    </p>
+  </div>
+
+  <h2><code>CategoryBadge</code> and <code>SearchStatus</code>: the same shape as <code>StatusTile</code>, on purpose</h2>
+  <p>
+    Both new components are the same pattern: a small enum mapped to a color and a label. Neither is reused
+    anywhere else yet — same as <code>StatusTile.tsx</code> wasn't, when it was first extracted from
+    <code>StatusPage</code>. The reason to still give each its own file isn't reuse, it's testability: a
+    mapping table is exactly the kind of thing worth verifying in isolation (<em>does "filing" really produce
+    "Filing" in purple? does "success" really produce a different message than "partial_failure"?</em>) rather
+    than asserting on it buried inside a much bigger page render.
+  </p>
+  <p>
+    One deliberate content decision worth naming: <code>SearchStatus</code> shows a message for
+    <code>success</code> too — "All sources responded." — not just the two failure states. Spec 0001 asks to
+    "surface a simple success/partial-failure/complete-failure status," all three; knowing the latest news
+    genuinely got fetched is real information, not just noise to suppress until something goes wrong.
+  </p>
+
+  <h2>Refresh: the payoff of lesson 13's whole design</h2>
+  <p>
+    This is the smallest addition, because lesson 13 built the hook point for exactly this on purpose:
+  </p>
+  <pre><code>function handleRefresh() {
+  if (urlTicker) {
+    runSearch(urlTicker);
+  }
+}</code></pre>
+  <p>
+    Worth being precise about <em>why</em> this can't just be "let the user resubmit the search bar again":
+    submitting an unchanged ticker calls <code>setSearchParams</code> with a value the URL already has, so the
+    URL doesn't actually change, so the <code>useEffect</code> that watches it never re-fires. Refresh has to
+    call <code>runSearch</code> directly, sidestepping the URL entirely — spec 0001's own words, "the Refresh
+    button just calls the exact same <code>GET /api/search</code> again for the currently-shown ticker," turn
+    out to describe a real mechanical necessity, not just a simplicity choice.
+  </p>
+
+  <h2>A non-goal satisfied for free</h2>
+  <p>
+    Spec 0001's Non-goals rule out "stale-then-fresh loading" for v1 — showing old results while a new fetch
+    runs quietly behind them, then swapping. <code>{results && !loading && (...)}</code> already hides the
+    whole results block whenever <code>loading</code> is true, and that line hasn't changed since lesson 11.
+    Refresh reuses the exact same <code>loading</code> state as every other search, so pressing it correctly
+    hides the old results and shows "Searching…" — not because this lesson added that behavior, but because it
+    was already there, built for the very first search, and Refresh never needed anything different.
+  </p>
+
+  <h2>Check your understanding</h2>
+
+  <div class="check">
+    <p class="q">Q1. Why does the "empty Today, populated Recent" test matter, when the two-section split
+    itself already looks correct just from reading the JSX?</p>
+    <details>
+      <summary>Reveal answer</summary>
+      <p class="answer">Reading the JSX shows that two sections exist and each has an emptyMessage prop -- it
+      doesn't prove that an empty Today section actually renders calmly next to a populated Recent one, rather
+      than looking broken, cut off, or like a loading state that got stuck. Spec 0001 explicitly calls this
+      case out as something that must read as normal -- that's a behavioral claim, and only a test that
+      constructs exactly that shape (not just "both empty" or "both populated") can verify it.</p>
+    </details>
+  </div>
+
+  <div class="check">
+    <p class="q">Q2. Why can't Refresh just call the search bar's own submit handler with the current ticker
+    already in the box?</p>
+    <details>
+      <summary>Reveal answer</summary>
+      <p class="answer">The search bar's submit handler calls setSearchParams, which only triggers a new fetch
+      by changing the URL and letting the effect react to that change. Submitting the same ticker that's
+      already in the URL doesn't change anything the effect is watching, so no new fetch would fire. Refresh
+      has to call runSearch directly, which is exactly why it's a separate function rather than a wrapper
+      around the existing submit path.</p>
+    </details>
+  </div>
+
+  <div class="source">
+    <p class="label">Primary sources</p>
+    <p>
+      <a href="../docs/specs/0001-first-feature.md">docs/specs/0001-first-feature.md</a> (this lesson's actual
+      spec) ·
+      <a href="https://react.dev/learn/conditional-rendering">react.dev — Conditional Rendering</a> ·
+      <a href="https://tailwindcss.com/docs/colors">Tailwind CSS docs — Colors</a>
+    </p>
+  </div>
+
+  <p class="ask">Anything unclear about why the empty-Today test needed that exact shape, or why Refresh
+  couldn't reuse the search bar's own submit path? Ask your teacher (this agent).</p>
+
+  <div class="nav">
+    <a href="0013-react-router-navigation-and-url-driven-search.html">← Lesson 13: React Router</a>
+    <span>Arc 2 complete — spec 0001 is fully built, not just modeled</span>
+  </div>
+
+</div>
+</body>
+</html>
