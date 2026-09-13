@@ -58,4 +58,25 @@ describe("SearchBar", () => {
     expect(screen.getByPlaceholderText(/ticker symbol/i)).toBeDisabled();
     expect(screen.getByRole("button", { name: /search/i })).toBeDisabled();
   });
+
+  it("seeds the input from initialValue", () => {
+    render(<SearchBar onSearch={vi.fn()} initialValue="AAPL" />);
+    expect(screen.getByPlaceholderText(/ticker symbol/i)).toHaveValue("AAPL");
+  });
+
+  it("does not pick up a changed initialValue on its own -- it's a one-time seed, not a continuous binding", () => {
+    const { rerender } = render(<SearchBar onSearch={vi.fn()} initialValue="AAPL" />);
+    rerender(<SearchBar onSearch={vi.fn()} initialValue="MSFT" />);
+
+    // Same mounted instance -- useState's initial value only applies once,
+    // unlike an Angular @Input(). Still shows the original value.
+    expect(screen.getByPlaceholderText(/ticker symbol/i)).toHaveValue("AAPL");
+  });
+
+  it("remounts with the new initialValue when the key changes -- SearchPage's actual reset mechanism", () => {
+    const { rerender } = render(<SearchBar key="AAPL" onSearch={vi.fn()} initialValue="AAPL" />);
+    rerender(<SearchBar key="MSFT" onSearch={vi.fn()} initialValue="MSFT" />);
+
+    expect(screen.getByPlaceholderText(/ticker symbol/i)).toHaveValue("MSFT");
+  });
 });

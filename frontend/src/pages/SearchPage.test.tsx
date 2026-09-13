@@ -1,5 +1,6 @@
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { MemoryRouter } from "react-router";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import * as searchModule from "../search";
 import { SearchPage } from "./SearchPage";
@@ -15,6 +16,17 @@ vi.mock("../search", () => ({
 
 const fetchSearch = vi.mocked(searchModule.fetchSearch);
 
+// SearchPage now calls useSearchParams -- it throws outside a Router
+// context, so every render needs a MemoryRouter. initialEntries lets each
+// test control what's already in the URL when SearchPage first mounts.
+function renderSearchPage(initialEntries: string[] = ["/search"]) {
+  return render(
+    <MemoryRouter initialEntries={initialEntries}>
+      <SearchPage />
+    </MemoryRouter>,
+  );
+}
+
 async function searchFor(ticker: string) {
   const user = userEvent.setup();
   await user.type(screen.getByPlaceholderText(/ticker symbol/i), ticker);
@@ -27,7 +39,7 @@ describe("SearchPage", () => {
   });
 
   it("renders no results before any search happens", () => {
-    render(<SearchPage />);
+    renderSearchPage();
     expect(screen.queryByRole("list")).not.toBeInTheDocument();
     expect(screen.queryByText(/searching/i)).not.toBeInTheDocument();
   });
@@ -40,7 +52,7 @@ describe("SearchPage", () => {
       }),
     );
 
-    render(<SearchPage />);
+    renderSearchPage();
     await searchFor("AAPL");
 
     expect(screen.getByText(/searching/i)).toBeInTheDocument();
@@ -98,7 +110,7 @@ describe("SearchPage", () => {
       ],
     });
 
-    render(<SearchPage />);
+    renderSearchPage();
     await searchFor("AAPL");
 
     await waitFor(() => {
@@ -110,11 +122,60 @@ describe("SearchPage", () => {
   it("shows an error message when fetchSearch rejects, not a crash", async () => {
     fetchSearch.mockRejectedValue(new Error("/api/search responded 500"));
 
-    render(<SearchPage />);
+    renderSearchPage();
     await searchFor("AAPL");
 
     await waitFor(() => {
       expect(screen.getByText(/couldn't reach the api/i)).toBeInTheDocument();
+    });
+  });
+
+  it("loads automatically when the URL already has a ticker param -- the data-loading pattern", async () => {
+    fetchSearch.mockResolvedValue({
+      ticker: "AAPL",
+      status: "success",
+      providers: { edgar: "ok", finnhub: "ok" },
+      today: [
+        {
+          title: "Loaded from the URL",
+          url: "https://example.com/url-driven",
+          category: "news",
+          provider: "finnhub",
+          outlet: null,
+          summary: null,
+          published_at: "2026-09-11T12:00:00Z",
+        },
+      ],
+      recent: [],
+    });
+
+    // No searchFor() call -- nothing is typed or clicked. The URL alone
+    // should be enough to trigger a fetch.
+    renderSearchPage(["/search?ticker=AAPL"]);
+
+    await waitFor(() => {
+      expect(fetchSearch).toHaveBeenCalledWith("AAPL");
+    });
+    expect(screen.getByRole("link", { name: "Loaded from the URL" })).toBeInTheDocument();
+    // The search bar itself should reflect the URL-seeded ticker too.
+    expect(screen.getByPlaceholderText(/ticker symbol/i)).toHaveValue("AAPL");
+  });
+
+  it("still functions when the URL's ticker is lowercase -- case is not enforced on the read path", async () => {
+    fetchSearch.mockResolvedValue({
+      ticker: "AAPL",
+      status: "success",
+      providers: { edgar: "ok", finnhub: "ok" },
+      today: [],
+      recent: [],
+    });
+
+    renderSearchPage(["/search?ticker=aapl"]);
+
+    // Passed straight through, unmodified -- the backend (search.py's
+    // ticker.upper()) is what actually normalizes it, not this component.
+    await waitFor(() => {
+      expect(fetchSearch).toHaveBeenCalledWith("aapl");
     });
   });
 });

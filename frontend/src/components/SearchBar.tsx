@@ -3,13 +3,20 @@ import { useState, type FormEvent } from "react";
 interface SearchBarProps {
   onSearch: (ticker: string) => void;
   disabled?: boolean;
+  initialValue?: string;
 }
 
-export function SearchBar({ onSearch, disabled }: SearchBarProps) {
+export function SearchBar({ onSearch, disabled, initialValue }: SearchBarProps) {
   // signal() -> useState(): an explicit, read/write reactive value. Typing
   // updates `ticker` on every keystroke; nothing else here reacts to it —
   // it's only read when the form submits.
-  const [ticker, setTicker] = useState("");
+  //
+  // `initialValue` only seeds this once, at mount -- it's not a continuous
+  // binding the way an Angular @Input() is. SearchPage handles the "URL
+  // ticker changed after mount" case by remounting this component (a
+  // `key` prop keyed on the ticker) rather than syncing state via an
+  // effect -- see react.dev's "Resetting state with a key".
+  const [ticker, setTicker] = useState(initialValue ?? "");
 
   function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
