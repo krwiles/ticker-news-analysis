@@ -1,0 +1,198 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 11 — React Fundamentals, from Angular</title>
+<link rel="stylesheet" href="../assets/lesson.css">
+</head>
+<body>
+<div class="lesson">
+
+  <p class="eyebrow">Lesson 11 of 14 · ticker-news-analysis stack (feature arc)</p>
+  <h1>React fundamentals, from Angular</h1>
+  <p class="subtitle">A real search bar, wired to lesson 9's live endpoint — components, JSX, and hooks, mapped straight from what you already know.</p>
+
+  <div class="callout">
+    <p>
+      The backend side of spec 0001 (<code>docs/specs/0001-first-feature.md</code>) has been done and tested
+      since lesson 10. This lesson is the first one that builds anything on the frontend — <code>App.tsx</code>
+      had exactly one route (<code>StatusPage</code>) before today. Two things are deliberately simplified here,
+      confirmed rather than assumed — see the last section below.
+    </p>
+  </div>
+
+  <h2>Function components: no module system needed</h2>
+  <p>
+    <code>SearchBar</code>, <code>HeadlineList</code>, and <code>SearchPage</code> — all three new files this
+    lesson — are just functions that return JSX. No decorator, no registration step:
+  </p>
+  <div class="filename">frontend/src/components/SearchBar.tsx</div>
+  <pre><code>export function SearchBar({ onSearch, disabled }: SearchBarProps) {
+  const [ticker, setTicker] = useState("");
+  // ...
+  return (&lt;form onSubmit={handleSubmit}&gt;...&lt;/form&gt;);
+}</code></pre>
+  <p>
+    Angular's standalone <code>@Component</code> still needs a decorator and an <code>imports</code> array even
+    without <code>NgModules</code>. React drops that layer entirely — a component <em>is</em> the function; you
+    use it by calling it in JSX, the same as any other function.
+  </p>
+
+  <h2><code>useState</code>: the same explicit reactive primitive as <code>signal()</code></h2>
+  <p>
+    <code>SearchBar</code>'s input is the direct translation-table example (<code>NOTES.md</code>):
+  </p>
+  <pre><code>// Angular
+ticker = signal("");
+// read:  ticker()
+// write: ticker.set(event.target.value)
+
+// React (SearchBar.tsx)
+const [ticker, setTicker] = useState("");
+// read:  ticker
+// write: setTicker(event.target.value)</code></pre>
+  <div class="sidenote-wrap">
+    <p>
+      Both are explicit, read/write reactive values — no implicit magic, no auto-tracked property access. The
+      one real difference: a signal read (<code>ticker()</code>) is <em>fine-grained</em> — only the specific
+      DOM binding that reads it updates. A <code>useState</code> read re-renders the <em>whole component
+      function</em> that called the hook, every time. React's mental model is "the function reruns," not "this
+      one expression updates."
+    </p>
+    <span class="sidenote">Worth sitting with — the translation table's <code>signal()</code>↔<code>useState()</code> row is accurate at the surface, but this granularity gap is real, not a technicality.</span>
+  </div>
+
+  <h2>JSX is just JavaScript — no template syntax</h2>
+  <p><code>HeadlineList.tsx</code> has both patterns the translation table names:</p>
+  <pre><code>// Angular: @if / @for in a template
+// React: plain JS inside JSX
+
+if (headlines.length === 0) {
+  return &lt;p&gt;No headlines in the past week for this ticker.&lt;/p&gt;;
+}
+
+return (
+  &lt;ul&gt;
+    {headlines.map((headline) =&gt; (
+      &lt;li key={headline.url}&gt;
+        ...
+        {headline.summary &amp;&amp; &lt;p&gt;{headline.summary}&lt;/p&gt;}
+      &lt;/li&gt;
+    ))}
+  &lt;/ul&gt;
+);</code></pre>
+  <p>
+    <code>@for (headline of headlines)</code> becomes a plain <code>.map()</code>; <code>@if</code> becomes
+    either an early <code>return</code> or a <code>&&</code> short-circuit. There's no separate syntax to learn
+    here — the mental shift <em>is</em> that JSX has no template language of its own.
+  </p>
+
+  <h2>Two shapes of data fetching: effect-driven vs. event-driven</h2>
+  <p>
+    <code>StatusPage.tsx</code> (lesson 3) already fetches with <code>useEffect</code> — on mount, then again
+    every 5 seconds, on its own schedule. <code>SearchPage.tsx</code> fetches differently: only when the form is
+    submitted.
+  </p>
+  <div class="filename">frontend/src/pages/SearchPage.tsx</div>
+  <pre><code>async function handleSearch(ticker: string) {
+  setLoading(true);
+  setError(null);
+  try {
+    const result = await fetchSearch(ticker);
+    setResults(result);
+  } catch (err) {
+    setError(err instanceof Error ? err.message : "unknown error");
+  } finally {
+    setLoading(false);
+  }
+}</code></pre>
+  <p>
+    No <code>useEffect</code> at all. In Angular terms, <code>StatusPage</code>'s polling is closer to an
+    <code>effect()</code> — something that reruns on its own whenever its schedule fires. <code>handleSearch</code>
+    is closer to a plain method bound to <code>(ngSubmit)</code> — it runs exactly once, because something the
+    user did called it directly. Not every async operation in a React component needs <code>useEffect</code>;
+    reach for it specifically when something needs to happen <em>in reaction to</em> a render or a value
+    changing, not whenever you need to fetch data at all.
+  </p>
+
+  <div class="callout">
+    <p>
+      This is also the first request the frontend makes that's genuinely slow. <code>/health</code> answers
+      almost instantly; <code>/api/search</code> enqueues and awaits an ARQ job first (lesson 9, ADR 0004) — up
+      to <code>job_timeout_seconds</code> (10s) before falling back. The <code>loading</code> state above isn't
+      decoration — search a real ticker and watch it matter.
+    </p>
+  </div>
+
+  <h2>What's deliberately simplified today — and why</h2>
+  <p>Two things, confirmed rather than assumed while planning this lesson:</p>
+  <ul>
+    <li>
+      <strong>One combined list, not Today/Recent.</strong> <code>/api/search</code> already returns separate
+      <code>today</code>/<code>recent</code> arrays (spec 0001's real contract) — <code>SearchPage.tsx</code>
+      just concatenates them (<code>[...results.today, ...results.recent]</code>). Splitting them into two
+      headed lists with a real category <em>badge</em> (not plain text, which is what you see today) is lesson
+      14's job — the arc-2 capstone.
+    </li>
+    <li>
+      <strong>A second route, added but not explained.</strong> <code>App.tsx</code> now has
+      <code>/search</code> alongside <code>/</code> — mechanically identical to the route that was already
+      there, no new React Router concepts used. Lesson 13 is where routing itself becomes the actual subject.
+    </li>
+  </ul>
+  <p>
+    Try it now: run <code>npm run dev</code> in <code>frontend/</code> (with the rest of the stack up via
+    <code>docker compose up</code>) and visit <code>http://localhost:3000/search</code>. Search a real, actively
+    traded ticker and confirm it matches what lesson 9's <code>curl</code> calls showed. Search a nonsense
+    ticker and confirm you get the plain empty state, not something that looks broken — spec 0001 is explicit
+    that this is correct behavior, not a bug.
+  </p>
+
+  <h2>Check your understanding</h2>
+
+  <div class="check">
+    <p class="q">Q1. Why doesn't <code>SearchPage.tsx</code> use <code>useEffect</code> to fetch, the way
+    <code>StatusPage.tsx</code> does?</p>
+    <details>
+      <summary>Reveal answer</summary>
+      <p class="answer"><code>StatusPage</code> needs to fetch repeatedly on its own schedule (on mount, then
+      every 5s) — that's exactly what <code>useEffect</code> is for. <code>SearchPage</code>'s fetch only ever
+      needs to happen in direct response to one thing: the user submitting the form. That's a plain event
+      handler calling an async function directly — introducing <code>useEffect</code> here would be solving a
+      problem (reacting to a value changing) this component doesn't actually have.</p>
+    </details>
+  </div>
+
+  <div class="check">
+    <p class="q">Q2. <code>useState</code> and Angular's <code>signal()</code> are both described as "explicit,
+    read/write reactive values." What's the real difference this lesson names between them?</p>
+    <details>
+      <summary>Reveal answer</summary>
+      <p class="answer">Granularity. Reading a signal in a template updates only that specific binding. Reading
+      state via <code>useState</code> means the entire component function reruns on every change — React
+      re-renders whole components, not individual expressions.</p>
+    </details>
+  </div>
+
+  <div class="source">
+    <p class="label">Primary sources</p>
+    <p>
+      <a href="https://react.dev/learn/your-first-component">react.dev — Your First Component</a> ·
+      <a href="https://react.dev/learn/state-a-components-memory">react.dev — State: A Component's Memory</a> ·
+      <a href="https://react.dev/learn/responding-to-events">react.dev — Responding to Events</a> ·
+      <a href="https://angular.dev/guide/signals">angular.dev — Signals</a> (the comparison point, not the target)
+    </p>
+  </div>
+
+  <p class="ask">Anything unclear about the effect-driven vs. event-driven fetching distinction, or the
+  signal/useState granularity gap? Ask your teacher (this agent).</p>
+
+  <div class="nav">
+    <a href="0010-testing-search-feature.html">← Lesson 10: Testing the search feature</a>
+    <span>Next → Lesson 12: Testing React components (not yet written)</span>
+  </div>
+
+</div>
+</body>
+</html>
