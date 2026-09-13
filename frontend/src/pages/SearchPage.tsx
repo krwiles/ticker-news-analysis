@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { useSearchParams } from "react-router";
 import { HeadlineList } from "../components/HeadlineList";
 import { SearchBar } from "../components/SearchBar";
+import { SearchStatus } from "../components/SearchStatus";
 import { fetchSearch, type SearchResponse } from "../search";
 
 export function SearchPage() {
@@ -29,11 +30,9 @@ export function SearchPage() {
   }
 
   // The data-loading pattern: the URL itself drives what loads, not just a
-  // button click. Visiting /search?ticker=AAPL directly (a shared link, a
-  // bookmark, or the browser's Back/Forward) fetches with zero manual
-  // interaction -- this project's declarative-mode answer to what an
-  // Angular resolver does (React Router's *data* mode has real loaders;
-  // this project uses *declarative* mode, per RESOURCES.md, which doesn't).
+  // button click. Visiting /search?ticker=AAPL directly fetches with zero
+  // manual interaction -- this project's declarative-mode answer to what
+  // an Angular resolver does.
   //
   // Deliberately passed through as-is, not uppercased here -- the backend
   // already normalizes case (search.py's `ticker.upper()`), so a lowercase
@@ -48,17 +47,21 @@ export function SearchPage() {
   // Event-driven (form submit): normalizes once, writes the URL, and lets
   // the effect above pick up the resulting param change and do the actual
   // fetch -- one single fetch-triggering path, not two copies of it.
-  //
-  // Note: submitting the *same* ticker again doesn't change the URL, so it
-  // doesn't re-trigger a fetch -- exactly why spec 0001 needs a dedicated
-  // Refresh button (lesson 14) rather than relying on this path for that.
   function handleSearch(ticker: string) {
     setSearchParams({ ticker: ticker.toUpperCase() });
   }
 
-  // Combined list, not Today/Recent -- see HeadlineList's own comment.
-  // Lesson 14 replaces this with the real two-list split.
-  const headlines = results ? [...results.today, ...results.recent] : [];
+  // Refresh bypasses the URL entirely and calls runSearch directly -- the
+  // reason it needs its own trigger at all: resubmitting the *same*
+  // ticker via the search bar wouldn't change the URL, so it wouldn't
+  // re-fire the effect above. See lesson 13, and spec 0001's own words:
+  // Refresh "just calls the exact same GET /api/search again for the
+  // currently-shown ticker."
+  function handleRefresh() {
+    if (urlTicker) {
+      runSearch(urlTicker);
+    }
+  }
 
   return (
     <main className="mx-auto max-w-md px-6 py-16">
@@ -78,15 +81,36 @@ export function SearchPage() {
         />
       </div>
 
+      {/* Hiding results while loading (rather than showing stale ones
+          underneath a spinner) is deliberate, not a gap -- spec 0001's own
+          Non-goals rule out stale-then-fresh loading for v1. This applies
+          identically whether it's the first search or a Refresh. */}
       {loading && <p className="mt-6 text-sm text-slate-500">Searching…</p>}
       {error && <p className="mt-6 text-sm text-red-600">Couldn&apos;t reach the API: {error}</p>}
 
       {results && !loading && (
         <div className="mt-6">
-          <p className="mb-3 text-sm text-slate-500">
-            {results.ticker} — status: {results.status}
-          </p>
-          <HeadlineList headlines={headlines} />
+          <div className="mb-4 flex items-center justify-between gap-3">
+            <SearchStatus status={results.status} />
+            <button
+              type="button"
+              onClick={handleRefresh}
+              disabled={loading}
+              className="shrink-0 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-sm font-medium text-slate-700 shadow-sm hover:bg-slate-50 disabled:opacity-50"
+            >
+              Refresh
+            </button>
+          </div>
+
+          <section className="mb-8">
+            <h2 className="mb-3 text-sm font-semibold uppercase tracking-wide text-slate-500">Today</h2>
+            <HeadlineList headlines={results.today} emptyMessage="No headlines today." />
+          </section>
+
+          <section>
+            <h2 className="mb-3 text-sm font-semibold uppercase tracking-wide text-slate-500">Recent</h2>
+            <HeadlineList headlines={results.recent} emptyMessage="No other headlines in the past week." />
+          </section>
         </div>
       )}
     </main>

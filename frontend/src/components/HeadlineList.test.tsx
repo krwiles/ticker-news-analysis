@@ -17,40 +17,47 @@ function headline(overrides: Partial<Headline> = {}): Headline {
 }
 
 describe("HeadlineList", () => {
-  it("renders the empty state when there are no headlines", () => {
-    render(<HeadlineList headlines={[]} />);
-    expect(screen.getByText(/no headlines in the past week/i)).toBeInTheDocument();
+  it("renders the given emptyMessage when there are no headlines", () => {
+    render(<HeadlineList headlines={[]} emptyMessage="Nothing here yet." />);
+    expect(screen.getByText("Nothing here yet.")).toBeInTheDocument();
+  });
+
+  it("renders a caller-specific emptyMessage, not a fixed string", () => {
+    render(<HeadlineList headlines={[]} emptyMessage="No headlines today." />);
+    expect(screen.getByText("No headlines today.")).toBeInTheDocument();
   });
 
   it("renders a headline's title as a link to its real url", () => {
-    render(<HeadlineList headlines={[headline()]} />);
+    render(<HeadlineList headlines={[headline()]} emptyMessage="unused" />);
     const link = screen.getByRole("link", { name: "A real headline" });
     expect(link).toHaveAttribute("href", "https://example.com/a");
   });
 
   it("shows the outlet when present", () => {
-    render(<HeadlineList headlines={[headline({ outlet: "Yahoo" })]} />);
+    render(<HeadlineList headlines={[headline({ outlet: "Yahoo" })]} emptyMessage="unused" />);
     expect(screen.getByText(/via Yahoo/)).toBeInTheDocument();
   });
 
   it("omits outlet text when null", () => {
-    render(<HeadlineList headlines={[headline({ outlet: null })]} />);
+    render(<HeadlineList headlines={[headline({ outlet: null })]} emptyMessage="unused" />);
     expect(screen.queryByText(/via /)).not.toBeInTheDocument();
   });
 
   it("shows the summary when present", () => {
-    render(<HeadlineList headlines={[headline({ summary: "A short blurb." })]} />);
+    render(<HeadlineList headlines={[headline({ summary: "A short blurb." })]} emptyMessage="unused" />);
     expect(screen.getByText("A short blurb.")).toBeInTheDocument();
   });
 
   it("omits summary when null", () => {
-    const { container } = render(<HeadlineList headlines={[headline({ summary: null })]} />);
-    // Only the title link and the metadata line should exist -- no third <p>.
+    const { container } = render(
+      <HeadlineList headlines={[headline({ summary: null })]} emptyMessage="unused" />,
+    );
+    // Only the title link's row and the metadata line should exist -- no third <p>.
     expect(container.querySelectorAll("p")).toHaveLength(1);
   });
 
-  it("renders category as plain text, not a styled badge (regression guard for lesson 14)", () => {
-    render(<HeadlineList headlines={[headline({ category: "filing" })]} />);
-    expect(screen.getByText(/filing/)).toBeInTheDocument();
+  it("renders category via CategoryBadge, not plain text (lesson 14 replaces lesson 11's placeholder)", () => {
+    render(<HeadlineList headlines={[headline({ category: "filing" })]} emptyMessage="unused" />);
+    expect(screen.getByText("Filing")).toBeInTheDocument();
   });
 });
