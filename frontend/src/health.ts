@@ -19,9 +19,9 @@ export async function fetchHealth(): Promise<HealthResponse> {
   // Genuinely cross-origin: this page is served by the ui container, the
   // aggregate health check lives only on the api container. See
   // docs/adr/0002-cors-over-shared-health-router.md.
-  const res = await fetch(`${API_BASE_URL}/health`);
+  const res = await fetch(`${API_BASE_URL}/api/health`);
   if (!res.ok) {
-    throw new Error(`/health responded ${res.status}`);
+    throw new Error(`/api/health responded ${res.status}`);
   }
   return res.json();
 }
