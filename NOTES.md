@@ -93,10 +93,19 @@ fundamentals) was added after lesson 7, once a real teaching gap surfaced.
     then strengthened to a pair that genuinely distinguishes EST from EDT.
 11. **React fundamentals, from Angular** — components, JSX, hooks (`useState`/`useEffect`) mapped via the
     translation table above, built against the search bar + a first pass at rendering results from lesson 9's
-    endpoint.
-12. **React Router + how the UI actually works** — the data-loading pattern, router setup in `App.tsx`, tying
-    back to lesson 3's `/health` endpoint and lesson 9's new endpoint from the frontend side.
-13. **Today/Recent, category badges, and the Refresh button** — the UI polish that makes the feature match the
+    endpoint: one combined list (today+recent merged, category shown as plain text — the real split and
+    styled badges wait for lesson 14), mounted on a new `/search` route added now but not yet explained —
+    lesson 13 is where routing itself becomes the lesson. (plan: `docs/plans/0011-*.md`)
+12. **Testing React components** — inserted after lesson 11 (2026-09-11), mirroring how lessons 8 and 10 got
+    added mid-arc once a real teaching gap surfaced rather than being pre-planned: ADR 0005 deliberately
+    deferred the frontend testing-tool decision (Jest/Vitest vs. Testing Library, etc.) to exactly this point
+    ("when the React lessons actually begin") rather than deciding it in the abstract. Tests `SearchBar` and
+    `HeadlineList`, built in lesson 11.
+13. **React Router + how the UI actually works** — the data-loading pattern, router setup in `App.tsx`
+    (including a proper explanation of the `/search` route lesson 11 added ahead of this lesson, one-line
+    addition to the existing pattern with no new concepts introduced at the time), tying back to lesson 3's
+    `/health` endpoint and lesson 9's new endpoint from the frontend side.
+14. **Today/Recent, category badges, and the Refresh button** — the UI polish that makes the feature match the
     spec end to end: two recency lists, a badge per entry, a manual re-fetch, and the success/partial/failure
     status display. Capstone of arc 2 — after this, spec 0001 is fully built, not just modeled.
 
