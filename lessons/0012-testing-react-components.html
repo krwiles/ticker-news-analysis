@@ -1,0 +1,142 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 12 — Testing React Components</title>
+<link rel="stylesheet" href="../assets/lesson.css">
+</head>
+<body>
+<div class="lesson">
+
+  <p class="eyebrow">Lesson 12 of 14 · ticker-news-analysis stack (feature arc)</p>
+  <h1>Testing React components</h1>
+  <p class="subtitle">Vitest + Testing Library, and two real bugs the first test run caught before you did.</p>
+
+  <div class="callout">
+    <p>
+      Inserted after lesson 11 specifically to resolve something ADR 0005 deliberately left open: "frontend
+      testing tooling remains an open decision, to be made when the React lessons actually begin." That's now.
+      Tests all four of lesson 11's new files — <code>SearchBar</code>, <code>HeadlineList</code>,
+      <code>search.ts</code>, <code>SearchPage</code> — 20 tests, all passing.
+    </p>
+  </div>
+
+  <h2>The tool: Vitest, not Jest — and why that's not arbitrary</h2>
+  <p>
+    <code>tsconfig.json</code> is already fully modern-ESM (<code>"module": "ESNext"</code>,
+    <code>"moduleResolution": "bundler"</code>). Jest's ESM support still needs an extra transform layer
+    (<code>ts-jest</code> or <code>babel-jest</code>) to avoid CJS/ESM friction; Vitest handles it natively —
+    no new transform config, and no new plugin for JSX either (its built-in esbuild transform handles
+    <code>.tsx</code> out of the box). Vitest doesn't touch <code>webpack.config.js</code> at all — it's a
+    standalone test runner, the same relationship <code>pytest</code> has to <code>uvicorn</code>.
+  </p>
+
+  <h2>Two layers of mocking — the same two-layer shape lesson 10 used</h2>
+  <p>The backend's test suite has a real, worth-repeating shape:</p>
+  <table style="width:100%; border-collapse: collapse; margin: 0 0 1.3rem; font-size: 0.9rem;">
+    <tr style="border-bottom: 1px solid var(--border);">
+      <th style="text-align:left; padding: 0.4rem 0.6rem 0.4rem 0;">Backend (lesson 10)</th>
+      <th style="text-align:left; padding: 0.4rem 0;">Frontend (this lesson)</th>
+    </tr>
+    <tr>
+      <td style="padding: 0.4rem 0.6rem 0.4rem 0; vertical-align:top;"><code>respx</code> mocks real <code>httpx</code> calls</td>
+      <td style="padding: 0.4rem 0; vertical-align:top;"><code>vi.stubGlobal("fetch", ...)</code> in <code>search.test.ts</code></td>
+    </tr>
+    <tr>
+      <td style="padding: 0.4rem 0.6rem 0.4rem 0; vertical-align:top;"><code>app.dependency_overrides[get_arq_redis]</code></td>
+      <td style="padding: 0.4rem 0; vertical-align:top;"><code>vi.mock("../search")</code> in <code>SearchPage.test.tsx</code></td>
+    </tr>
+  </table>
+  <p>
+    Worth being precise about the contrast this reveals, tying back to lesson 11's DI discussion
+    (<code>[[di-mechanism-follows-two-independent-questions]]</code>): the backend's testability comes from
+    <strong>parameter injection</strong> — <code>session_factory</code> is a real argument, swapped by passing
+    a different one. <code>vi.mock("../search")</code> achieves the same goal a completely different way —
+    it replaces the entire <em>imported module</em> at the boundary, without <code>SearchPage.tsx</code> itself
+    needing any parameter for it. Same destination (a swappable test double at the seam), different mechanism —
+    because the ecosystem's idioms differ, not because one approach is more correct.
+  </p>
+
+  <h2>Bug #1, found on the first real test run: state leaking between tests</h2>
+  <div class="callout">
+    <p>
+      <code>HeadlineList.test.tsx</code>'s "omits outlet text when null" test failed — but the element it found
+      had <code>via Yahoo</code> in it, from the <em>previous</em> test. React Testing Library only
+      self-registers automatic cleanup between tests when it detects a <em>global</em> <code>afterEach</code> —
+      and this project deliberately keeps <code>test.globals</code> off (test files import
+      <code>describe</code>/<code>it</code>/<code>expect</code> explicitly from <code>"vitest"</code> rather
+      than relying on injected globals). Without a global to hook into, nothing ever unmounted the previous
+      render. Fixed explicitly in <code>vitest.setup.ts</code>:
+    </p>
+    <pre><code>import { cleanup } from "@testing-library/react";
+import { afterEach } from "vitest";
+
+afterEach(() => {
+  cleanup();
+});</code></pre>
+    <p>Keeps the "no injected globals" decision intact, rather than flipping on <code>globals: true</code> to make the automatic detection work.</p>
+  </div>
+
+  <h2>Bug #2: a setup file living outside <code>tsconfig.json</code>'s own <code>include</code></h2>
+  <p>
+    <code>npm run test</code> was green — but <code>npm run typecheck</code> failed everywhere, with errors
+    like <code>Property 'toBeInTheDocument' does not exist</code>. The matcher works at runtime
+    (<code>@testing-library/jest-dom/vitest</code> registers it against the real <code>expect</code>), but its
+    <em>type</em> declaration only gets loaded if TypeScript actually parses the file that imports it.
+    <code>vitest.setup.ts</code> lived at the repo root; <code>tsconfig.json</code>'s <code>"include": ["src"]</code>
+    never looked there — so <code>tsc</code> silently never saw the augmentation. Fixed by moving the setup
+    file to <code>src/vitest.setup.ts</code>, not by adding a new tsconfig <code>types</code> entry — the
+    smaller, more localized fix.
+  </p>
+
+  <h2>Check your understanding</h2>
+
+  <div class="check">
+    <p class="q">Q1. Why did <code>HeadlineList</code>'s "omits outlet" test see a leftover element from an
+    earlier test, and why doesn't setting <code>test.globals: true</code> get chosen as the fix here?</p>
+    <details>
+      <summary>Reveal answer</summary>
+      <p class="answer">Testing Library's automatic cleanup only self-registers by detecting a global
+      <code>afterEach</code>; this project deliberately doesn't inject globals, so nothing ever unmounted the
+      previous render. <code>globals: true</code> would fix it too, but at the cost of the explicit-imports
+      decision this project made on purpose — an explicit <code>afterEach(cleanup)</code> in the setup file
+      fixes the actual problem without touching that decision.</p>
+    </details>
+  </div>
+
+  <div class="check">
+    <p class="q">Q2. <code>search.test.ts</code> and <code>SearchPage.test.tsx</code> both "mock the network,"
+    but at different layers. What's the actual difference?</p>
+    <details>
+      <summary>Reveal answer</summary>
+      <p class="answer"><code>search.test.ts</code> stubs the raw <code>fetch</code> global -- it's testing
+      <code>fetchSearch</code> itself, the thing that talks to the network. <code>SearchPage.test.tsx</code>
+      mocks the entire <code>search.ts</code> module -- it's testing a <em>consumer</em> of
+      <code>fetchSearch</code>, which shouldn't care how the network call is made, only what it returns. Same
+      shape as respx (mocks the HTTP layer) vs. dependency_overrides (mocks one layer up, at the endpoint's own
+      boundary) on the backend.</p>
+    </details>
+  </div>
+
+  <div class="source">
+    <p class="label">Primary sources</p>
+    <p>
+      <a href="https://vitest.dev/guide/">Vitest docs</a> ·
+      <a href="https://testing-library.com/docs/react-testing-library/intro/">Testing Library docs — React Testing Library</a> ·
+      <a href="https://testing-library.com/docs/user-event/intro/">Testing Library docs — user-event</a> ·
+      <a href="https://github.com/testing-library/jest-dom">@testing-library/jest-dom</a>
+    </p>
+  </div>
+
+  <p class="ask">Anything unclear about why cleanup needed to be explicit, or the two mocking layers? Ask your
+  teacher (this agent).</p>
+
+  <div class="nav">
+    <a href="0011-react-search-bar-and-first-render.html">← Lesson 11: React fundamentals, from Angular</a>
+    <span>Next → Lesson 13: React Router (not yet written)</span>
+  </div>
+
+</div>
+</body>
+</html>
