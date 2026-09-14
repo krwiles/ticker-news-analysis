@@ -1,0 +1,71 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  frontend-tests:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run test
+      - run: npm run build
+
+  backend-tests:
+    runs-on: ubuntu-latest
+    # No job-level `defaults.run.working-directory` here, deliberately --
+    # `dbmate up` needs to run from the repo root (db/migrations/ is
+    # relative to it) while `uv run pytest` needs to run from backend/.
+    # Each step below sets its own working-directory explicitly instead of
+    # relying on how a step-level override interacts with a job default.
+    services:
+      # Matches docker-compose.yml's real `db` service image exactly, and
+      # conftest.py's own documented default connection string (ticker /
+      # ticker / ticker_test) -- no env var overrides needed in this job.
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: ticker
+          POSTGRES_PASSWORD: ticker
+          POSTGRES_DB: ticker_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v4
+      # dbmate has no version pin anywhere else in this repo -- pinned here
+      # to the version verified locally (2.35.1), not "latest".
+      - name: Install dbmate
+        run: |
+          curl -fsSL -o /usr/local/bin/dbmate \
+            https://github.com/amacneil/dbmate/releases/download/v2.35.1/dbmate-linux-amd64
+          chmod +x /usr/local/bin/dbmate
+      - name: Run migrations against the test database
+        run: dbmate --url "postgres://ticker:ticker@localhost:5432/ticker_test?sslmode=disable" up
+      - run: uv run pytest
+        working-directory: backend
+
+  docker-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Validates the real multi-stage build (ADR 0001) still succeeds --
+      # not pushed anywhere, no registry target exists yet.
+      - run: docker build .
