@@ -1,0 +1,154 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 15 — Continuous Integration with GitHub Actions</title>
+<link rel="stylesheet" href="../assets/lesson.css">
+</head>
+<body>
+<div class="lesson">
+
+  <p class="eyebrow">Lesson 15 of 15 · ticker-news-analysis stack (infra arc — Arc 3)</p>
+  <h1>Continuous integration with GitHub Actions</h1>
+  <p class="subtitle">Arc 3 opens: wiring up tests that already pass, so they keep passing without you having to remember to run them.</p>
+
+  <div class="callout">
+    <p>
+      A tech-stack audit (previous session) compared the original stack list against what's actually been
+      used. GitHub Actions was named but never built — <code>.github/workflows/</code> didn't exist until this
+      lesson. Lowest-effort candidate of everything still unused: both test suites already exist and pass, this
+      just reproduces that in CI.
+    </p>
+  </div>
+
+  <h2>Three jobs, not one — and why that split matters</h2>
+  <p>
+    <code>.github/workflows/ci.yml</code> defines three independent jobs, each running on its own fresh
+    runner, in parallel by default:
+  </p>
+  <pre><code>jobs:
+  frontend-tests: ...
+  backend-tests: ...
+  docker-build: ...</code></pre>
+  <p>
+    This mirrors the project's own directory split (<code>frontend/</code>, <code>backend/</code>, one shared
+    <code>Dockerfile</code>) rather than one long job doing everything sequentially. The practical payoff: if
+    only the frontend breaks, you see that immediately in the job list — you're not waiting on an unrelated
+    backend job to finish first, and a red X next to "frontend-tests" tells you exactly where to look before
+    you've even opened the log.
+  </p>
+
+  <h2>Service containers: a real Postgres, without touching <code>docker-compose.yml</code></h2>
+  <p>
+    <code>backend/tests/conftest.py</code> has said since lesson 10: "Tests run on the host... never inside a
+    container... everything here talks to Postgres via <code>localhost</code>." A GitHub Actions
+    <strong>service container</strong> is built for exactly this shape — a sidecar Postgres the job's own
+    steps reach at <code>localhost:5432</code>, with no compose file involved at all:
+  </p>
+  <pre><code>services:
+  postgres:
+    image: postgres:17-alpine
+    env:
+      POSTGRES_USER: ticker
+      POSTGRES_PASSWORD: ticker
+      POSTGRES_DB: ticker_test
+    options: --health-cmd pg_isready --health-interval 5s ...</code></pre>
+  <p>
+    Pinned to <code>postgres:17-alpine</code> deliberately — the exact same image
+    <code>docker-compose.yml</code>'s real <code>db</code> service uses, not an arbitrary different version.
+    The user/password/database names match <code>conftest.py</code>'s own documented default connection
+    string exactly, so the job needs zero environment-variable overrides to make the two agree.
+  </p>
+
+  <h2>Pin what has no lockfile; don't bother pinning what does</h2>
+  <p>
+    Two very different choices sit right next to each other in the <code>backend-tests</code> job, worth
+    contrasting directly:
+  </p>
+  <pre><code>- uses: astral-sh/setup-uv@v4
+- run: curl -fsSL -o /usr/local/bin/dbmate \
+    https://github.com/amacneil/dbmate/releases/download/v2.35.1/dbmate-linux-amd64</code></pre>
+  <p>
+    <code>uv</code> gets no specific version pin — <code>uv.lock</code> already pins every actual Python
+    dependency precisely; <code>uv</code>'s own version matters far less for reproducibility, since it's just
+    the tool reading an already-locked manifest. <code>dbmate</code> is different: it has <strong>no lockfile
+    equivalent anywhere in this repo</strong> — nothing else records which version applied these migrations
+    last, or guarantees a newer one behaves identically. Pinned to <code>2.35.1</code>, the exact version
+    verified locally, specifically because nothing else here provides that guarantee.
+  </p>
+
+  <h2>A YAML gotcha worth naming: <code>working-directory</code> composition isn't obvious</h2>
+  <div class="callout">
+    <p>
+      The first draft of <code>backend-tests</code> used a job-level
+      <code>defaults.run.working-directory: backend</code>, then tried to override it per-step for the
+      <code>dbmate</code> command (which needs the repo root, since <code>db/migrations/</code> is relative to
+      <em>that</em>, not to <code>backend/</code>). Whether a step's own <code>working-directory</code>
+      composes with or fully replaces a job-level default isn't something worth guessing at and hoping — get
+      it wrong and <code>dbmate</code> silently looks in the wrong place for migrations, or worse, half-applies
+      something confusing. Fixed by removing the job-level default entirely and setting
+      <code>working-directory</code> explicitly on the one step that needs it (<code>uv run pytest</code>),
+      leaving the <code>dbmate</code> steps to use the workspace root implicitly. Unambiguous beats clever.
+    </p>
+  </div>
+
+  <h2>What this lesson deliberately doesn't do</h2>
+  <p>
+    No linter is wired in — none exists on either side of this repo yet; that's its own decision (which tool,
+    which rules), not something to slip in unannounced while "just" setting up CI. No live end-to-end smoke
+    test either — bringing up all five <code>docker-compose</code> services and hitting a real
+    <code>/api/search</code> would need a real Finnhub API key as a GitHub secret and meaningfully more
+    machinery. The existing 17 backend + 38 frontend tests, all of them mocked at their real boundaries
+    (<code>respx</code>, <code>vi.mock</code>), are this pass's actual regression coverage — CI's job is to run
+    them reliably, not to replace them with something bigger.
+  </p>
+
+  <h2>Check your understanding</h2>
+
+  <div class="check">
+    <p class="q">Q1. Why does <code>dbmate</code> get a specific version pin in this workflow while
+    <code>uv</code> doesn't?</p>
+    <details>
+      <summary>Reveal answer</summary>
+      <p class="answer"><code>uv.lock</code> already pins every real Python dependency precisely -- uv's own
+      version mostly just reads that lockfile faithfully. dbmate has no equivalent lockfile anywhere in this
+      repo recording which version last applied migrations, so nothing else guarantees a different dbmate
+      version would behave identically -- pinning it here is the only reproducibility guarantee that exists
+      for it at all.</p>
+    </details>
+  </div>
+
+  <div class="check">
+    <p class="q">Q2. Why does the Postgres service container use <code>postgres:17-alpine</code> specifically,
+    and the exact <code>ticker</code>/<code>ticker</code>/<code>ticker_test</code> credentials, rather than
+    whatever was convenient?</p>
+    <details>
+      <summary>Reveal answer</summary>
+      <p class="answer">To match two things exactly rather than introduce a third, different environment:
+      docker-compose.yml's real db service image (so CI's Postgres version matches what actually runs
+      everywhere else), and conftest.py's own already-documented default connection string (so the job needs
+      zero environment-variable overrides for the two to agree).</p>
+    </details>
+  </div>
+
+  <div class="source">
+    <p class="label">Primary sources</p>
+    <p>
+      <a href="https://docs.github.com/en/actions/writing-workflows/about-workflows">GitHub Actions docs — About workflows</a> ·
+      <a href="https://docs.github.com/en/actions/using-containerized-services/about-service-containers">GitHub Actions docs — Service containers</a> ·
+      <a href="https://docs.github.com/en/actions/writing-workflows/choosing-what-your-workflow-does/defining-outputs-for-jobs#default-shell-and-working-directory">GitHub Actions docs — Default working directory</a>
+    </p>
+  </div>
+
+  <p class="ask">Anything unclear about the service-container setup, or why the working-directory ambiguity
+  mattered enough to rewrite around instead of just testing it and hoping? Ask your teacher (this agent).</p>
+
+  <div class="nav">
+    <a href="0014-today-recent-badges-and-refresh.html">← Lesson 14: Today/Recent, badges, and Refresh</a>
+    <span>Arc 3 continues — next lesson not yet planned</span>
+  </div>
+
+</div>
+</body>
+</html>
