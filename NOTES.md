@@ -126,6 +126,26 @@ fundamentals) was added after lesson 7, once a real teaching gap surfaced.
     arc 2 — after this, spec 0001 is fully built, not just modeled. ✅ built (plan: `docs/plans/0014-*.md`) —
     38 tests passing, all green. Arc 2 is complete.
 
+### Arc 3 — infra/deployment (opened 2026-09-14, following a tech-stack audit)
+
+With spec 0001 fully built, a tech-stack audit compared what's actually been used against the original stack
+list (`MISSION.md`'s and the `nvidia-vulnops-portfolio-stack` project memory's). Genuinely learned: everything
+in arcs 1–2. Still unused: Kubernetes/OpenShift/ArgoCD, Vault, Milvus, GitHub Actions, Kaizen UI (deferred, not
+dropped — see the memory's "Next steps, brainstormed" section for the full reasoning and feature ideas per
+item). GitHub Actions was picked as the lowest-effort, most-ready candidate: both test suites already exist and
+pass, no new secrets/services beyond what CI itself needs to stand up.
+
+15. **Continuous integration with GitHub Actions** — wires up the existing 17 backend + 38 frontend tests (no
+    new tests written for this lesson — the point is reproducing what already passes locally, in CI) plus a
+    Docker build validation, into one `.github/workflows/ci.yml` with three independent jobs
+    (`frontend-tests`, `backend-tests`, `docker-build`), all running on every push/PR. No secrets needed —
+    verified, not assumed: every backend test mocks provider calls via `respx`. Postgres service container
+    pinned to `postgres:17-alpine` and Node to `24`, both matching what `docker-compose.yml`/`Dockerfile`
+    already use, rather than arbitrary different versions. `dbmate` pinned to `2.35.1` (the locally-verified
+    version — no version pin existed anywhere in-repo before this). Deliberately out of scope: linting (no
+    linter exists on either side yet — a separate decision), a live end-to-end smoke test (the existing mocked
+    suites are the real regression coverage for this pass). (plan: `docs/plans/0015-*.md`)
+
 ## Preferences
 - Wants an example data table created once the spec round produces a real entity to model it on (lesson 6 above), not before — don't front-load schema/domain work into earlier lessons. Satisfied: spec 0001 + `CONTEXT.md` now exist, arc 2 is modeled on them.
 - Confirmed (2026-09-08): prefers small vertical slices over front-loaded theory or a build-everything-then-explain approach — a short concept intro right before building each slice, then verify it against the live stack, then move to the next slice. This is why arc 2 became 6 (now 7) lessons instead of 3.
