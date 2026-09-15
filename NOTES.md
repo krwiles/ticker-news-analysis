@@ -162,7 +162,17 @@ UI — not because that order is mandatory, just because it's the shape that's w
 16. **Milvus, standalone** — docker-compose wiring (`etcd` + `MinIO` sidecars, the real standalone shape,
     chosen deliberately over Milvus Lite for scalability exposure per the spec's own reasoning), a real
     collection, basic insert/search via `pymilvus` — no app logic yet. Walking-skeleton style, same as how
-    lesson 1 proved the container architecture before lesson 6 put a real table in Postgres.
+    lesson 1 proved the container architecture before lesson 6 put a real table in Postgres. ✅ built (plan:
+    `docs/plans/0016-*.md`) — two real bugs found live: (1) the fetched reference config itself was broken —
+    MinIO pulled `minio/minio` from Docker Hub entirely this week; fixed via `quay.io/minio/minio`, same tag,
+    cross-checked against Milvus' own maintainers hitting the identical issue; (2) a healthy `milvus` container
+    still returned zero search results after a real insert — `insert()` doesn't make data searchable until
+    explicitly `flush()`ed, confirmed via `get_collection_stats()` (`row_count` stayed 0 until flushed). Second
+    finding flagged explicitly for lesson 19: a new Story's primary embedding needs to be flushed somewhere in
+    the real matching flow, not just in a throwaway script. `worker`'s `depends_on` deliberately not shared via
+    the `&app` anchor like `db`/`redis` are — Milvus' 90s healthcheck `start_period` would otherwise slow down
+    `api`/`ui` startup for a dependency they'll never use; verified live that `api`/`ui` start without waiting
+    on it while `worker` does.
 17. **The `stories` table + migration** — `SQLAlchemy` model + `dbmate` migration for `stories`
     (`id`/`ticker`/`primary_headline_id`) and `headlines.story_id` (real `NOT NULL` FK). Mirrors lesson 6's
     shape exactly: schema first, no matching logic wired to it yet.
