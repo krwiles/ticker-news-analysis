@@ -29,9 +29,16 @@ export function HeadlineList({ headlines, emptyMessage }: HeadlineListProps) {
             <CategoryBadge category={headline.category} />
           </div>
           <p className="mt-1 text-xs text-slate-500">
+            {/* outlet is the original publisher (e.g. "Yahoo"), reported by
+                some providers but not others -- EDGAR filings never have
+                one (it IS the source), so this whole segment renders as
+                nothing rather than an empty "via" when it's null. */}
             {headline.outlet && `via ${headline.outlet} · `}
             {new Date(headline.published_at).toLocaleString()}
           </p>
+          {/* summary is a free blurb some providers hand back directly --
+              never fetched separately, and just absent when a provider
+              doesn't give one (e.g. EDGAR). */}
           {headline.summary && <p className="mt-1 text-sm text-slate-600">{headline.summary}</p>}
         </li>
       ))}

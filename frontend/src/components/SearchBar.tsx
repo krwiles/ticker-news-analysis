@@ -19,8 +19,12 @@ export function SearchBar({ onSearch, disabled, initialValue }: SearchBarProps) 
   const [ticker, setTicker] = useState(initialValue ?? "");
 
   function handleSubmit(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
+    event.preventDefault(); // stop the browser's own full-page-reload form submission
     const trimmed = ticker.trim();
+    // Silently refuses to search on empty/whitespace-only input, rather
+    // than calling onSearch("") -- deliberate, not a missed edge case:
+    // spec 0001 has no ticker-validation requirement, but there's still no
+    // reason to fire a request that can only ever come back empty.
     if (trimmed) {
       onSearch(trimmed);
     }

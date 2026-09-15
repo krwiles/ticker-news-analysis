@@ -21,6 +21,9 @@ log = structlog.get_logger()
 
 
 async def heartbeat(ctx: dict) -> None:
+    """An ARQ cron job, not enqueued by anything -- runs on its own schedule
+    (see WorkerSettings.cron_jobs below), the only proof-of-life this
+    process has since it runs no HTTP server of its own."""
     await ctx["redis"].set(WORKER_HEARTBEAT_KEY, str(time.time()))
     log.info("worker.heartbeat")
 
@@ -33,6 +36,14 @@ async def fetch_headlines_job(ctx: dict, ticker: str) -> dict:
 
 
 class WorkerSettings:
+    """ARQ discovers this class by name (`arq ticker_backend.worker.WorkerSettings`,
+    see docker-compose.yml's worker command) -- not imported and called
+    directly anywhere in this codebase."""
+
+    # Enqueue-able job functions -- what /api/search's `enqueue_job(...)`
+    # is actually dispatching to (ADR 0004).
     functions = [fetch_headlines_job]
+    # Runs on its own, every 5 seconds, no external trigger -- the other
+    # ARQ pattern this project deliberately exercises alongside `functions`.
     cron_jobs = [cron(heartbeat, second=set(range(0, 60, 5)))]
     redis_settings = RedisSettings.from_dsn(settings.redis_url)

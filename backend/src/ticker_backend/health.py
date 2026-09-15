@@ -26,6 +26,8 @@ WORKER_STALE_AFTER_SECONDS = 30
 
 
 async def check_db() -> dict:
+    """A real query, not just "is the connection object truthy" -- SELECT 1
+    is the cheapest possible proof the database is actually answering."""
     try:
         async with engine.connect() as conn:
             await conn.execute(text("SELECT 1"))
@@ -36,6 +38,9 @@ async def check_db() -> dict:
 
 
 async def check_redis() -> tuple[dict, Redis | None]:
+    """Returns the live client alongside the status, not just the status --
+    check_worker (below) needs a real connection to read the heartbeat key,
+    and opening a second one there would be redundant."""
     client = Redis.from_url(settings.redis_url)
     try:
         await client.ping()
@@ -47,6 +52,10 @@ async def check_redis() -> tuple[dict, Redis | None]:
 
 
 async def check_worker(client: Redis | None) -> dict:
+    """"unknown" (can't tell -- Redis itself is down) is a distinct state
+    from "error" (Redis works, but the worker has never checked in) and
+    "stale" (it checked in, just not recently enough to trust) -- three
+    different failure shapes an operator would want to tell apart."""
     if client is None:
         return {"status": "unknown", "detail": "redis unavailable"}
 
@@ -62,6 +71,9 @@ async def check_worker(client: Redis | None) -> dict:
 
 @router.get("/api/health")
 async def health() -> dict:
+    """The one aggregate endpoint `api` mode exposes -- see the module
+    docstring for why the browser calls this instead of polling db/redis/
+    worker separately itself."""
     db_status = await check_db()
     redis_status, redis_client = await check_redis()
     worker_status = await check_worker(redis_client)
@@ -85,4 +97,6 @@ ui_router = APIRouter()
 
 @ui_router.get("/health")
 async def ui_health() -> dict:
+    """Deliberately trivial -- proves this container itself is up, nothing
+    more. The real aggregate is `health()` above, on the api container."""
     return {"status": "ok"}

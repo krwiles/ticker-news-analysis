@@ -56,6 +56,9 @@ def get_session_factory():
 
 
 def _headline_to_dict(headline: Headline) -> dict:
+    """The response shape for one headline -- deliberately not every column
+    on the ORM model (no `id`, no `fetched_at`): this is what the frontend
+    actually needs, not a raw dump of the row."""
     return {
         "title": headline.title,
         "url": headline.url,
@@ -89,6 +92,11 @@ async def search(
     arq_redis: ArqRedis = Depends(get_arq_redis),
     session_factory=Depends(get_session_factory),
 ) -> dict:
+    """See the module docstring for the two-step shape. Also this project's
+    frontend/backend case-insensitivity boundary: the frontend (lesson 13)
+    deliberately does *not* uppercase a ticker read from the URL before
+    calling this endpoint -- this line is where that normalization
+    actually happens, once, so every caller can stay careless about case."""
     ticker = ticker.upper()
 
     providers_status: dict[str, str] = {}

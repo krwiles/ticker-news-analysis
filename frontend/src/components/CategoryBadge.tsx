@@ -4,6 +4,8 @@ interface CategoryBadgeProps {
   category: Headline["category"];
 }
 
+// "news" and "filing" (the backend's exact category values, see search.py)
+// aren't fit for display as-is -- capitalized, human-facing labels.
 const LABEL: Record<Headline["category"], string> = {
   news: "News",
   filing: "Filing",

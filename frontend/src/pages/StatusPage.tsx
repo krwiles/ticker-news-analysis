@@ -8,7 +8,15 @@ export function StatusPage() {
   const [health, setHealth] = useState<HealthResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
 
+  // Effect-driven, on a timer -- contrast with SearchPage's event-driven
+  // fetch (only runs in response to a user action). This one polls on its
+  // own schedule for as long as the page is mounted.
   useEffect(() => {
+    // Guards against a real race: if this component unmounts (navigating
+    // away) while a poll() call is still awaiting a response, its result
+    // would otherwise arrive and call setState on an unmounted component.
+    // No Angular/RxJS equivalent needed here -- a plain fetch Promise has
+    // no built-in cancel-on-unsubscribe the way an Observable does.
     let cancelled = false;
 
     async function poll() {
@@ -25,13 +33,13 @@ export function StatusPage() {
       }
     }
 
-    poll();
+    poll(); // fire once immediately, don't wait POLL_INTERVAL_MS for the first result
     const id = setInterval(poll, POLL_INTERVAL_MS);
     return () => {
       cancelled = true;
       clearInterval(id);
     };
-  }, []);
+  }, []); // empty deps: subscribe once on mount, not on every render
 
   return (
     <main className="mx-auto max-w-md px-6 py-16">
