@@ -41,9 +41,12 @@ class Company(Base):
 class Headline(Base):
     """One piece of tracked news content about a Ticker — see CONTEXT.md.
 
-    `sentiment` fields aren't here yet on purpose: spec 0001 doesn't need
-    them, spec 0002 will add them in their own migration when that feature
-    actually starts.
+    Two things deliberately not here yet, both in their own future migration
+    when that feature actually starts: `sentiment` (positive/neutral/
+    negative + gloss + summary, per CONTEXT.md's Headline entry — pushed to
+    a later, not-yet-numbered spec after spec 0002 claimed that slot for
+    Story grouping instead) and `story_id` (a real FK into a new `stories`
+    table, spec 0002's own addition — see docs/specs/0002-daily-story-grouping.md).
     """
 
     __tablename__ = "headlines"
