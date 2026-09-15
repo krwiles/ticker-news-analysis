@@ -1,0 +1,154 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 16 — Milvus, Standalone</title>
+<link rel="stylesheet" href="../assets/lesson.css">
+</head>
+<body>
+<div class="lesson">
+
+  <p class="eyebrow">Lesson 16 of 16 · ticker-news-analysis stack (infra arc — Arc 4)</p>
+  <h1>Milvus, standalone</h1>
+  <p class="subtitle">Arc 4 opens: three new containers, no app logic yet — and two real bugs found live before a single line of grouping code exists.</p>
+
+  <div class="callout">
+    <p>
+      Milvus is the one item left on the original stack list (<code>MISSION.md</code>) with zero lessons behind
+      it. This one proves the infra works — a real collection, real insert/search via <code>pymilvus</code> —
+      with nothing wired into <code>providers.py</code> yet. See
+      <code>docs/specs/0002-daily-story-grouping.md</code> for what it's actually for.
+    </p>
+  </div>
+
+  <h2>Fetched the real reference config, not the remembered one</h2>
+  <p>
+    Standalone Milvus needs two sidecars — <code>etcd</code> for metadata, <code>MinIO</code> for object storage
+    — neither talked to directly by this app, both just giving <code>milvus</code> somewhere to keep state.
+    Rather than approximate that shape from memory, the actual current
+    <a href="https://github.com/milvus-io/milvus/blob/master/deployments/docker/standalone/docker-compose.yml">milvus-io/milvus reference compose file</a>
+    got fetched directly — exact image tags, environment variables, healthchecks. Same "never trust
+    parametric knowledge" discipline this whole project has used for EDGAR/Finnhub response shapes, applied to
+    infrastructure config instead of an HTTP response.
+  </p>
+  <p>
+    Two deliberate departures from copying it verbatim: named Docker volumes instead of the reference's
+    bind-mounts (matching this file's own <code>db-data</code> convention), and no separate <code>networks:</code>
+    block — that reference declares one because it's a *standalone* file with nothing else in it; here,
+    <code>etcd</code>/<code>minio</code>/<code>milvus</code> join the same default network
+    <code>db</code>/<code>redis</code>/<code>api</code>/<code>ui</code>/<code>worker</code> already share.
+  </p>
+
+  <h2>Bug #1: the reference config itself was already broken</h2>
+  <div class="callout">
+    <p>
+      <code>docker compose up</code> on the fetched config failed immediately:
+      <code>pull access denied for minio/minio, repository does not exist</code>. Not a typo — MinIO
+      <a href="https://github.com/milvus-io/milvus/issues/53430">archived its open-source edition and pulled
+      every <code>minio/minio</code> image from Docker Hub</a>, a change that finished landing this exact week.
+      The fix, cross-checked against Milvus' own maintainers hitting the identical bug: same tag, different
+      registry —
+    </p>
+    <pre><code>quay.io/minio/minio:RELEASE.2024-05-28T17-19-04Z</code></pre>
+    <p>
+      Verified by actually pulling it before touching the compose file, not just trusting the GitHub issue.
+      Worth sitting with: a reference config from an official source can still be stale by the time you use it
+      — "verify against reality" doesn't stop applying just because the source looks authoritative.
+    </p>
+  </div>
+
+  <h2>Bug #2: a healthy container proved less than it looked like</h2>
+  <div class="callout">
+    <p>
+      With all three containers reporting healthy, the first <code>pymilvus</code> smoke test inserted three
+      vectors and searched for the nearest neighbor — and got back <strong>zero results</strong>. Not an error,
+      just silently empty. Debugging isolated it precisely:
+    </p>
+    <pre><code>client.insert(collection_name=..., data=[...])
+client.get_collection_stats(collection_name=...)  # {'row_count': 0}  <- still zero!
+
+client.flush(collection_name=...)
+client.get_collection_stats(collection_name=...)  # {'row_count': 1}  <- now it's there</code></pre>
+    <p>
+      <code>insert()</code> doesn't make data searchable on its own — it lands in memory/WAL, not a sealed,
+      queryable segment, until explicitly flushed. This isn't just a smoke-test footnote: it's a real
+      constraint on lesson 19's actual design. When a new headline's embedding gets inserted as a fresh
+      Story's primary, that primary needs to be searchable by whatever headline comes next — which means
+      <code>flush()</code> has to be part of that flow somewhere, not a one-off call in a throwaway script.
+      Flagged here for lesson 19 to actually solve, not solved now.
+    </p>
+  </div>
+
+  <h2>Real proof, once both bugs were fixed</h2>
+  <pre><code># three vectors: "alpha", "beta" (deliberately dissimilar), "alpha-near-duplicate"
+Nearest neighbors to alpha:
+  id=1 label=alpha                 distance=1.0000
+  id=3 label=alpha-near-duplicate  distance=0.9970</code></pre>
+  <p>
+    <code>beta</code> correctly never shows up — a small, deliberate preview of exactly the mechanic spec 0002
+    actually needs: given one vector, find its real near-duplicates, not everything in the collection.
+  </p>
+
+  <h2>Why <code>worker</code> alone waits on Milvus, not <code>api</code>/<code>ui</code> too</h2>
+  <p>
+    <code>db</code>/<code>redis</code> are shared across all three app containers via one <code>&app</code>
+    anchor — simplicity over precision, since <code>ui</code> doesn't actually need either but inherits the
+    dependency anyway. Milvus breaks that pattern deliberately: its healthcheck has a real 90-second
+    <code>start_period</code>, and only <code>worker</code> will ever call it (starting lesson 18). Making it
+    shared would slow down <code>api</code>/<code>ui</code> startup for a dependency they'll never use. Fixed
+    by extracting <code>depends_on</code> into its own named anchor (<code>&app-depends-on</code>), the same
+    move already applied to <code>environment</code> — <code>worker</code> merges it and adds
+    <code>milvus</code>, <code>api</code>/<code>ui</code> keep using the shared anchor unchanged. Verified
+    live, not just read from the YAML: on <code>docker compose up</code>, <code>api</code>/<code>ui</code>
+    started the moment <code>db</code>/<code>redis</code> were healthy; <code>worker</code> visibly waited on
+    <code>milvus</code> too.
+  </p>
+
+  <h2>Check your understanding</h2>
+
+  <div class="check">
+    <p class="q">Q1. Why did the first smoke test's search come back empty even though the insert call itself
+    reported success?</p>
+    <details>
+      <summary>Reveal answer</summary>
+      <p class="answer">Milvus' insert() lands data in memory/WAL, not a sealed segment search actually
+      queries -- it isn't searchable until flushed. get_collection_stats() confirmed this precisely: row_count
+      stayed 0 after insert, and only became 1 after an explicit flush() call.</p>
+    </details>
+  </div>
+
+  <div class="check">
+    <p class="q">Q2. Why does <code>worker</code> get its own <code>depends_on</code> block instead of just
+    adding <code>milvus</code> to the shared <code>&app</code> anchor <code>db</code>/<code>redis</code>
+    already use?</p>
+    <details>
+      <summary>Reveal answer</summary>
+      <p class="answer">Milvus' healthcheck has a real 90-second start_period, and only worker will ever call
+      it. Sharing the dependency the way db/redis are shared (simplicity over precision, since even ui
+      inherits them despite not needing either) would make api/ui wait on a service they'll never use --
+      worth the small extra anchor-extraction complexity to avoid.</p>
+    </details>
+  </div>
+
+  <div class="source">
+    <p class="label">Primary sources</p>
+    <p>
+      <a href="https://github.com/milvus-io/milvus/blob/master/deployments/docker/standalone/docker-compose.yml">milvus-io/milvus — standalone reference compose</a> ·
+      <a href="https://github.com/milvus-io/milvus/issues/53430">milvus-io/milvus issue #53430 — MinIO Docker Hub removal</a> ·
+      <a href="https://milvus.io/docs/manage-collections.md">Milvus docs — flush and data visibility</a> ·
+      <a href="https://milvus.io/docs/quickstart.md">Milvus docs — pymilvus quickstart</a>
+    </p>
+  </div>
+
+  <p class="ask">Anything unclear about the flush() timing, or why the depends_on anchor got split instead of
+  just duplicating db/redis by hand for worker? Ask your teacher (this agent).</p>
+
+  <div class="nav">
+    <a href="0015-github-actions-ci.html">← Lesson 15: Continuous integration with GitHub Actions</a>
+    <span>Next → Lesson 17: The stories table + migration (not yet written)</span>
+  </div>
+
+</div>
+</body>
+</html>
