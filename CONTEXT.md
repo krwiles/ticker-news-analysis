@@ -52,3 +52,16 @@ The current calendar day in US Eastern time — the stock market's trading day �
 local timezone. This is a tool about US-market news, so "today" anchors to the market's day regardless of where
 it's viewed from. Computed fresh whenever Headlines are grouped, never stored.
 _Avoid_: "today" meaning UTC or the browser's local timezone
+
+**Story**:
+The real-world event two or more same-day, same-ticker Headlines can describe in common — detected via
+embedding similarity (Milvus), not text/URL matching. A grouping *over* Headlines, not a replacement for the
+concept: a Headline still means exactly what its entry above says; a Story sits one level above it. Every
+Headline belongs to exactly one Story, even one with no near-duplicates (a "story of one"). A Story's primary
+Headline — its earliest-published member, fixed permanently once set — is what's shown as the Story's face in
+the UI and what later same-day candidates are compared against; other members appear only via an expandable
+list. Filing-category Headlines never participate in grouping — always a Story of one, by construction.
+Grouping never spans two calendar days or two tickers.
+_Avoid_: "Group" as the noun — the `Today` entry above already uses "grouped" as a plain verb for the
+unrelated day-bucketing concept; reusing "Group" here risks exactly the collision that entry's own _Avoid_ is
+meant to prevent elsewhere.

@@ -1,7 +1,5 @@
 # News Search
 
-*Rename this file once the name settles — keep the `0001-` prefix, next spec is `0002-`.*
-
 This is the spec for the first real feature built on top of the walking skeleton. It gives lessons 6–8
 (FastAPI+SQLAlchemy, React, React Router) a real entity to teach against instead of an invented placeholder —
 see `NOTES.md`'s arc-2 hinge. Finalized via a grilling + domain-modeling round; entity definitions live in
@@ -45,9 +43,11 @@ e.g. AAPL, MSFT — without having to search online manually.
 
 - no complete historical gathering of news or filings
 - no gathering of news or filings older than a week
-- no sentiment analysis of articles/filings — a separate concern, own spec (0002) once this ships
-- no embedding-based near-duplicate detection across sources — Milvus is deferred; this pass's dedup is
-  link-based only
+- no sentiment analysis of articles/filings — a separate concern, own spec once this ships. **Not spec 0002**:
+  that slot went to near-duplicate/story grouping instead (`docs/specs/0002-daily-story-grouping.md`) — a
+  later spec number, TBD.
+- no embedding-based near-duplicate detection across sources — was deferred here; now underway, see
+  `docs/specs/0002-daily-story-grouping.md`
 - no ticker validation against a known list — an invalid/unknown ticker just yields an empty or error result,
   not a rejected search
 - no Refresh button throttle/cooldown — personal-project scale doesn't warrant it yet; noted as a future idea
@@ -149,7 +149,8 @@ too, surfaced the same way, not a hung request.
 Empty state: a ticker with no headlines in the past week at all says so plainly, not looking broken or stuck
 loading.
 
-No sentiment/analysis output in this feature — that's explicitly out of scope (see Non-goals, spec 0002).
+No sentiment/analysis output in this feature — that's explicitly out of scope (see Non-goals above; not spec
+0002, which is near-duplicate/story grouping instead — see `docs/specs/0002-daily-story-grouping.md`).
 
 ## Open questions / assumptions
 
