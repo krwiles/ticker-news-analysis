@@ -144,7 +144,12 @@ pass, no new secrets/services beyond what CI itself needs to stand up.
     already use, rather than arbitrary different versions. `dbmate` pinned to `2.35.1` (the locally-verified
     version — no version pin existed anywhere in-repo before this). Deliberately out of scope: linting (no
     linter exists on either side yet — a separate decision), a live end-to-end smoke test (the existing mocked
-    suites are the real regression coverage for this pass). (plan: `docs/plans/0015-*.md`)
+    suites are the real regression coverage for this pass). ✅ built (plan: `docs/plans/0015-*.md`) — pushed
+    and watched run for real (`gh`/`act` weren't available locally, so verification meant polling the GitHub
+    API directly): all three jobs green on the first real run, no fixes needed. One real design issue found
+    and fixed *while building*, before ever pushing: a job-level `working-directory` default didn't compose
+    safely with a per-step override needed for `dbmate` — resolved by removing the job-level default and
+    setting it explicitly per step instead of guessing at GitHub Actions' composition rules.
 
 ## Preferences
 - Wants an example data table created once the spec round produces a real entity to model it on (lesson 6 above), not before — don't front-load schema/domain work into earlier lessons. Satisfied: spec 0001 + `CONTEXT.md` now exist, arc 2 is modeled on them.
