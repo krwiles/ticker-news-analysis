@@ -4,9 +4,11 @@ x-app: &app
     &app-env
     DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
     REDIS_URL: redis://redis:6379/0
+    MILVUS_URI: http://milvus:19530
     FINNHUB_API_KEY: ${FINNHUB_API_KEY}
     SEC_EDGAR_USER_AGENT: ${SEC_EDGAR_USER_AGENT}
   depends_on:
+    &app-depends-on
     db:
       condition: service_healthy
     redis:
@@ -39,6 +41,85 @@ services:
       timeout: 3s
       retries: 10
 
+  # Milvus standalone's two sidecars -- etcd for metadata, MinIO for object
+  # storage. Neither is talked to directly by this app; both exist purely
+  # so the `milvus` service below has somewhere to keep its state. Config
+  # mirrors Milvus' own real reference deployment (deployments/docker/
+  # standalone/docker-compose.yml in milvus-io/milvus), fetched directly
+  # rather than approximated, with two deliberate changes: named volumes
+  # instead of that reference's bind-mounts (matching this file's own
+  # `db-data` convention), and no separate `networks:` block (that
+  # reference declares its own network because it's a standalone file with
+  # nothing else in it -- here, etcd/minio/milvus join the same default
+  # network db/redis/api/ui/worker already share).
+  etcd:
+    image: quay.io/coreos/etcd:v3.5.25
+    environment:
+      ETCD_AUTO_COMPACTION_MODE: revision
+      ETCD_AUTO_COMPACTION_RETENTION: "1000"
+      ETCD_QUOTA_BACKEND_BYTES: "4294967296"
+      ETCD_SNAPSHOT_COUNT: "50000"
+    volumes:
+      - etcd-data:/etcd
+    command: etcd -advertise-client-urls=http://etcd:2379 -listen-client-urls http://0.0.0.0:2379 --data-dir /etcd
+    healthcheck:
+      test: ["CMD", "etcdctl", "endpoint", "health"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+
+  minio:
+    # quay.io, not Docker Hub -- MinIO archived its OSS edition and pulled
+    # `minio/minio` from Docker Hub entirely (~Oct 2025, fully gone as of
+    # this week), breaking Milvus' own reference config verbatim. Found
+    # live: `docker compose pull` failed with "pull access denied" on the
+    # exact tag the reference names, cross-checked against milvus-io/
+    # milvus's own bug report (github.com/milvus-io/milvus/issues/53430)
+    # for the fix -- same tag, quay.io mirrors it.
+    image: quay.io/minio/minio:RELEASE.2024-05-28T17-19-04Z
+    environment:
+      MINIO_ACCESS_KEY: ${MILVUS_MINIO_ACCESS_KEY}
+      MINIO_SECRET_KEY: ${MILVUS_MINIO_SECRET_KEY}
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio-data:/minio_data
+    command: minio server /minio_data --console-address :9001
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+
+  # The actual vector database this app will talk to (starting lesson 18).
+  # Standalone, not Milvus Lite -- deliberate, see docs/specs/0002's own
+  # reasoning (hands-on scalability exposure). No app-facing schema/
+  # collection lives here yet -- lesson 16 only proves this infra works.
+  milvus:
+    image: milvusdb/milvus:v3.0.0
+    command: milvus run standalone
+    environment:
+      ETCD_ENDPOINTS: etcd:2379
+      MINIO_ADDRESS: minio:9000
+      MINIO_REGION: us-east-1
+    volumes:
+      - milvus-data:/var/lib/milvus
+    ports:
+      - "19530:19530"
+      - "9091:9091"
+    depends_on:
+      etcd:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9091/healthz"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+      start_period: 90s
+
   api:
     <<: *app
     environment:
@@ -60,7 +141,20 @@ services:
     environment:
       <<: *app-env
       APP_MODE: worker
+    # Only worker will ever actually call Milvus (lesson 18+) -- api/ui
+    # don't need this dependency, and milvus's own healthcheck has a real
+    # 90s start_period, so making this shared (like db/redis are, via
+    # &app-depends-on) would slow down `docker compose up` for api/ui too,
+    # for a dependency they'll never use. Extends the shared depends_on
+    # anchor rather than duplicating db/redis by hand.
+    depends_on:
+      <<: *app-depends-on
+      milvus:
+        condition: service_healthy
     command: ["arq", "ticker_backend.worker.WorkerSettings"]
 
 volumes:
   db-data:
+  etcd-data:
+  minio-data:
+  milvus-data:

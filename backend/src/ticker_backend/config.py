@@ -13,6 +13,10 @@ class Settings(BaseSettings):
     app_mode: str = "api"
     database_url: str = "postgresql+asyncpg://ticker:ticker@db:5432/ticker"
     redis_url: str = "redis://redis:6379/0"
+    # Standalone Milvus (spec 0002) -- only worker ever connects to this,
+    # starting lesson 18. See docker-compose.yml's own comments for why
+    # standalone (not Milvus Lite) and why worker-only depends_on.
+    milvus_uri: str = "http://milvus:19530"
     # The browser genuinely crosses origins to reach the api container from a
     # page served by the ui container (both are localhost, different ports).
     # Only this one origin is allowed in — see the CORS setup in main.py.
