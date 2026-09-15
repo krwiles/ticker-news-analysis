@@ -55,7 +55,10 @@ async def _clean_tables(test_session_factory):
     transaction -- simpler with async SQLAlchemy, and cheap at this data
     size (persist-and-truncate, not drop/recreate every run)."""
     async with test_session_factory() as session:
-        # headlines first -- it has the foreign key into companies.
-        await session.execute(text("TRUNCATE TABLE headlines, companies"))
+        # All three in one statement, not sequential TRUNCATEs -- headlines
+        # and stories now reference each other (a real circular FK, ADR
+        # 0009), and Postgres refuses to truncate either alone without the
+        # other in the same statement.
+        await session.execute(text("TRUNCATE TABLE headlines, companies, stories"))
         await session.commit()
     yield

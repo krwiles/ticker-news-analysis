@@ -41,12 +41,15 @@ class Company(Base):
 class Headline(Base):
     """One piece of tracked news content about a Ticker — see CONTEXT.md.
 
-    Two things deliberately not here yet, both in their own future migration
-    when that feature actually starts: `sentiment` (positive/neutral/
-    negative + gloss + summary, per CONTEXT.md's Headline entry — pushed to
-    a later, not-yet-numbered spec after spec 0002 claimed that slot for
-    Story grouping instead) and `story_id` (a real FK into a new `stories`
-    table, spec 0002's own addition — see docs/specs/0002-daily-story-grouping.md).
+    `sentiment` deliberately not here yet: positive/neutral/negative + gloss
+    + summary, per CONTEXT.md's Headline entry — pushed to a later,
+    not-yet-numbered spec, in its own future migration when that feature
+    actually starts.
+
+    `story_id` is here (lesson 17), but nullable -- a deliberate deviation
+    from ADR 0009's eventual NOT NULL design, tightened once lesson 19's
+    real matching logic exists to populate it on every insert path. Same
+    staged-rollout pattern `outlet`/`summary` already used.
     """
 
     __tablename__ = "headlines"
@@ -66,6 +69,26 @@ class Headline(Base):
     fetched_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
+    story_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), default=None)
 
     def __repr__(self) -> str:
         return f"Headline(ticker={self.ticker!r}, category={self.category!r}, title={self.title!r})"
+
+
+class Story(Base):
+    """The real-world event two or more same-day Headlines can describe in
+    common — see CONTEXT.md's Story entry. `primary_headline_id` is
+    nullable permanently, not just at rollout: a Story row is written
+    before the headline it will call primary exists yet (see ADR 0009).
+    """
+
+    __tablename__ = "stories"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")
+    )
+    ticker: Mapped[str] = mapped_column(Text)
+    primary_headline_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), default=None)
+
+    def __repr__(self) -> str:
+        return f"Story(ticker={self.ticker!r}, primary_headline_id={self.primary_headline_id!r})"

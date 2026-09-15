@@ -9,7 +9,7 @@ import pytest
 import respx
 from sqlalchemy import select
 
-from ticker_backend.models import Company, Headline
+from ticker_backend.models import Company, Headline, Story
 from ticker_backend.providers import (
     ProviderFetchError,
     fetch_and_persist_headlines,
@@ -215,3 +215,42 @@ async def test_get_company_uses_cache_not_a_second_lookup(test_session_factory):
 
     assert info.cik == "320193"
     assert info.company_name == "Apple Inc."
+
+
+async def test_story_and_headline_circular_fk_write_sequence(test_session_factory):
+    """The real, easy-to-get-wrong sequence lesson 19 will need: a Story row
+    has to exist *before* the headline that becomes its primary (that
+    headline needs a valid story_id to reference), so primary_headline_id
+    necessarily starts null and gets backfilled in a second write -- ADR
+    0009's own reasoning, proven here rather than just asserted."""
+    async with test_session_factory() as session:
+        await session.merge(Company(ticker="AAPL"))
+        story = Story(ticker="AAPL")
+        session.add(story)
+        await session.commit()
+        story_id = story.id
+
+    async with test_session_factory() as session:
+        headline = Headline(
+            ticker="AAPL",
+            title="Apple announces new product",
+            url="https://example.com/circular-fk-test",
+            category="news",
+            provider="finnhub",
+            published_at=datetime.now(timezone.utc),
+            story_id=story_id,
+        )
+        session.add(headline)
+        await session.commit()
+        headline_id = headline.id
+
+    async with test_session_factory() as session:
+        story = await session.get(Story, story_id)
+        story.primary_headline_id = headline_id
+        await session.commit()
+
+    async with test_session_factory() as session:
+        story = await session.get(Story, story_id)
+        headline = await session.get(Headline, headline_id)
+        assert story.primary_headline_id == headline_id
+        assert headline.story_id == story_id
