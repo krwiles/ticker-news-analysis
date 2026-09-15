@@ -151,6 +151,40 @@ pass, no new secrets/services beyond what CI itself needs to stand up.
     safely with a per-step override needed for `dbmate` — resolved by removing the job-level default and
     setting it explicitly per step instead of guessing at GitHub Actions' composition rules.
 
+### Arc 4 — Daily Story Grouping (spec 0002), rough outline
+
+Opened 2026-09-15, once `docs/specs/0002-daily-story-grouping.md` was finalized via a full grilling round (see
+that file, and `CONTEXT.md`'s new `Story` entry). This is a rough sketch, not yet per-lesson planned — same
+starting shape arc 2 had ("was 3 lessons, now 8") before real per-lesson planning reshaped it. Sequenced the
+same way arc 2 was: infra/schema before business logic, business logic before the endpoint, endpoint before
+UI — not because that order is mandatory, just because it's the shape that's worked every time so far.
+
+16. **Milvus, standalone** — docker-compose wiring (`etcd` + `MinIO` sidecars, the real standalone shape,
+    chosen deliberately over Milvus Lite for scalability exposure per the spec's own reasoning), a real
+    collection, basic insert/search via `pymilvus` — no app logic yet. Walking-skeleton style, same as how
+    lesson 1 proved the container architecture before lesson 6 put a real table in Postgres.
+17. **The `stories` table + migration** — `SQLAlchemy` model + `dbmate` migration for `stories`
+    (`id`/`ticker`/`primary_headline_id`) and `headlines.story_id` (real `NOT NULL` FK). Mirrors lesson 6's
+    shape exactly: schema first, no matching logic wired to it yet.
+18. **OpenAI embeddings integration** — a new provider-style call in `providers.py` (same shape as EDGAR/
+    Finnhub), get real embeddings for real headline text, verify live. No Milvus wiring yet — just proves the
+    API call works.
+19. **The actual grouping logic** — combines 16–18 inside the existing `fetch_and_persist_headlines` job:
+    oldest-to-newest processing of only new headlines, threshold search against Milvus, `story_id` assignment.
+    Likely the biggest lesson in this arc — the real feature logic, same weight lesson 7 carried in arc 2.
+20. **Backend tests for grouping** — mocking OpenAI and Milvus at their boundaries, same `respx`-style
+    discipline as `test_providers.py`. Mirrors lesson 10's shape.
+21. **`/api/search` reshaped for N days** — replaces the `today`/`recent` two-array response with something
+    that represents an arbitrary number of days, each holding Stories. The one piece spec 0002 itself flagged
+    as not yet designed (see its Open questions).
+22. **Frontend: per-day lists + the `Story` component** — replaces `SearchPage`'s Today/Recent sections with
+    one per day; a `Story` shows its primary headline per spec 0001's existing rules, plus an expandable list
+    for other members when there are any. Capstone of this arc, same role lesson 14 played for arc 2.
+23. **Frontend tests for the new Story UI** — mirrors lesson 12's shape.
+
+Not committed to this exact split or order — the real per-lesson plans (once each one actually gets planned)
+may reshape it, same as arc 2's did.
+
 ## Preferences
 - Wants an example data table created once the spec round produces a real entity to model it on (lesson 6 above), not before — don't front-load schema/domain work into earlier lessons. Satisfied: spec 0001 + `CONTEXT.md` now exist, arc 2 is modeled on them.
 - Confirmed (2026-09-08): prefers small vertical slices over front-loaded theory or a build-everything-then-explain approach — a short concept intro right before building each slice, then verify it against the live stack, then move to the next slice. This is why arc 2 became 6 (now 7) lessons instead of 3.
