@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 17 — The Stories Table + Migration</title>
+<link rel="stylesheet" href="../assets/lesson.css">
+</head>
+<body>
+<div class="lesson">
+
+  <p class="eyebrow">Lesson 17 of 17 · ticker-news-analysis stack (infra arc — Arc 4)</p>
+  <h1>The <code>stories</code> table + migration</h1>
+  <p class="subtitle">Schema before logic, same shape as lesson 6 — and a deliberate deviation from what the architecture docs say, made explicit rather than silently ignored.</p>
+
+  <div class="callout">
+    <p>
+      No matching logic yet — that's lesson 19. This lesson is purely <code>stories</code> +
+      <code>headlines.story_id</code>, the same "schema first" shape lesson 6 used for <code>Headline</code>
+      itself. See ADR 0009 for the full "why a real table, not a bare column" reasoning — this lesson is about
+      building it, and one place it deliberately doesn't match that ADR yet.
+    </p>
+  </div>
+
+  <h2>A deliberate deviation from the architecture doc, made explicit</h2>
+  <p>
+    ADR 0009 describes <code>headlines.story_id</code> as eventually <code>NOT NULL</code> — "every headline
+    gets one, even a Story of one." Taken literally, right now, that would break something real:
+    <code>providers.py</code>'s existing insert path has no matching logic yet to decide a story for anything,
+    and several existing tests insert headlines directly. Making it <code>NOT NULL</code> today would mean
+    either writing throwaway placeholder logic just to satisfy a constraint, or breaking the app outright.
+  </p>
+  <p>
+    Decision: <strong>nullable now, tightened once lesson 19's real matching logic exists to populate it on
+    every path</strong> — the same staged-rollout pattern <code>outlet</code>/<code>summary</code> already used
+    (added in a later migration, not day one). Worth being honest that this is a real deviation from what ADR
+    0009 describes as the eventual design, not a contradiction of it — and it's exactly why that ADR explicitly
+    left this specific sequencing question open rather than settling it itself.
+  </p>
+
+  <h2>The one thing that truly can't be staged: <code>primary_headline_id</code></h2>
+  <p>
+    <code>stories.primary_headline_id</code> is nullable <em>permanently</em>, not as a rollout choice. A
+    <code>stories</code> row has to be written before the headline it will eventually call primary — that
+    headline needs a valid <code>story_id</code> to reference, which means the story has to exist first. So
+    <code>primary_headline_id</code> necessarily starts null and gets backfilled in a second write:
+  </p>
+  <pre><code># 1. story exists, no primary yet
+story = Story(ticker="AAPL")
+session.add(story)
+await session.commit()
+
+# 2. the headline can now reference it
+headline = Headline(..., story_id=story.id)
+session.add(headline)
+await session.commit()
+
+# 3. backfill
+story.primary_headline_id = headline.id
+await session.commit()</code></pre>
+  <p>
+    A circular FK relationship, both directions real: <code>headlines.story_id → stories.id</code> and
+    <code>stories.primary_headline_id → headlines.id</code>. The migration has to create both tables/columns
+    before adding either constraint, for the same reason — each references something that has to already exist.
+  </p>
+
+  <h2>A real bug: the nullable decision didn't fully deliver on its own promise</h2>
+  <div class="callout">
+    <p>
+      The whole point of going nullable was "zero changes to existing tests." The first real test run said
+      otherwise — all 18 tests failed, not from the new column, but from
+      <code>conftest.py</code>'s own cleanup fixture:
+    </p>
+    <pre><code>sqlalchemy.exc.DBAPIError: cannot truncate a table referenced in a foreign key constraint
+DETAIL: Table "stories" references "headlines".</code></pre>
+    <p>
+      <code>TRUNCATE TABLE headlines, companies</code> — the fixture that resets state before every test —
+      had no idea <code>stories</code> existed. Postgres refuses to truncate a table something else has a live
+      FK into, unless the referencing table is truncated in the very same statement. Fixed by adding
+      <code>stories</code> to that one line. Worth sitting with precisely: the nullable-column decision was
+      still the right call — no test needed new logic to satisfy a constraint — but "zero blast radius" was
+      only half true. Shared test *infrastructure* still had to learn about the new table the moment it entered
+      the FK graph, independent of whether any column was nullable.
+    </p>
+  </div>
+
+  <h2>Check your understanding</h2>
+
+  <div class="check">
+    <p class="q">Q1. Why is <code>headlines.story_id</code> nullable right now, when ADR 0009 describes it as
+    eventually <code>NOT NULL</code>?</p>
+    <details>
+      <summary>Reveal answer</summary>
+      <p class="answer">No matching logic exists yet (that's lesson 19) to decide a story for every incoming
+      headline, and providers.py's existing insert path -- plus several existing tests -- would break if the
+      column required a value nothing yet supplies. Nullable now, tightened once lesson 19 can actually
+      populate it on every path -- the same staged-rollout pattern outlet/summary already used.</p>
+    </details>
+  </div>
+
+  <div class="check">
+    <p class="q">Q2. Why can't <code>stories.primary_headline_id</code> ever be <code>NOT NULL</code>, even
+    after lesson 19 ships?</p>
+    <details>
+      <summary>Reveal answer</summary>
+      <p class="answer">A stories row is necessarily written before the headline that becomes its primary --
+      that headline needs a valid story_id to reference, so the story has to exist first. At the moment a new
+      Story is created, its primary headline doesn't exist yet, so primary_headline_id has to start null and
+      get backfilled in a second write. A structural consequence of the circular FK, not a rollout stage.</p>
+    </details>
+  </div>
+
+  <div class="source">
+    <p class="label">Primary sources</p>
+    <p>
+      <a href="../docs/adr/0009-stories-table-not-bare-column.md">ADR 0009 — a real stories table, not a bare column</a> ·
+      <a href="https://www.postgresql.org/docs/current/sql-truncate.html">PostgreSQL docs — TRUNCATE</a>
+    </p>
+  </div>
+
+  <p class="ask">Anything unclear about why primary_headline_id can never be NOT NULL, or the nullable-vs-ADR
+  deviation? Ask your teacher (this agent).</p>
+
+  <div class="nav">
+    <a href="0016-milvus-standalone.html">← Lesson 16: Milvus, standalone</a>
+    <span>Next → Lesson 18: OpenAI embeddings integration (not yet written)</span>
+  </div>
+
+</div>
+</body>
+</html>
