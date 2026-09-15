@@ -160,7 +160,7 @@ same way arc 2 was: infra/schema before business logic, business logic before th
 UI — not because that order is mandatory, just because it's the shape that's worked every time so far.
 
 16. **Milvus, standalone** — docker-compose wiring (`etcd` + `MinIO` sidecars, the real standalone shape,
-    chosen deliberately over Milvus Lite for scalability exposure per the spec's own reasoning), a real
+    chosen deliberately over Milvus Lite for scalability exposure, see ADR 0008), a real
     collection, basic insert/search via `pymilvus` — no app logic yet. Walking-skeleton style, same as how
     lesson 1 proved the container architecture before lesson 6 put a real table in Postgres. ✅ built (plan:
     `docs/plans/0016-*.md`) — two real bugs found live: (1) the fetched reference config itself was broken —
@@ -174,8 +174,16 @@ UI — not because that order is mandatory, just because it's the shape that's w
     `api`/`ui` startup for a dependency they'll never use; verified live that `api`/`ui` start without waiting
     on it while `worker` does.
 17. **The `stories` table + migration** — `SQLAlchemy` model + `dbmate` migration for `stories`
-    (`id`/`ticker`/`primary_headline_id`) and `headlines.story_id` (real `NOT NULL` FK). Mirrors lesson 6's
-    shape exactly: schema first, no matching logic wired to it yet.
+    (`id`/`ticker`/`primary_headline_id`) and `headlines.story_id`. Mirrors lesson 6's shape exactly: schema
+    first, no matching logic wired to it yet. ✅ built (plan: `docs/plans/0017-*.md`) — `story_id` shipped
+    **nullable**, a deliberate deviation from ADR 0009's eventual `NOT NULL` design, tightened once lesson 19's
+    real matching logic can populate it on every path (same staged-rollout pattern `outlet`/`summary` used).
+    `stories.primary_headline_id` is nullable permanently, not staged — a `stories` row is necessarily written
+    before the headline that becomes its primary, a structural consequence of the circular FK, not a rollout
+    choice. One new test proves that two-step write sequence works. Real bug found live: the "zero blast
+    radius" claim for the nullable column was only half true — `conftest.py`'s `TRUNCATE` fixture didn't know
+    about the new table and Postgres refused to truncate `headlines` without `stories` in the same statement;
+    fixed by adding it. 18/18 tests passing, full stack sanity check clean.
 18. **OpenAI embeddings integration** — a new provider-style call in `providers.py` (same shape as EDGAR/
     Finnhub), get real embeddings for real headline text, verify live. No Milvus wiring yet — just proves the
     API call works.
