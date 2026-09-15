@@ -77,9 +77,14 @@ class Headline(Base):
 
 class Story(Base):
     """The real-world event two or more same-day Headlines can describe in
-    common — see CONTEXT.md's Story entry. `primary_headline_id` is
-    nullable permanently, not just at rollout: a Story row is written
-    before the headline it will call primary exists yet (see ADR 0009).
+    common — see CONTEXT.md's Story entry. Deliberately minimal: no stored
+    "primary headline" reference at all. A Story's primary is always its
+    earliest-published member -- a pure function of data `Headline`
+    already has (`story_id` + `published_at`), so storing it separately
+    would just be redundant state with nothing to keep it in sync. Find it
+    with `ORDER BY published_at ASC LIMIT 1` (or a window function for
+    bulk fetches) — see ADR 0009 for the full reasoning, including the
+    circular-FK design this replaced.
     """
 
     __tablename__ = "stories"
@@ -88,7 +93,6 @@ class Story(Base):
         UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")
     )
     ticker: Mapped[str] = mapped_column(Text)
-    primary_headline_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), default=None)
 
     def __repr__(self) -> str:
-        return f"Story(ticker={self.ticker!r}, primary_headline_id={self.primary_headline_id!r})"
+        return f"Story(ticker={self.ticker!r})"

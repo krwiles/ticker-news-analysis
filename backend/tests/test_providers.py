@@ -217,12 +217,14 @@ async def test_get_company_uses_cache_not_a_second_lookup(test_session_factory):
     assert info.company_name == "Apple Inc."
 
 
-async def test_story_and_headline_circular_fk_write_sequence(test_session_factory):
-    """The real, easy-to-get-wrong sequence lesson 19 will need: a Story row
-    has to exist *before* the headline that becomes its primary (that
-    headline needs a valid story_id to reference), so primary_headline_id
-    necessarily starts null and gets backfilled in a second write -- ADR
-    0009's own reasoning, proven here rather than just asserted."""
+async def test_story_primary_is_derived_as_earliest_published_headline(test_session_factory):
+    """No stored "primary" reference exists (see ADR 0009 -- a circular FK
+    with a back-pointer was the original design, replaced by this). Proves
+    the actual query shape -- order by published_at, take the first --
+    correctly identifies the earliest-published member, not just asserting
+    the rule in prose. Inserted out of chronological order on purpose, so
+    a bug that derived "primary" from insertion order instead of
+    published_at would actually be caught."""
     async with test_session_factory() as session:
         await session.merge(Company(ticker="AAPL"))
         story = Story(ticker="AAPL")
@@ -230,27 +232,38 @@ async def test_story_and_headline_circular_fk_write_sequence(test_session_factor
         await session.commit()
         story_id = story.id
 
+    earlier = datetime(2026, 9, 15, 9, 0, tzinfo=timezone.utc)
+    later = datetime(2026, 9, 15, 11, 0, tzinfo=timezone.utc)
+
     async with test_session_factory() as session:
-        headline = Headline(
-            ticker="AAPL",
-            title="Apple announces new product",
-            url="https://example.com/circular-fk-test",
-            category="news",
-            provider="finnhub",
-            published_at=datetime.now(timezone.utc),
-            story_id=story_id,
+        session.add(
+            Headline(
+                ticker="AAPL",
+                title="Later headline",
+                url="https://example.com/later",
+                category="news",
+                provider="finnhub",
+                published_at=later,
+                story_id=story_id,
+            )
         )
-        session.add(headline)
+        session.add(
+            Headline(
+                ticker="AAPL",
+                title="Earlier headline",
+                url="https://example.com/earlier",
+                category="news",
+                provider="finnhub",
+                published_at=earlier,
+                story_id=story_id,
+            )
+        )
         await session.commit()
-        headline_id = headline.id
 
     async with test_session_factory() as session:
-        story = await session.get(Story, story_id)
-        story.primary_headline_id = headline_id
-        await session.commit()
+        rows = await session.execute(
+            select(Headline).where(Headline.story_id == story_id).order_by(Headline.published_at).limit(1)
+        )
+        primary = rows.scalar_one()
 
-    async with test_session_factory() as session:
-        story = await session.get(Story, story_id)
-        headline = await session.get(Headline, headline_id)
-        assert story.primary_headline_id == headline_id
-        assert headline.story_id == story_id
+    assert primary.title == "Earlier headline"

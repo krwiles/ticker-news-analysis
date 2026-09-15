@@ -52,3 +52,23 @@ refuses to truncate a referenced table without the referencing table in the same
 `story_id` meant *zero* blast radius on existing tests was half right — no test needed new logic to satisfy a
 constraint, but shared test *infrastructure* still needed updating the moment a new table entered the FK graph.
 A real, minor correction to the plan's own reasoning, not a failure of the nullable choice itself.
+
+## Revised after initial build: the circular FK itself was unnecessary
+
+The design above shipped `stories.primary_headline_id` as a circular-FK back-pointer, reasoned through
+carefully (nullable permanently, backfilled in a second write) and proven correct by the original version of
+the new test. Under review, a simpler alternative surfaced: a Story's primary is always its earliest-published
+member — a pure function of `story_id` + `published_at`, data `Headline` already has. Storing that fact a
+second time (whether as a back-pointer or, the next idea considered, a `headlines.is_primary` flag) is
+redundant state with nothing to keep it synchronized, for no real benefit — see ADR 0009's revised Considered
+options for the full comparison, including why the flag didn't turn out to be the better middle ground either.
+
+**Final shape**: `stories(id, ticker)` only — no primary reference at all. `headlines.story_id` unchanged.
+Primary is found via `ORDER BY published_at ASC LIMIT 1`, backed by a `(story_id, published_at)` index (a
+window function for bulk fetches across many stories at once). The migration was rewritten in place — rolled
+back and reapplied on both databases — rather than shipping the circular-FK version and correcting it with a
+second migration, since nothing had been merged or pushed yet. The test was rewritten too: it now proves the
+derivation is correct by inserting two headlines *out of chronological order* and confirming the query still
+finds the earlier-published one, not just that insertion order happens to match.
+
+Re-verified after the rewrite: 18/18 tests, full stack sanity check clean.

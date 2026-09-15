@@ -11,115 +11,141 @@
 
   <p class="eyebrow">Lesson 17 of 17 · ticker-news-analysis stack (infra arc — Arc 4)</p>
   <h1>The <code>stories</code> table + migration</h1>
-  <p class="subtitle">Schema before logic, same shape as lesson 6 — and a deliberate deviation from what the architecture docs say, made explicit rather than silently ignored.</p>
+  <p class="subtitle">Schema before logic, same shape as lesson 6 — and a design that got genuinely simpler under review, kept in the lesson rather than smoothed over.</p>
 
   <div class="callout">
     <p>
       No matching logic yet — that's lesson 19. This lesson is purely <code>stories</code> +
       <code>headlines.story_id</code>, the same "schema first" shape lesson 6 used for <code>Headline</code>
-      itself. See ADR 0009 for the full "why a real table, not a bare column" reasoning — this lesson is about
-      building it, and one place it deliberately doesn't match that ADR yet.
+      itself. What follows is the actual design history, not just the final answer — the first version shipped,
+      passed its tests, and then got replaced before it ever merged.
     </p>
   </div>
 
-  <h2>A deliberate deviation from the architecture doc, made explicit</h2>
+  <h2>Version one: a circular FK, reasoned through carefully</h2>
   <p>
-    ADR 0009 describes <code>headlines.story_id</code> as eventually <code>NOT NULL</code> — "every headline
-    gets one, even a Story of one." Taken literally, right now, that would break something real:
-    <code>providers.py</code>'s existing insert path has no matching logic yet to decide a story for anything,
-    and several existing tests insert headlines directly. Making it <code>NOT NULL</code> today would mean
-    either writing throwaway placeholder logic just to satisfy a constraint, or breaking the app outright.
-  </p>
-  <p>
-    Decision: <strong>nullable now, tightened once lesson 19's real matching logic exists to populate it on
-    every path</strong> — the same staged-rollout pattern <code>outlet</code>/<code>summary</code> already used
-    (added in a later migration, not day one). Worth being honest that this is a real deviation from what ADR
-    0009 describes as the eventual design, not a contradiction of it — and it's exactly why that ADR explicitly
-    left this specific sequencing question open rather than settling it itself.
-  </p>
-
-  <h2>The one thing that truly can't be staged: <code>primary_headline_id</code></h2>
-  <p>
-    <code>stories.primary_headline_id</code> is nullable <em>permanently</em>, not as a rollout choice. A
-    <code>stories</code> row has to be written before the headline it will eventually call primary — that
-    headline needs a valid <code>story_id</code> to reference, which means the story has to exist first. So
-    <code>primary_headline_id</code> necessarily starts null and gets backfilled in a second write:
+    A Story needs to know its "primary" headline — the one displayed in full, per spec 0002. The first design
+    stored that directly: <code>stories.primary_headline_id</code>, a real FK into <code>headlines.id</code>.
+    That immediately raises an ordering problem worth sitting with: a <code>stories</code> row has to exist
+    <em>before</em> the headline that becomes its primary — that headline needs a valid <code>story_id</code>
+    to reference, so the story has to exist first. Which means <code>primary_headline_id</code> can't be set at
+    creation time; it has to start null and get backfilled in a second write, once the headline actually exists:
   </p>
   <pre><code># 1. story exists, no primary yet
 story = Story(ticker="AAPL")
-session.add(story)
 await session.commit()
 
 # 2. the headline can now reference it
 headline = Headline(..., story_id=story.id)
-session.add(headline)
 await session.commit()
 
 # 3. backfill
 story.primary_headline_id = headline.id
 await session.commit()</code></pre>
   <p>
-    A circular FK relationship, both directions real: <code>headlines.story_id → stories.id</code> and
-    <code>stories.primary_headline_id → headlines.id</code>. The migration has to create both tables/columns
-    before adding either constraint, for the same reason — each references something that has to already exist.
+    This is a real, recognized database pattern — a mutual/circular FK with a permanently-nullable back-pointer,
+    the same shape as a textbook <code>Company.ceo_id ↔ Employee.company_id</code> relationship. Not wrong. It
+    shipped, it had a passing test proving the three-step sequence worked. And it was more machinery than the
+    problem actually needed.
   </p>
 
-  <h2>A real bug: the nullable decision didn't fully deliver on its own promise</h2>
+  <h2>The question that undid it: is any of this fact actually new information?</h2>
+  <p>
+    A Story's primary is always its <strong>earliest-published</strong> member — settled back in the grilling
+    round, never up for debate. That means primary-ness is a pure function of data <code>Headline</code>
+    already has: <code>story_id</code> grouped, <code>published_at</code> ordered. Storing
+    <code>primary_headline_id</code> separately doesn't encode any new fact — it duplicates one that's already
+    fully determined, in a form that could theoretically drift out of sync with the source of truth, for a
+    guarantee (fast lookup) an index gets you just as well without the duplication.
+  </p>
+  <p>
+    A middle option got considered and rejected too: a <code>headlines.is_primary</code> boolean flag instead of
+    a back-pointer — avoids the circular FK, but is still the same redundant fact in a different shape, still
+    needs a partial unique index to enforce "at most one per story," and still needs deciding and setting at
+    write time. Neither version earns its keep once you notice the fact doesn't need storing at all.
+  </p>
+
+  <h2>Version two: derive it, store nothing</h2>
+  <pre><code>SELECT * FROM headlines
+WHERE story_id = X
+ORDER BY published_at ASC
+LIMIT 1;</code></pre>
+  <p>
+    Backed by a composite index on <code>(story_id, published_at)</code> — an index-scan lookup, not a table
+    scan, genuinely cheap. For rendering a whole day's worth of Stories at once, the natural SQL is a window
+    function (<code>ROW_NUMBER() OVER (PARTITION BY story_id ORDER BY published_at)</code>) — exactly as easy to
+    write with this design as it would have been with a stored flag, which is worth noticing: the flag never
+    actually bought the query-ergonomics win it looked like it might.
+  </p>
+  <p>
+    Final shape: <code>stories(id, ticker)</code> — nothing else. <code>headlines.story_id</code> is the only
+    cross-reference, one direction only. No circular FK, no permanently-nullable column to explain, no write-time
+    decision about primary-ness at all.
+  </p>
   <div class="callout">
     <p>
-      The whole point of going nullable was "zero changes to existing tests." The first real test run said
-      otherwise — all 18 tests failed, not from the new column, but from
-      <code>conftest.py</code>'s own cleanup fixture:
+      Worth naming the general principle, not just this one instance: <strong>if a fact is fully derivable from
+      data you already store, storing it again is redundant state</strong> — even when it feels convenient, even
+      when there's a clean-looking column name for it. The cost isn't always obvious upfront (the circular-FK
+      version worked, and was reasoned through carefully) — it shows up as complexity that had no real reason to
+      exist once you ask "does this column encode anything new?"
+    </p>
+  </div>
+
+  <h2>A second, unrelated bug: the test cleanup fixture didn't know about the new table</h2>
+  <div class="callout">
+    <p>
+      Separately from the design change above — this one held true in both versions of the schema. The first
+      real test run failed all 18 tests at once:
     </p>
     <pre><code>sqlalchemy.exc.DBAPIError: cannot truncate a table referenced in a foreign key constraint
 DETAIL: Table "stories" references "headlines".</code></pre>
     <p>
-      <code>TRUNCATE TABLE headlines, companies</code> — the fixture that resets state before every test —
-      had no idea <code>stories</code> existed. Postgres refuses to truncate a table something else has a live
-      FK into, unless the referencing table is truncated in the very same statement. Fixed by adding
-      <code>stories</code> to that one line. Worth sitting with precisely: the nullable-column decision was
-      still the right call — no test needed new logic to satisfy a constraint — but "zero blast radius" was
-      only half true. Shared test *infrastructure* still had to learn about the new table the moment it entered
-      the FK graph, independent of whether any column was nullable.
+      <code>conftest.py</code>'s cleanup fixture did <code>TRUNCATE TABLE headlines, companies</code> — written
+      before <code>stories</code> existed, so it had no idea the new table was there. Postgres refuses to
+      truncate a table something else has a live FK into, unless the referencing table is truncated in the same
+      statement. Fixed by adding <code>stories</code> to that one line. The lesson here: going nullable was
+      still the right call for <code>story_id</code> itself — no test needed new logic to satisfy a constraint —
+      but "zero blast radius" was only half true. Shared test infrastructure still had to learn about the new
+      table the moment it entered the FK graph.
     </p>
   </div>
 
   <h2>Check your understanding</h2>
 
   <div class="check">
-    <p class="q">Q1. Why is <code>headlines.story_id</code> nullable right now, when ADR 0009 describes it as
-    eventually <code>NOT NULL</code>?</p>
+    <p class="q">Q1. What was actually wrong with the circular-FK design — was it a bug?</p>
     <details>
       <summary>Reveal answer</summary>
-      <p class="answer">No matching logic exists yet (that's lesson 19) to decide a story for every incoming
-      headline, and providers.py's existing insert path -- plus several existing tests -- would break if the
-      column required a value nothing yet supplies. Nullable now, tightened once lesson 19 can actually
-      populate it on every path -- the same staged-rollout pattern outlet/summary already used.</p>
+      <p class="answer">No bug -- it worked, and had a passing test proving the write sequence was correct.
+      The problem was that it stored a fact (which headline is primary) that's fully derivable from data
+      Headline already has (story_id + published_at), for no benefit an index-backed query couldn't provide
+      just as well. Redundant state, not incorrect state.</p>
     </details>
   </div>
 
   <div class="check">
-    <p class="q">Q2. Why can't <code>stories.primary_headline_id</code> ever be <code>NOT NULL</code>, even
-    after lesson 19 ships?</p>
+    <p class="q">Q2. Why does the new test insert headlines <em>out of chronological order</em> on purpose?</p>
     <details>
       <summary>Reveal answer</summary>
-      <p class="answer">A stories row is necessarily written before the headline that becomes its primary --
-      that headline needs a valid story_id to reference, so the story has to exist first. At the moment a new
-      Story is created, its primary headline doesn't exist yet, so primary_headline_id has to start null and
-      get backfilled in a second write. A structural consequence of the circular FK, not a rollout stage.</p>
+      <p class="answer">To prove the query actually derives "primary" from published_at, not from insertion
+      order. If the two happened to match (insert in chronological order), a bug that used insertion order
+      instead of published_at could pass the test by accident -- inserting out of order is what makes the test
+      a real proof of the correct rule, not just a coincidence.</p>
     </details>
   </div>
 
   <div class="source">
     <p class="label">Primary sources</p>
     <p>
-      <a href="../docs/adr/0009-stories-table-not-bare-column.md">ADR 0009 — a real stories table, not a bare column</a> ·
-      <a href="https://www.postgresql.org/docs/current/sql-truncate.html">PostgreSQL docs — TRUNCATE</a>
+      <a href="../docs/adr/0009-stories-table-not-bare-column.md">ADR 0009 — a real stories table, no stored primary reference</a> ·
+      <a href="https://www.postgresql.org/docs/current/sql-truncate.html">PostgreSQL docs — TRUNCATE</a> ·
+      <a href="https://www.postgresql.org/docs/current/functions-window.html">PostgreSQL docs — window functions</a>
     </p>
   </div>
 
-  <p class="ask">Anything unclear about why primary_headline_id can never be NOT NULL, or the nullable-vs-ADR
-  deviation? Ask your teacher (this agent).</p>
+  <p class="ask">Anything unclear about why the circular-FK version wasn't wrong, just unnecessary, or how the
+  window-function query would work for a whole day's list? Ask your teacher (this agent).</p>
 
   <div class="nav">
     <a href="0016-milvus-standalone.html">← Lesson 16: Milvus, standalone</a>
