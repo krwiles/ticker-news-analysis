@@ -1,0 +1,172 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 18 — OpenAI Embeddings Integration</title>
+<link rel="stylesheet" href="../assets/lesson.css">
+</head>
+<body>
+<div class="lesson">
+
+  <p class="eyebrow">Lesson 18 of 18 · ticker-news-analysis stack (infra arc — Arc 4)</p>
+  <h1>OpenAI embeddings integration</h1>
+  <p class="subtitle">A fourth provider call, in a shape you've now written three times before — and the lesson
+  where an ADR named a function before it existed.</p>
+
+  <div class="callout">
+    <p>
+      No Milvus wiring yet, no <code>fetch_and_persist_headlines</code> changes — that's lesson 19. This lesson
+      only proves one thing: a real call to OpenAI's embeddings API, in <code>providers.py</code>, following the
+      exact shape <code>get_company</code>/<code>fetch_edgar_filings</code>/<code>fetch_finnhub_news</code>
+      already established.
+    </p>
+  </div>
+
+  <h2>An ADR that named this function before it existed</h2>
+  <p>
+    While planning this lesson, a question surfaced that had never been asked out loud before: should
+    <code>get_embedding</code> use OpenAI's official <code>openai</code> Python package, or stay on raw
+    <code>httpx</code> like every provider call so far? EDGAR has no SDK at all, so <code>fetch_edgar_filings</code>
+    never had a choice — but Finnhub and OpenAI both have official clients, and this project had just never
+    written down <em>why</em> it wasn't using them.
+  </p>
+  <p>
+    The answer became <a href="../docs/adr/0010-raw-http-not-provider-sdks.md">ADR 0010</a>, and it's worth
+    reading closely for one detail: it lists <code>get_embedding</code> as an existing example of the shared
+    provider shape — written <em>before</em> the function itself was built. That's the ADR discipline this
+    project has been practicing since spec 0002 (see <code>learning-records/0007</code>): settle the
+    architectural question in writing first, then implement against it, not the other way around.
+  </p>
+
+  <h2>The function itself</h2>
+  <p class="filename">backend/src/ticker_backend/providers.py</p>
+  <pre><code>OPENAI_EMBEDDING_MODEL = "text-embedding-3-small"
+
+
+async def get_embedding(text: str, client: httpx.AsyncClient) -> list[float]:
+    try:
+        response = await client.post(
+            "https://api.openai.com/v1/embeddings",
+            headers={"Authorization": f"Bearer {settings.openai_api_key}"},
+            json={"model": OPENAI_EMBEDDING_MODEL, "input": text},
+        )
+        response.raise_for_status()
+        body = response.json()
+    except (httpx.HTTPError, ValueError) as exc:
+        raise ProviderFetchError(f"OpenAI embedding fetch failed: {exc}") from exc
+
+    try:
+        return body["data"][0]["embedding"]
+    except (KeyError, IndexError) as exc:
+        raise ProviderFetchError(f"OpenAI embedding response missing data: {exc}") from exc</code></pre>
+  <p>
+    Compare this against <code>fetch_finnhub_news</code> and the shape is identical on purpose: an
+    <code>httpx.AsyncClient</code> passed in (never created here — the caller owns connection lifetime, same
+    reasoning as every other provider function), a typed <code>ProviderFetchError</code> on any failure, no
+    provider-specific SDK object anywhere. The only real difference from Finnhub's call is the second
+    <code>try</code>/<code>except</code> — OpenAI's success response is nested one level deeper
+    (<code>data[0].embedding</code>) than Finnhub's flat array, so there are two distinct ways this call can fail:
+    the HTTP request itself, or a 200 response whose body doesn't have the shape expected.
+  </p>
+
+  <h2>Two decisions ADR 0007 left open</h2>
+  <p>
+    <a href="../docs/adr/0007-openai-embeddings-for-story-matching.md">ADR 0007</a> settled the
+    <em>technology</em> (OpenAI over Cohere or a local model) months before this lesson, but two real choices
+    were still open going into it, both closed during this lesson's planning pass:
+  </p>
+  <ul>
+    <li>
+      <strong>Which model.</strong> <code>text-embedding-3-small</code> — OpenAI's cheapest tier, matching ADR
+      0007's own cost estimate, and its dimension count (1536) is what
+      <code>milvus_client.py</code>'s own docstring had been waiting on: "no collection schema for real headline
+      embeddings lives here yet — that depends on OpenAI's embedding dimension, not chosen until lesson 18."
+      That dependency is resolved now, live-verified below.
+    </li>
+    <li>
+      <strong>What text to embed.</strong> ADR 0007 said "title + summary, when present" but never specified the
+      join. Pulled into its own small, pure function so the decision is independently testable, not buried
+      inside <code>get_embedding</code> itself:
+      <pre><code>def embedding_input_text(title: str, summary: str | None) -> str:
+    if summary is None:
+        return title
+    return f"{title}\n\n{summary}"</code></pre>
+      Same instinct as <code>search.py</code>'s <code>split_today_recent</code>: extract the part with real
+      decision logic into something you can call directly from a test, rather than asserting on it indirectly
+      through the bigger function's behavior.
+    </li>
+  </ul>
+
+  <h2>Live verification: what actually happened</h2>
+  <p>
+    Same discipline lessons 7 and 8 established for EDGAR/Finnhub — mocked tests prove the code handles known
+    shapes correctly, but only a real call proves the <em>assumed</em> shape is the <em>actual</em> shape. One
+    real request, using a real headline's title and summary:
+  </p>
+  <pre><code>embedding length (dimensions): 1536
+elapsed: 2.23s (job_timeout_seconds budget: 10s)</code></pre>
+  <p>
+    Three things confirmed, none of them assumed in advance: the response really does nest the vector at
+    <code>data[0].embedding</code> exactly as coded; the model really does produce 1536 numbers, settling the
+    Milvus dimension question for lesson 19; and — closing an uncertainty ADR 0007 named explicitly ("worth
+    verifying live once real embedding latency exists to measure, not assumed fine in advance") — a single call
+    costs about 2 seconds, well inside the 10-second <code>job_timeout_seconds</code> budget the fetch job
+    already runs under.
+  </p>
+  <div class="callout">
+    <p>
+      That last number comes with a caveat worth carrying into lesson 19: 2.23s was measured for <em>one</em>
+      isolated call. Once this runs inside the real fetch job — potentially once per new headline, alongside
+      EDGAR and Finnhub in the same <code>asyncio.gather</code> — the real question becomes total time across
+      however many headlines a single search turns up, not the cost of one call in isolation.
+    </p>
+  </div>
+
+  <h2>Check your understanding</h2>
+
+  <div class="check">
+    <p class="q">Q1. <code>get_embedding</code> has two separate <code>try</code>/<code>except</code> blocks,
+    not one. What distinct failure does each one guard against?</p>
+    <details>
+      <summary>Reveal answer</summary>
+      <p class="answer">The first guards the HTTP call itself -- a network error, a timeout, or a non-2xx
+      status (a bad API key, a rate limit, a server error). The second guards a *successful* 200 response whose
+      JSON body doesn't have the expected data[0].embedding shape -- a different failure mode entirely, worth
+      its own typed error and its own message, rather than letting a raw KeyError leak out uncaught.</p>
+    </details>
+  </div>
+
+  <div class="check">
+    <p class="q">Q2. Why does <code>embedding_input_text</code> exist as its own top-level function instead of
+    being three lines inline inside <code>get_embedding</code>?</p>
+    <details>
+      <summary>Reveal answer</summary>
+      <p class="answer">It's the one piece of this lesson with genuine decision logic -- how to join title and
+      summary -- as opposed to get_embedding's mechanical HTTP-call-in, vector-out shape. Pulling it out means
+      it can be tested directly (two tests, no-summary and with-summary) without needing a mocked HTTP call at
+      all, the same reasoning search.py's split_today_recent already established for keeping pure decision logic
+      separate from the I/O around it.</p>
+    </details>
+  </div>
+
+  <div class="source">
+    <p class="label">Primary sources</p>
+    <p>
+      <a href="../docs/adr/0007-openai-embeddings-for-story-matching.md">ADR 0007 — OpenAI's embeddings API for Story matching</a> ·
+      <a href="../docs/adr/0010-raw-http-not-provider-sdks.md">ADR 0010 — raw HTTP via httpx, not provider SDKs</a> ·
+      <a href="https://platform.openai.com/docs/guides/embeddings">OpenAI docs — Vector embeddings</a>
+    </p>
+  </div>
+
+  <p class="ask">Anything unclear about why two try/except blocks were needed, or how the 1536-dimension result
+  connects to lesson 19's Milvus collection schema? Ask your teacher (this agent).</p>
+
+  <div class="nav">
+    <a href="0017-stories-table-and-migration.html">← Lesson 17: The stories table + migration</a>
+    <span>Next → Lesson 19: The actual grouping logic (not yet written)</span>
+  </div>
+
+</div>
+</body>
+</html>
