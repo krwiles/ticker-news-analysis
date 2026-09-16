@@ -190,7 +190,15 @@ UI — not because that order is mandatory, just because it's the shape that's w
     works even when headlines are inserted out of chronological order), full stack sanity check clean.
 18. **OpenAI embeddings integration** — a new provider-style call in `providers.py` (same shape as EDGAR/
     Finnhub), get real embeddings for real headline text, verify live. No Milvus wiring yet — just proves the
-    API call works.
+    API call works. ✅ built (plan: `docs/plans/0018-*.md`) — `get_embedding()` + `embedding_input_text()`
+    added to `providers.py` per ADR 0010's raw-httpx shape, `openai_api_key` wired into `config.py` and
+    `docker-compose.yml`'s shared `&app-env`. Two decisions closed during planning: model
+    (`text-embedding-3-small`) and input-text join format (`title` alone, or `title\n\nsummary` when present).
+    22/22 tests passing (18 existing + 4 new, zero regressions). Live-verified against OpenAI's real endpoint:
+    1536 dimensions confirmed (matches the model's documented size), response shape matched the assumption
+    exactly, real latency 2.23s — comfortably inside `job_timeout_seconds`'s 10s budget, closing the "worth
+    verifying live" flag ADR 0007 left open. `fetch_and_persist_headlines` and Milvus itself both still
+    untouched, as scoped — lesson 19 wires this in.
 19. **The actual grouping logic** — combines 16–18 inside the existing `fetch_and_persist_headlines` job:
     oldest-to-newest processing of only new headlines, threshold search against Milvus, `story_id` assignment.
     Likely the biggest lesson in this arc — the real feature logic, same weight lesson 7 carried in arc 2.

@@ -12,10 +12,12 @@ from sqlalchemy import select
 from ticker_backend.models import Company, Headline, Story
 from ticker_backend.providers import (
     ProviderFetchError,
+    embedding_input_text,
     fetch_and_persist_headlines,
     fetch_edgar_filings,
     fetch_finnhub_news,
     get_company,
+    get_embedding,
 )
 
 TICKERS_JSON = {"0": {"cik_str": 320193, "ticker": "AAPL", "title": "Apple Inc."}}
@@ -105,6 +107,43 @@ async def test_finnhub_403_raises_typed_error(test_session_factory):
     async with httpx.AsyncClient() as client:
         with pytest.raises(ProviderFetchError):
             await fetch_finnhub_news(client, ticker="ZZZQX")
+
+
+@respx.mock
+async def test_get_embedding_returns_vector(test_session_factory):
+    respx.post("https://api.openai.com/v1/embeddings").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "object": "list",
+                "data": [{"object": "embedding", "embedding": [0.1, 0.2, 0.3], "index": 0}],
+                "model": "text-embedding-3-small",
+                "usage": {"prompt_tokens": 8, "total_tokens": 8},
+            },
+        )
+    )
+    async with httpx.AsyncClient() as client:
+        embedding = await get_embedding("A real headline", client)
+
+    assert embedding == [0.1, 0.2, 0.3]
+
+
+@respx.mock
+async def test_get_embedding_raises_typed_error_on_failure(test_session_factory):
+    respx.post("https://api.openai.com/v1/embeddings").mock(
+        return_value=httpx.Response(401, json={"error": {"message": "Incorrect API key provided."}})
+    )
+    async with httpx.AsyncClient() as client:
+        with pytest.raises(ProviderFetchError):
+            await get_embedding("A real headline", client)
+
+
+def test_embedding_input_text_uses_title_only_when_no_summary():
+    assert embedding_input_text("A real headline", None) == "A real headline"
+
+
+def test_embedding_input_text_joins_title_and_summary_when_present():
+    assert embedding_input_text("A real headline", "A short blurb.") == "A real headline\n\nA short blurb."
 
 
 @respx.mock

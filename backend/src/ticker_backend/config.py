@@ -18,6 +18,8 @@ class Settings(BaseSettings):
     # The ui and api containers are different origins -- only this one is allowed in (main.py's CORS).
     ui_origin: str = "http://localhost:3000"
     finnhub_api_key: str = ""
+    # OpenAI's embeddings API (spec 0002 story-grouping, lesson 18) -- see ADR 0007.
+    openai_api_key: str = ""
     # SEC requires a descriptive User-Agent identifying the app + a contact
     # email on every request — not a secret, just a compliance string.
     sec_edgar_user_agent: str = "TickerNewsAnalysis contact@example.com"

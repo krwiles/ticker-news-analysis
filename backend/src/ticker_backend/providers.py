@@ -33,6 +33,10 @@ EDGAR_FORM_DESCRIPTIONS = {
 # SEC's full ticker-to-CIK mapping -- one file covering every US filer, not a per-ticker endpoint.
 SEC_TICKERS_URL = "https://www.sec.gov/files/company_tickers.json"
 
+# Cheapest OpenAI embedding tier (1536 dimensions) -- see ADR 0007/lesson 18. This dimension count is what
+# lesson 19's Milvus collection schema is built against, so changing this model later is a real migration.
+OPENAI_EMBEDDING_MODEL = "text-embedding-3-small"
+
 
 class ProviderFetchError(Exception):
     """A provider call failed in a way worth a clear, typed signal, not a
@@ -184,6 +188,39 @@ async def fetch_finnhub_news(client: httpx.AsyncClient, ticker: str) -> list[dic
         }
         for article in articles
     ]
+
+
+def embedding_input_text(title: str, summary: str | None) -> str:
+    """The text actually sent to OpenAI for one headline -- title alone when
+    there's no summary, otherwise both joined, per ADR 0007's "title +
+    summary, when present" and spec 0002's Story-matching input."""
+    if summary is None:
+        return title
+    return f"{title}\n\n{summary}"
+
+
+async def get_embedding(text: str, client: httpx.AsyncClient) -> list[float]:
+    """A single headline's embedding vector, for Story-matching (spec 0002,
+    ADR 0006/0007) -- not wired into fetch_and_persist_headlines or Milvus
+    yet, lesson 19 does that. Same provider-function shape as get_company/
+    fetch_finnhub_news, per ADR 0010: raw httpx, no `openai` SDK."""
+    # Call OpenAI's embeddings endpoint for this one piece of text.
+    try:
+        response = await client.post(
+            "https://api.openai.com/v1/embeddings",
+            headers={"Authorization": f"Bearer {settings.openai_api_key}"},
+            json={"model": OPENAI_EMBEDDING_MODEL, "input": text},
+        )
+        response.raise_for_status()
+        body = response.json()
+    except (httpx.HTTPError, ValueError) as exc:
+        raise ProviderFetchError(f"OpenAI embedding fetch failed: {exc}") from exc
+
+    # Pull the vector out of the response's one-item data array.
+    try:
+        return body["data"][0]["embedding"]
+    except (KeyError, IndexError) as exc:
+        raise ProviderFetchError(f"OpenAI embedding response missing data: {exc}") from exc
 
 
 async def fetch_and_persist_headlines(ticker: str, session_factory=async_session_factory) -> dict:
