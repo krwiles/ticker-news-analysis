@@ -1,0 +1,189 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 19 — The Actual Grouping Logic</title>
+<link rel="stylesheet" href="../assets/lesson.css">
+</head>
+<body>
+<div class="lesson">
+
+  <p class="eyebrow">Lesson 19 of 19 · ticker-news-analysis stack (infra arc — Arc 4)</p>
+  <h1>The actual grouping logic</h1>
+  <p class="subtitle">Lessons 16–18 finally get used for real — and three real bugs only showed up once real
+  data forced them, not before.</p>
+
+  <div class="callout">
+    <p>
+      No dedicated tests in this lesson, deliberately — same shape lesson 7 had. What follows is verified
+      live against the real running stack, not mocked. Lesson 20 adds the dedicated <code>respx</code>/Milvus-
+      mocked suite.
+    </p>
+  </div>
+
+  <h2>The shape: batch the easy part, do the hard part one at a time</h2>
+  <p>
+    Every genuinely-new headline from a fetch run gets embedded in one batched request (lesson 18) — that part
+    is embarrassingly parallel, nothing about one headline's embedding depends on another's. Matching is the
+    opposite: it has to run sequentially, oldest-published-first, because headline <em>N</em>'s candidate
+    Stories include ones headline <em>N-1</em> in this same loop just created. Two near-duplicate headlines
+    arriving in the same fetch need the second one to find the first one's freshly-made Story.
+  </p>
+  <p class="filename">backend/src/ticker_backend/providers.py</p>
+  <pre><code>for headline, vector in zip(news_headlines, embeddings) if match_news else []:
+    day = headline["published_at"].astimezone(EASTERN).date().isoformat()
+    story_id = await _match_or_create_story(ticker, day, vector, session)
+    await session.execute(update(Headline).where(Headline.id == headline["id"]).values(story_id=story_id))</code></pre>
+
+  <h2>Only genuinely-new headlines, never re-touching a known one</h2>
+  <p>
+    <code>/api/search</code> re-fetches from EDGAR/Finnhub on every call, including every Refresh — the
+    existing upsert already handled that by design (dedup-by-URL). What it never did before this lesson was
+    distinguish <em>which</em> headlines were actually new. Doing that turned out to need no new query at
+    all — just reading a bit more out of the upsert Postgres was already running:
+  </p>
+  <pre><code>stmt = stmt.on_conflict_do_update(...).returning(
+    Headline.id, literal_column("(xmax = 0)").label("was_inserted")
+)</code></pre>
+  <p>
+    <code>xmax</code> is one of Postgres' own system columns — <code>0</code> means nothing has touched this
+    row's tuple, i.e. it was a genuine insert, not the <code>ON CONFLICT</code> branch. Verified directly
+    against a real session before trusting it (not assumed from a half-remembered trick): insert a row, expect
+    <code>true</code>; upsert the same row again, expect <code>false</code>. Both held.
+  </p>
+  <p>
+    Why this matters isn't just efficiency. Spec 0002 is explicit that a Story's assignment, once made, is
+    permanent — an already-known headline's <code>story_id</code> must never be touched again, not just
+    "usually isn't." This is the mechanism that guarantees it.
+  </p>
+
+  <h2>Bug 1: a match that should have happened, didn't</h2>
+  <p>
+    First live test: two headlines about the same fictional event, worded differently, real cosine similarity
+    0.92 — comfortably above any reasonable threshold. They landed in two separate Stories anyway. Milvus's own
+    docs had already named the reason back in lesson 16: <code>insert()</code> doesn't make data searchable
+    until the collection is <code>flush()</code>ed. The second headline's search ran before the first's insert
+    was visible.
+  </p>
+
+  <h2>Bug 2 (found fixing bug 1): a good fix that didn't scale</h2>
+  <p>
+    Adding an explicit <code>flush()</code> after every insert fixed the correctness — the same two-headline
+    test then grouped correctly. But <code>flush()</code> seals a real segment; calling it after every single
+    new Story is expensive. A real fetch for a popular, rarely-searched ticker (MSFT, 249 headlines, almost all
+    genuinely new) didn't finish inside 20 seconds — comfortably past <code>job_timeout_seconds</code>'s 10s
+    budget.
+  </p>
+  <p>
+    The actual fix needed research, not another guess: Milvus's <code>search()</code> accepts a
+    <code>consistency_level</code> parameter. <code>"Strong"</code> gives the same read-your-own-writes
+    guarantee — a same-process insert visible to the very next search — without sealing a segment:
+  </p>
+  <pre><code>hits = await _run_milvus(
+    lambda: get_milvus_client().search(
+        collection_name=STORY_PRIMARIES_COLLECTION,
+        data=[vector],
+        filter=_milvus_ticker_day_filter(ticker, day),
+        limit=1,
+        consistency_level="Strong",
+    )
+)</code></pre>
+  <p>
+    Verified live, both ends: a direct insert-then-search round trip with no <code>flush()</code> at all found
+    the just-inserted vector in ~5ms. The same 249-headline MSFT fetch that hadn't finished in 20+ seconds with
+    <code>flush()</code> completed end to end in <strong>3.86 seconds</strong> with <code>consistency_level</code>
+    instead — same correctness, roughly 5x+ faster at real scale.
+  </p>
+
+  <h2>Bug 3: a key name assumed from someone else's example</h2>
+  <p>
+    Matching a hit's primary key back to a real Story crashed with <code>KeyError: 'id'</code>. The generic
+    pymilvus doc example used a schema whose primary key field happened to be named <code>"id"</code> — this
+    collection's primary key is named <code>story_id</code> (ADR 0011), and Milvus surfaces search results
+    under whatever name the schema actually gave the field, not a fixed generic key. A direct insert-then-search
+    round trip, printing the raw result, settled it in one command rather than a second guess:
+  </p>
+  <pre><code>{'story_id': 'test-story-1', 'distance': 1.0, 'entity': {}}</code></pre>
+
+  <h2>Making tests safe without building lesson 20 early</h2>
+  <p>
+    Wiring grouping directly into <code>fetch_and_persist_headlines</code> meant every existing test that
+    persists a real "news" headline would now try to call OpenAI and Milvus for real — not silently (
+    <code>respx</code> raises on an unmocked route rather than passing a request through), but a real
+    regression either way. Rather than retrofit full mocking into the existing suite ahead of schedule, news-
+    matching gates on whether <code>OPENAI_API_KEY</code> is actually configured:
+  </p>
+  <pre><code>match_news = bool(news_headlines) and bool(settings.openai_api_key)</code></pre>
+  <p>
+    This isn't just a test workaround — it's the same graceful-degradation instinct this project already uses
+    elsewhere (a down worker still shows existing data). No key configured means headlines still get fetched
+    and deduped correctly; they're just left ungrouped until grouping infrastructure is actually available,
+    same staged-rollout spirit as <code>story_id</code>'s own nullable column. It also happens to be exactly
+    why the existing 23 tests kept passing untouched: no test environment has ever had a real
+    <code>OPENAI_API_KEY</code> configured.
+  </p>
+
+  <h2>Check your understanding</h2>
+
+  <div class="check">
+    <p class="q">Q1. Why does matching have to run sequentially (oldest headline first), when embedding all of
+    them can be one single batched call?</p>
+    <details>
+      <summary>Reveal answer</summary>
+      <p class="answer">Embedding one headline's text has no dependency on any other headline, so batching is
+      free. Matching does have a dependency: a later headline in the same run might be a near-duplicate of an
+      earlier headline in that same run, and needs to find the Story that earlier headline just created.
+      Processing in random or parallel order could let two near-duplicates both "found" their own separate
+      Story instead of the second one joining the first's.</p>
+    </details>
+  </div>
+
+  <div class="check">
+    <p class="q">Q2. The fix for bug 1 (explicit <code>flush()</code>) was correct but got replaced. What was
+    actually wrong with it, given it did fix the bug?</p>
+    <details>
+      <summary>Reveal answer</summary>
+      <p class="answer">Nothing was wrong with its correctness -- it genuinely fixed the missed-match bug.
+      The problem was cost: flush() seals a real segment, and calling it after every single new Story is
+      expensive at real volume (a 249-headline fetch took over 20 seconds). consistency_level="Strong" on the
+      search call gives the identical read-your-own-writes guarantee without that per-insert cost -- same
+      correctness, dramatically cheaper.</p>
+    </details>
+  </div>
+
+  <div class="check">
+    <p class="q">Q3. Why does news-matching check <code>settings.openai_api_key</code> before running, rather
+    than always attempting it and catching the failure?</p>
+    <details>
+      <summary>Reveal answer</summary>
+      <p class="answer">An unconfigured key is an expected, permanent state in some environments (every local
+      test run, CI) -- not a transient failure worth retrying or logging as an error. Checking first lets
+      filings still group correctly and headlines still persist correctly regardless, exactly the same
+      graceful-degradation shape this project already uses for a down worker, rather than treating "grouping
+      infrastructure isn't configured" as an exceptional case.</p>
+    </details>
+  </div>
+
+  <div class="source">
+    <p class="label">Primary sources</p>
+    <p>
+      <a href="../docs/adr/0011-milvus-story-collection-design.md">ADR 0011 — the story_primaries collection design</a> ·
+      <a href="../docs/adr/0006-story-grouping-via-embedding-similarity.md">ADR 0006 — matching mechanism</a> ·
+      <a href="https://milvus.io/docs/consistency.md">Milvus docs — consistency levels</a> ·
+      <a href="https://www.postgresql.org/docs/current/ddl-system-columns.html">PostgreSQL docs — system columns (xmax)</a>
+    </p>
+  </div>
+
+  <p class="ask">Anything unclear about why the two "primary" concepts (Milvus's matching-representative vs.
+  Postgres's derived display-primary) never need to agree, or how consistency_level differs from flush()? Ask
+  your teacher (this agent).</p>
+
+  <div class="nav">
+    <a href="0018-openai-embeddings-integration.html">← Lesson 18: OpenAI embeddings integration</a>
+    <span>Next → Lesson 20: Backend tests for grouping (not yet written)</span>
+  </div>
+
+</div>
+</body>
+</html>
