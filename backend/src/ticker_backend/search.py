@@ -47,12 +47,9 @@ async def get_arq_redis(request: Request) -> ArqRedis:
 
 
 def get_session_factory():
-    """FastAPI dependency, not a plain default parameter — a path operation's
-    parameters are introspected by FastAPI itself (for request validation,
-    OpenAPI docs), unlike providers.py's plain functions. A raw
-    `async_sessionmaker` object as a bare default breaks that introspection
-    (it tries to deep-copy it); Depends() is the FastAPI-specific way to
-    inject something without FastAPI trying to treat it as request data."""
+    """FastAPI dependency, not a plain default -- FastAPI introspects path
+    operation parameters, and a bare async_sessionmaker breaks that.
+    Depends() injects it without being treated as request data."""
     return async_session_factory
 
 
@@ -98,19 +95,14 @@ async def search(
     arq_redis: ArqRedis = Depends(get_arq_redis),
     session_factory=Depends(get_session_factory),
 ) -> dict:
-    """See the module docstring for the two-step shape. Also this project's
-    frontend/backend case-insensitivity boundary: the frontend (lesson 13)
-    deliberately does *not* uppercase a ticker read from the URL before
-    calling this endpoint -- this line is where that normalization
-    actually happens, once, so every caller can stay careless about case."""
+    """See the module docstring for the two-step shape. Ticker
+    case-normalization happens here, once -- the frontend deliberately
+    doesn't uppercase before calling this."""
     ticker = ticker.upper()
 
     # Default in case the job below never returns a real result at all.
     providers_status: dict[str, str] = {}
-    # "unknown", not "ok"/"skipped"/"error" -- those three (ADR 0012) all
-    # mean grouping was actually evaluated; if the job itself never
-    # returned, grouping's outcome genuinely can't be known. Same "unknown
-    # means can't tell" convention health.py's check_worker already uses.
+    # "unknown", not "ok"/"skipped"/"error" -- the job never ran, so grouping's outcome can't be known.
     grouping_status = "unknown"
     try:
         # Enqueue lesson 7's fetch job and wait for it to finish, so Postgres has fresh data before we query it.

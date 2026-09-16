@@ -14,6 +14,7 @@ describe("CategoryBadge", () => {
   });
 
   it("uses a visibly distinct style per category", () => {
+    // Same instance, re-rendered with the other category, so the classes are directly comparable.
     const { rerender } = render(<CategoryBadge category="news" />);
     const newsClass = screen.getByText("News").className;
 

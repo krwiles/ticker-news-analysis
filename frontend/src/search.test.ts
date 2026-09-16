@@ -17,6 +17,7 @@ describe("fetchSearch", () => {
   };
 
   it("requests /api/search with the URL-encoded ticker", async () => {
+    // Stub the global fetch so no real network call happens.
     const mockFetch = vi.fn().mockResolvedValue({
       ok: true,
       json: async () => okResponse,
@@ -40,6 +41,7 @@ describe("fetchSearch", () => {
   });
 
   it("throws with the response status when the response is not ok", async () => {
+    // Stub a failing response.
     vi.stubGlobal(
       "fetch",
       vi.fn().mockResolvedValue({ ok: false, status: 500, json: async () => ({}) }),

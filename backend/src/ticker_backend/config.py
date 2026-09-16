@@ -26,9 +26,7 @@ class Settings(BaseSettings):
     # How long /api/search waits on the fetch job before treating it as a
     # complete failure — see ADR 0004 and spec 0001.
     job_timeout_seconds: int = 10
-    # Cosine-similarity cutoff for Story matching (spec 0002, ADR 0006) --
-    # empirically tuned live against real headline pairs in lesson 19, not
-    # guessed. See docs/adr/0011-milvus-story-collection-design.md.
+    # Cosine-similarity cutoff for Story matching -- see ADR 0011.
     story_similarity_threshold: float = 0.75
 
 

@@ -41,15 +41,10 @@ class Company(Base):
 class Headline(Base):
     """One piece of tracked news content about a Ticker — see CONTEXT.md.
 
-    `sentiment` deliberately not here yet: positive/neutral/negative + gloss
-    + summary, per CONTEXT.md's Headline entry — pushed to a later,
-    not-yet-numbered spec, in its own future migration when that feature
-    actually starts.
+    `sentiment` deliberately not here yet -- pushed to a later spec.
 
-    `story_id` is here (lesson 17), but nullable -- a deliberate deviation
-    from ADR 0009's eventual NOT NULL design, tightened once lesson 19's
-    real matching logic exists to populate it on every insert path. Same
-    staged-rollout pattern `outlet`/`summary` already used.
+    `story_id` is nullable for now -- ADR 0009's eventual NOT NULL design,
+    tightened once real matching logic populates it on every insert path.
     """
 
     __tablename__ = "headlines"
@@ -76,16 +71,9 @@ class Headline(Base):
 
 
 class Story(Base):
-    """The real-world event two or more same-day Headlines can describe in
-    common — see CONTEXT.md's Story entry. Deliberately minimal: no stored
-    "primary headline" reference at all. A Story's primary is always its
-    earliest-published member -- a pure function of data `Headline`
-    already has (`story_id` + `published_at`), so storing it separately
-    would just be redundant state with nothing to keep it in sync. Find it
-    with `ORDER BY published_at ASC LIMIT 1` (or a window function for
-    bulk fetches) — see ADR 0009 for the full reasoning, including the
-    circular-FK design this replaced.
-    """
+    """The event Headlines can share on a given day — see CONTEXT.md.
+    No stored primary reference: it's always the earliest-published
+    member, found via `ORDER BY published_at ASC LIMIT 1` — see ADR 0009."""
 
     __tablename__ = "stories"
 

@@ -59,6 +59,7 @@ async def test_edgar_date_filter_regression(test_session_factory):
             ),
         )
     )
+    # Fetch and filter to the news-worthy, in-window subset.
     async with httpx.AsyncClient() as client:
         filings = await fetch_edgar_filings(client, cik="320193", ticker="AAPL")
 
@@ -71,6 +72,7 @@ async def test_edgar_date_filter_regression(test_session_factory):
 
 @respx.mock
 async def test_finnhub_maps_source_and_summary(test_session_factory):
+    # Mock Finnhub's real response shape (captured live in lesson 7).
     respx.get("https://finnhub.io/api/v1/company-news").mock(
         return_value=httpx.Response(
             200,
@@ -101,9 +103,11 @@ async def test_finnhub_maps_source_and_summary(test_session_factory):
 
 @respx.mock
 async def test_finnhub_403_raises_typed_error(test_session_factory):
+    # Mock an auth failure.
     respx.get("https://finnhub.io/api/v1/company-news").mock(
         return_value=httpx.Response(403, json={"error": "You don't have access to this resource."})
     )
+    # A 403 should surface as our own typed error, not a raw httpx exception.
     async with httpx.AsyncClient() as client:
         with pytest.raises(ProviderFetchError):
             await fetch_finnhub_news(client, ticker="ZZZQX")
@@ -164,6 +168,7 @@ def test_embedding_input_text_joins_title_and_summary_when_present():
 
 @respx.mock
 async def test_partial_failure_when_one_provider_errors(test_session_factory):
+    # EDGAR succeeds, Finnhub fails.
     respx.get("https://www.sec.gov/files/company_tickers.json").mock(
         return_value=httpx.Response(200, json=TICKERS_JSON)
     )
@@ -174,6 +179,7 @@ async def test_partial_failure_when_one_provider_errors(test_session_factory):
 
     result = await fetch_and_persist_headlines("AAPL", session_factory=test_session_factory)
 
+    # One provider ok, one error -> overall status should reflect the mix.
     assert result["status"] == "partial_failure"
     assert result["providers"] == {"edgar": "ok", "finnhub": "error"}
 
@@ -188,9 +194,11 @@ async def test_dedup_by_url_on_second_fetch(test_session_factory):
     )
     respx.get("https://finnhub.io/api/v1/company-news").mock(return_value=httpx.Response(200, json=[]))
 
+    # Fetch the same ticker twice, same mocked responses both times.
     await fetch_and_persist_headlines("AAPL", session_factory=test_session_factory)
     await fetch_and_persist_headlines("AAPL", session_factory=test_session_factory)
 
+    # The second fetch should update the existing row, not duplicate it.
     async with test_session_factory() as session:
         rows = (await session.execute(select(Headline).where(Headline.ticker == "AAPL"))).scalars().all()
     assert len(rows) == 1
@@ -198,6 +206,7 @@ async def test_dedup_by_url_on_second_fetch(test_session_factory):
 
 @respx.mock
 async def test_no_company_row_when_both_providers_empty(test_session_factory):
+    # A real ticker mapping exists, but not for the one we're about to search.
     respx.get("https://www.sec.gov/files/company_tickers.json").mock(
         return_value=httpx.Response(200, json={"0": {"cik_str": 1, "ticker": "REAL", "title": "Real Co"}})
     )
@@ -205,6 +214,7 @@ async def test_no_company_row_when_both_providers_empty(test_session_factory):
 
     result = await fetch_and_persist_headlines("ZZZQX", session_factory=test_session_factory)
 
+    # No real data from either provider -> no companies row should be created at all.
     assert result["headline_count"] == 0
     async with test_session_factory() as session:
         company = await session.get(Company, "ZZZQX")
@@ -213,6 +223,7 @@ async def test_no_company_row_when_both_providers_empty(test_session_factory):
 
 @respx.mock
 async def test_company_row_created_with_null_cik_when_only_finnhub_has_data(test_session_factory):
+    # EDGAR's mapping has no match for this ticker, but Finnhub does have real news for it.
     respx.get("https://www.sec.gov/files/company_tickers.json").mock(
         return_value=httpx.Response(200, json={"0": {"cik_str": 1, "ticker": "OTHER", "title": "Other Co"}})
     )
@@ -236,6 +247,7 @@ async def test_company_row_created_with_null_cik_when_only_finnhub_has_data(test
 
     result = await fetch_and_persist_headlines("FOREIGNCO", session_factory=test_session_factory)
 
+    # A row should still be created, just with cik/company_name left null.
     assert result["status"] == "success"
     async with test_session_factory() as session:
         company = await session.get(Company, "FOREIGNCO")
@@ -245,6 +257,7 @@ async def test_company_row_created_with_null_cik_when_only_finnhub_has_data(test
 
 
 async def test_category_check_constraint_rejects_invalid_value(test_session_factory):
+    # "rumor" isn't a real category -- the DB's own CHECK constraint should reject it.
     async with test_session_factory() as session:
         session.add(
             Headline(
@@ -275,13 +288,11 @@ async def test_get_company_uses_cache_not_a_second_lookup(test_session_factory):
 
 
 async def test_story_primary_is_derived_as_earliest_published_headline(test_session_factory):
-    """No stored "primary" reference exists (see ADR 0009 -- a circular FK
-    with a back-pointer was the original design, replaced by this). Proves
-    the actual query shape -- order by published_at, take the first --
-    correctly identifies the earliest-published member, not just asserting
-    the rule in prose. Inserted out of chronological order on purpose, so
-    a bug that derived "primary" from insertion order instead of
-    published_at would actually be caught."""
+    """No stored "primary" reference exists (ADR 0009) -- proves the real
+    query (order by published_at, take the first) works. Inserted out of
+    chronological order on purpose, so a bug using insertion order instead
+    would actually be caught."""
+    # Create an empty Story first -- headlines need its id to reference.
     async with test_session_factory() as session:
         await session.merge(Company(ticker="AAPL"))
         story = Story(ticker="AAPL")
@@ -292,6 +303,7 @@ async def test_story_primary_is_derived_as_earliest_published_headline(test_sess
     earlier = datetime(2026, 9, 15, 9, 0, tzinfo=timezone.utc)
     later = datetime(2026, 9, 15, 11, 0, tzinfo=timezone.utc)
 
+    # Insert the later-published headline first, on purpose.
     async with test_session_factory() as session:
         session.add(
             Headline(
@@ -317,6 +329,7 @@ async def test_story_primary_is_derived_as_earliest_published_headline(test_sess
         )
         await session.commit()
 
+    # Same derivation query the real code uses -- earliest published_at wins, not insertion order.
     async with test_session_factory() as session:
         rows = await session.execute(
             select(Headline).where(Headline.story_id == story_id).order_by(Headline.published_at).limit(1)

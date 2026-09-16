@@ -46,13 +46,9 @@ def test_crosses_into_eastern_tomorrow_is_recent_not_today():
 
 def test_dst_aware_not_a_hardcoded_offset_winter_est():
     """Genuinely distinguishes EST (-5) from EDT (-4), not just "some
-    timezone conversion happened at all" -- found via the lesson's own
-    verify-the-tests step that an earlier version of this test didn't
-    actually do this (both timestamps landed on the same date either way).
-    Under the correct -5: now -> Jan 14 23:30, headline -> Jan 14 21:00,
-    same day, matches. Under a wrong hardcoded -4: now -> Jan 15 00:30
-    (crosses into the next day), headline -> Jan 14 22:00 (does not) --
-    a real mismatch only the wrong offset would produce."""
+    timezone conversion happened." Under -5: now -> Jan 14 23:30, headline
+    -> Jan 14 21:00, same day, matches. Under a wrong -4: now crosses into
+    Jan 15, headline doesn't -- a mismatch only the wrong offset produces."""
     now = datetime(2026, 1, 15, 4, 30, tzinfo=timezone.utc)
     h = _headline(datetime(2026, 1, 15, 2, 0, tzinfo=timezone.utc))
     today, recent = split_today_recent([h], now)

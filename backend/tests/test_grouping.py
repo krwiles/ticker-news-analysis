@@ -1,20 +1,13 @@
-"""Grouping tests -- OpenAI mocked via respx (same discipline as
-test_providers.py), Milvus mocked via a hand-rolled in-memory fake (ADR
-0012), not a real connection. See docs/plans/0020-backend-tests-for-grouping.md.
+"""Grouping tests -- OpenAI mocked via respx, Milvus mocked via a
+hand-rolled in-memory fake (ADR 0012), not a real connection.
 
-The fake's result shape (`story_id`/`distance`/`entity`) matches exactly
-what real Milvus returns, confirmed live in lesson 19 -- every successful-
-match test below is itself a regression test for the "id" vs "story_id"
-key-naming bug found there, since a wrong key would raise instead of match.
+The fake's result shape matches real Milvus exactly, so a successful
+match here also regression-tests the "id" vs "story_id" bug from lesson 19.
 
-Real limitation, stated once here rather than per-test: an in-memory fake
-is always perfectly consistent. It can prove this codebase's own
-sequential-loop logic is correct (including the late-match case below), but
-it cannot regression-test Milvus's actual `consistency_level="Strong"`
-behavior -- that's an infrastructure fact, not application logic, and
-already verified live (lesson 19's throwaway scripts, kept around per ADR
-0012 rather than promoted into this suite).
-"""
+Real limitation: an in-memory fake is always consistent, so it can't
+regression-test Milvus's actual `consistency_level="Strong"` behavior --
+that's already verified live (lesson 19's throwaway scripts, kept around
+per ADR 0012)."""
 
 import re
 from datetime import datetime, timedelta, timezone
@@ -249,11 +242,9 @@ async def test_filings_always_get_their_own_story(test_session_factory):
 
 @respx.mock
 async def test_late_match_finds_story_many_iterations_later(test_session_factory, openai_configured):
-    """A headline should still correctly match an existing Story many
-    iterations after that Story was created, not just on the very next
-    search -- confirmed live against real Milvus in lesson 19's follow-up
-    (NOTES.md). This proves this codebase's sequential-loop logic handles
-    that correctly; see the module docstring for what it does NOT prove."""
+    """A headline should still match an existing Story many iterations
+    later, not just on the very next search. See the module docstring for
+    what this does and doesn't prove."""
     original = await _insert_new(test_session_factory, _headline("NFLX", "https://example.com/late-0", "Original", NOW))
     fillers = [
         await _insert_new(
@@ -266,12 +257,7 @@ async def test_late_match_finds_story_many_iterations_later(test_session_factory
         test_session_factory, _headline("NFLX", "https://example.com/late-11", "Duplicate of original", NOW + timedelta(minutes=11))
     )
 
-    # 11-dimensional one-hot vectors: original lives on axis 0, each filler
-    # gets its own distinct axis (1-10) -- perfectly orthogonal to every
-    # other filler and to the original (cosine 0), so none of them can
-    # accidentally match anything. The late duplicate is a near-duplicate
-    # of the original (mostly axis 0, a small nudge into axis 1) -- still
-    # far below threshold against filler 1's own pure axis-1 vector.
+    # One-hot vectors so every filler is orthogonal to the rest (cosine 0, never accidentally matches).
     def _one_hot(i: int) -> list[float]:
         v = [0.0] * 11
         v[i] = 1.0
@@ -300,13 +286,9 @@ async def test_late_match_finds_story_many_iterations_later(test_session_factory
 
 
 async def test_permanence_second_run_never_reconsiders_known_headlines(test_session_factory):
-    """Re-searching/refreshing doesn't reshuffle or duplicate existing
-    Stories (spec 0002) -- proven at the fetch_and_persist_headlines level,
-    since that's where the xmax=0 new-vs-known decision actually lives, not
-    inside _assign_stories itself. Second call must not touch OpenAI at
-    all: the headline is no longer "new", so it's never handed to grouping
-    a second time -- checked via respx's own call count, not just the
-    outcome staying the same."""
+    """Re-searching doesn't reshuffle or duplicate Stories (spec 0002) --
+    checked via respx's own call count, not just that the outcome matches,
+    to prove the headline is never even handed to grouping a second time."""
     with respx.mock:
         respx.get("https://www.sec.gov/files/company_tickers.json").mock(return_value=httpx.Response(200, json={}))
         respx.get(url__regex=r"https://data\.sec\.gov/.*").mock(return_value=httpx.Response(200, json={"filings": {"recent": {k: [] for k in ["form", "filingDate", "acceptanceDateTime", "accessionNumber", "primaryDocument", "primaryDocDescription"]}}}))

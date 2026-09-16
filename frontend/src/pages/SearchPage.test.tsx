@@ -53,6 +53,7 @@ describe("SearchPage", () => {
   });
 
   it("shows a loading state while the search is in flight, then renders results", async () => {
+    // A promise we control, so the fetch can be left pending on purpose.
     let resolveFetch!: (value: searchModule.SearchResponse) => void;
     fetchSearch.mockReturnValue(
       new Promise((resolve) => {
@@ -65,6 +66,7 @@ describe("SearchPage", () => {
 
     expect(screen.getByText(/searching/i)).toBeInTheDocument();
 
+    // Now let the fetch actually complete.
     resolveFetch({
       ticker: "AAPL",
       status: "success",
@@ -80,6 +82,7 @@ describe("SearchPage", () => {
   });
 
   it("renders Today and Recent as two separate sections, never merged", async () => {
+    // One headline in each bucket, deliberately different categories/providers too.
     fetchSearch.mockResolvedValue({
       ticker: "AAPL",
       status: "success",
@@ -158,6 +161,7 @@ describe("SearchPage", () => {
 
     const refreshButton = await screen.findByRole("button", { name: /refresh/i });
 
+    // Clear the initial search's call so the assertion below is about the Refresh click alone.
     fetchSearch.mockClear();
     const user = userEvent.setup();
     await user.click(refreshButton);

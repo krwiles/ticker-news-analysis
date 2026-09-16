@@ -56,6 +56,7 @@ async def _seed_headline(session_factory, ticker: str, title: str, url: str):
 
 
 async def test_search_success_returns_seeded_data(test_session_factory):
+    # Real data already in the DB, plus a fake job that reports a clean success.
     await _seed_headline(test_session_factory, "AAPL", "A real headline", "https://example.com/1")
 
     app.dependency_overrides[get_session_factory] = lambda: test_session_factory
@@ -90,6 +91,7 @@ async def test_search_job_timeout_still_returns_existing_data(test_session_facto
     automated, no need to actually stop a container."""
     await _seed_headline(test_session_factory, "AMZN", "Existing headline", "https://example.com/2")
 
+    # The fake job never returns -- the endpoint should still fall back to existing DB data.
     app.dependency_overrides[get_session_factory] = lambda: test_session_factory
     app.dependency_overrides[get_arq_redis] = lambda: _FakeArqRedis(_FakeJob(exc=asyncio.TimeoutError()))
     try:
