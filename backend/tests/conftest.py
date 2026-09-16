@@ -15,9 +15,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 
-# dbmate's own scheme (postgres://...?sslmode=disable) -- reused for the
-# SQLAlchemy/asyncpg engine below by swapping the scheme and dropping the
-# query string, which asyncpg doesn't need locally.
+# dbmate's own scheme, reused below for the asyncpg engine by swapping the scheme and dropping the query string.
 TEST_DBMATE_URL = os.environ.get(
     "TEST_DATABASE_URL", "postgres://ticker:ticker@localhost:5432/ticker_test?sslmode=disable"
 )
@@ -55,10 +53,7 @@ async def _clean_tables(test_session_factory):
     transaction -- simpler with async SQLAlchemy, and cheap at this data
     size (persist-and-truncate, not drop/recreate every run)."""
     async with test_session_factory() as session:
-        # All three in one statement, not sequential TRUNCATEs -- headlines
-        # and stories now reference each other (a real circular FK, ADR
-        # 0009), and Postgres refuses to truncate either alone without the
-        # other in the same statement.
+        # All three in one statement -- headlines/stories reference each other, Postgres refuses to truncate one alone.
         await session.execute(text("TRUNCATE TABLE headlines, companies, stories"))
         await session.commit()
     yield

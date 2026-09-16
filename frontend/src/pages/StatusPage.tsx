@@ -8,25 +8,22 @@ export function StatusPage() {
   const [health, setHealth] = useState<HealthResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  // Effect-driven, on a timer -- contrast with SearchPage's event-driven
-  // fetch (only runs in response to a user action). This one polls on its
-  // own schedule for as long as the page is mounted.
+  // Effect-driven, on a timer -- polls on its own schedule for as long as the page is mounted.
   useEffect(() => {
-    // Guards against a real race: if this component unmounts (navigating
-    // away) while a poll() call is still awaiting a response, its result
-    // would otherwise arrive and call setState on an unmounted component.
-    // No Angular/RxJS equivalent needed here -- a plain fetch Promise has
-    // no built-in cancel-on-unsubscribe the way an Observable does.
+    // Guards against a race: if this unmounts mid-poll, its result would otherwise call setState
+    // on an unmounted component -- a plain fetch Promise has no built-in cancel, unlike an Observable.
     let cancelled = false;
 
     async function poll() {
       try {
+        // Fetch and store the latest health snapshot on success.
         const result = await fetchHealth();
         if (!cancelled) {
           setHealth(result);
           setError(null);
         }
       } catch (err) {
+        // Store a human-readable error message instead of crashing the poll loop.
         if (!cancelled) {
           setError(err instanceof Error ? err.message : "unknown error");
         }

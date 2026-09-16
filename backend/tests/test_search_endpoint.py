@@ -14,6 +14,8 @@ from ticker_backend.search import get_arq_redis, get_session_factory
 
 
 class _FakeJob:
+    # Stands in for a real ARQ Job -- lets a test dictate the job's outcome
+    # (a result, or a raised exception) without a real queue behind it.
     def __init__(self, result=None, exc: Exception | None = None):
         self._result = result
         self._exc = exc
@@ -25,6 +27,8 @@ class _FakeJob:
 
 
 class _FakeArqRedis:
+    # Stands in for a real ArqRedis pool -- enqueue_job() just hands back the
+    # pre-built fake job above, instead of actually talking to Redis.
     def __init__(self, job: _FakeJob):
         self._job = job
 

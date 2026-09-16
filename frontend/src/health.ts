@@ -1,9 +1,6 @@
 import { API_BASE_URL } from "./config";
 
-// "unknown" is distinct from "error": it means this check couldn't even
-// run (e.g. Redis itself is unreachable, so the worker's heartbeat can't
-// be read at all) -- see health.py's check_worker for where each value
-// actually gets decided.
+// "unknown" means the check couldn't even run (e.g. Redis down) -- see health.py's check_worker.
 export type CheckStatus = "ok" | "stale" | "error" | "unknown";
 
 export interface Check {
@@ -22,10 +19,10 @@ export interface HealthResponse {
 }
 
 export async function fetchHealth(): Promise<HealthResponse> {
-  // Genuinely cross-origin: this page is served by the ui container, the
-  // aggregate health check lives only on the api container. See
-  // docs/adr/0002-cors-over-shared-health-router.md.
+  // Genuinely cross-origin -- ui serves this page, api serves the aggregate check (ADR 0002).
   const res = await fetch(`${API_BASE_URL}/api/health`);
+  // Treat any non-2xx as a failure the caller can catch, rather than
+  // returning a body that doesn't match HealthResponse's shape.
   if (!res.ok) {
     throw new Error(`/api/health responded ${res.status}`);
   }

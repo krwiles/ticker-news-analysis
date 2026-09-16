@@ -7,24 +7,14 @@ interface SearchBarProps {
 }
 
 export function SearchBar({ onSearch, disabled, initialValue }: SearchBarProps) {
-  // signal() -> useState(): an explicit, read/write reactive value. Typing
-  // updates `ticker` on every keystroke; nothing else here reacts to it —
-  // it's only read when the form submits.
-  //
-  // `initialValue` only seeds this once, at mount -- it's not a continuous
-  // binding the way an Angular @Input() is. SearchPage handles the "URL
-  // ticker changed after mount" case by remounting this component (a
-  // `key` prop keyed on the ticker) rather than syncing state via an
-  // effect -- see react.dev's "Resetting state with a key".
+  // useState = Angular's signal(). initialValue only seeds this once at mount, not a
+  // continuous @Input() binding -- SearchPage remounts via a key prop to reset it instead.
   const [ticker, setTicker] = useState(initialValue ?? "");
 
   function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault(); // stop the browser's own full-page-reload form submission
     const trimmed = ticker.trim();
-    // Silently refuses to search on empty/whitespace-only input, rather
-    // than calling onSearch("") -- deliberate, not a missed edge case:
-    // spec 0001 has no ticker-validation requirement, but there's still no
-    // reason to fire a request that can only ever come back empty.
+    // Silently ignores empty/whitespace input -- deliberate, no reason to fire a request that'd come back empty.
     if (trimmed) {
       onSearch(trimmed);
     }

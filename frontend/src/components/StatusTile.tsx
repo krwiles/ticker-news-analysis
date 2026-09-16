@@ -1,8 +1,6 @@
 import type { CheckStatus } from "../health";
 
-// One tile per service in /api/health's response -- the color/label pair
-// is looked up by status so every tile (UI/API/Database/Redis/Worker)
-// renders consistently, rather than each call site picking its own colors.
+// One tile per service -- color/label looked up by status so every tile renders consistently.
 const DOT_COLOR: Record<CheckStatus, string> = {
   ok: "bg-emerald-500",
   stale: "bg-amber-500",

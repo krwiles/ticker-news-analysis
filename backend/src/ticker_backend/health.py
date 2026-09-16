@@ -18,9 +18,7 @@ from ticker_backend.db import engine
 log = structlog.get_logger()
 router = APIRouter()
 
-# The worker has no server of its own — it proves it's alive by writing a
-# timestamp here on a cron job. If this key is missing or too old, the
-# worker is down or wedged.
+# The worker proves it's alive by writing a timestamp here on a cron job.
 WORKER_HEARTBEAT_KEY = "worker:heartbeat"
 WORKER_STALE_AFTER_SECONDS = 30
 
@@ -56,13 +54,16 @@ async def check_worker(client: Redis | None) -> dict:
     from "error" (Redis works, but the worker has never checked in) and
     "stale" (it checked in, just not recently enough to trust) -- three
     different failure shapes an operator would want to tell apart."""
+    # Redis itself was unreachable -- there's no way to even ask the question.
     if client is None:
         return {"status": "unknown", "detail": "redis unavailable"}
 
+    # Redis works, but the worker has never written a heartbeat at all.
     raw = await client.get(WORKER_HEARTBEAT_KEY)
     if raw is None:
         return {"status": "error", "detail": "no heartbeat recorded yet"}
 
+    # A heartbeat exists -- check whether it's recent enough to trust.
     age_seconds = round(time.time() - float(raw), 1)
     if age_seconds > WORKER_STALE_AFTER_SECONDS:
         return {"status": "stale", "age_seconds": age_seconds}
@@ -74,9 +75,13 @@ async def health() -> dict:
     """The one aggregate endpoint `api` mode exposes -- see the module
     docstring for why the browser calls this instead of polling db/redis/
     worker separately itself."""
+    # Check the database first.
     db_status = await check_db()
+    # Check Redis, keeping the live client around -- the worker check below needs it.
     redis_status, redis_client = await check_redis()
+    # Check the worker via that same Redis connection.
     worker_status = await check_worker(redis_client)
+    # Close the connection now that both Redis-dependent checks are done.
     if redis_client is not None:
         await redis_client.aclose()
 
@@ -88,10 +93,7 @@ async def health() -> dict:
     }
 
 
-# ui mode gets its own router with a trivial self-check — NOT the full
-# aggregate above. Each container should only report on what it actually is;
-# aggregating the whole system's health belongs to the one container that's
-# meant to be asked for it. See docs/adr/0002-cors-over-shared-health-router.md.
+# ui's own trivial self-check, not the full aggregate above -- see ADR 0002.
 ui_router = APIRouter()
 
 

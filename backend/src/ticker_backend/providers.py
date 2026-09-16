@@ -20,13 +20,8 @@ from ticker_backend.models import Company, Headline
 
 log = structlog.get_logger()
 
-# 10-K/10-Q/8-K/S-1/DEF 14A read as news; the raw feed is dominated by routine
-# ownership filings (Form 3/4/5) that would otherwise flood the results --
-# verified live against AAPL's real filings. Not exhaustive (no 6-K, S-3,
-# amendments) -- a reasonable v1 cut, see docs/plans/0007's open items.
-# EDGAR's own primaryDocDescription just restates the form type (verified
-# live -- "10-Q" for a 10-Q, not a real description), so titles are built
-# from this instead.
+# News-worthy filing types only -- excludes routine Form 3/4/5 filings that'd flood results.
+# Titles are built from these descriptions since EDGAR's own description just restates the form type.
 EDGAR_FORM_DESCRIPTIONS = {
     "10-K": "Annual Report",
     "10-Q": "Quarterly Report",
@@ -35,6 +30,7 @@ EDGAR_FORM_DESCRIPTIONS = {
     "DEF 14A": "Proxy Statement",
 }
 
+# SEC's full ticker-to-CIK mapping -- one file covering every US filer, not a per-ticker endpoint.
 SEC_TICKERS_URL = "https://www.sec.gov/files/company_tickers.json"
 
 
@@ -43,6 +39,8 @@ class ProviderFetchError(Exception):
     raw KeyError/HTTPError with no context about which provider or ticker."""
 
 
+# The normalized shape every provider-facing lookup converges on, regardless
+# of which provider (or none) actually resolved it.
 @dataclass
 class CompanyInfo:
     ticker: str
@@ -60,13 +58,16 @@ async def get_company(
     anything to `companies` yet* -- whether a row eventually gets created
     depends on what Finnhub returns, decided by the caller.
     """
+    # Normalize so lookups/cache keys are case-insensitive.
     ticker = ticker.upper()
 
+    # Check the cache first -- if we've already resolved this ticker, return it without calling SEC.
     async with session_factory() as session:
         cached = await session.get(Company, ticker)
         if cached is not None:
             return CompanyInfo(ticker, cached.cik, cached.company_name)
 
+    # Not cached -- fetch SEC's full ticker-to-CIK mapping.
     try:
         response = await client.get(
             SEC_TICKERS_URL, headers={"User-Agent": settings.sec_edgar_user_agent}
@@ -76,6 +77,7 @@ async def get_company(
     except (httpx.HTTPError, ValueError) as exc:
         raise ProviderFetchError(f"SEC ticker lookup failed: {exc}") from exc
 
+    # Scan the mapping for a matching ticker, and if found, cache it and return it.
     for entry in all_tickers.values():
         if entry["ticker"].upper() == ticker:
             cik = str(entry["cik_str"])
@@ -85,6 +87,7 @@ async def get_company(
                 await session.commit()
             return CompanyInfo(ticker, cik, company_name)
 
+    # No match in SEC's mapping -- a real, valid outcome, not an error (see docstring).
     return CompanyInfo(ticker, None, None)
 
 
@@ -94,10 +97,13 @@ async def fetch_edgar_filings(client: httpx.AsyncClient, cik: str | None, ticker
     cik=None means SEC's ticker mapping had no match for this ticker --
     not an error, just nothing to fetch.
     """
+    # No CIK means SEC doesn't recognize this ticker -- nothing to fetch, not an error.
     if cik is None:
         return []
 
+    # Build this company's submissions-history URL (CIK zero-padded to 10 digits, per EDGAR's own format).
     url = f"https://data.sec.gov/submissions/CIK{int(cik):010d}.json"
+    # Fetch the company's full filing history.
     try:
         response = await client.get(url, headers={"User-Agent": settings.sec_edgar_user_agent})
         response.raise_for_status()
@@ -105,18 +111,20 @@ async def fetch_edgar_filings(client: httpx.AsyncClient, cik: str | None, ticker
     except (httpx.HTTPError, ValueError, KeyError) as exc:
         raise ProviderFetchError(f"EDGAR filings fetch failed for CIK {cik}: {exc}") from exc
 
-    # EDGAR's "recent" list is the company's most recent filings of *any age*
-    # (up to ~1000, spanning years) -- filtering by form type alone isn't
-    # enough, this pass only wants the last week, same as Finnhub's from/to.
+    # EDGAR's "recent" list spans years -- filter to the last week too, same as Finnhub's from/to.
     cutoff = datetime.now(timezone.utc) - timedelta(days=7)
 
+    # Walk the parallel arrays EDGAR returns (one list per field, same index = same filing) and keep only what matters.
     filings = []
     for i, form in enumerate(recent["form"]):
+        # Skip filing types outside this project's news-worthy set (e.g. routine Form 4 ownership filings).
         if form not in EDGAR_FORM_DESCRIPTIONS:
             continue
         published_at = datetime.fromisoformat(recent["acceptanceDateTime"][i])
+        # Skip anything older than the 7-day window.
         if published_at < cutoff:
             continue
+        # Pull the fields needed to build this filing's real document URL.
         accession_no_dashes = recent["accessionNumber"][i].replace("-", "")
         primary_doc = recent["primaryDocument"][i]
         filings.append(
@@ -143,14 +151,17 @@ async def fetch_finnhub_news(client: httpx.AsyncClient, ticker: str) -> list[dic
     original outlet (e.g. "Yahoo"), `summary` is a ready-made blurb. The
     `related` field is NOT used to filter -- verified it isn't a reliable
     "genuinely about this ticker" signal (see spec 0001's Non-goals)."""
+    # Same trailing 7-day window as EDGAR's.
     to_date = datetime.now(timezone.utc).date()
     from_date = to_date - timedelta(days=7)
+    # Build Finnhub's query params.
     params = {
         "symbol": ticker,
         "from": from_date.isoformat(),
         "to": to_date.isoformat(),
         "token": settings.finnhub_api_key,
     }
+    # Call Finnhub's company-news endpoint.
     try:
         response = await client.get("https://finnhub.io/api/v1/company-news", params=params)
         response.raise_for_status()
@@ -158,6 +169,7 @@ async def fetch_finnhub_news(client: httpx.AsyncClient, ticker: str) -> list[dic
     except (httpx.HTTPError, ValueError) as exc:
         raise ProviderFetchError(f"Finnhub news fetch failed for {ticker}: {exc}") from exc
 
+    # Normalize each article into this project's common headline shape.
     return [
         {
             "ticker": ticker,
@@ -178,9 +190,12 @@ async def fetch_and_persist_headlines(ticker: str, session_factory=async_session
     """Fetch EDGAR + Finnhub concurrently, persist the results, report what
     happened. Runs as an ARQ job (see worker.py, ADR 0004) -- deliberately
     plain and framework-agnostic so lesson 9 can call it directly."""
+    # Normalize so every downstream lookup/write uses the same casing.
     ticker = ticker.upper()
 
+    # One shared HTTP client for every provider call this run makes.
     async with httpx.AsyncClient(timeout=10.0) as client:
+        # Resolve the CIK first (EDGAR needs it) -- a failure here isn't fatal, treat it like a failed provider.
         try:
             company = await get_company(ticker, client, session_factory)
             company_lookup_failed = False
@@ -189,15 +204,20 @@ async def fetch_and_persist_headlines(ticker: str, session_factory=async_session
             company = CompanyInfo(ticker, None, None)
             company_lookup_failed = True
 
+        # Run both provider fetches concurrently -- return_exceptions=True so
+        # one provider failing doesn't cancel the other's in-flight request.
         edgar_result, finnhub_result = await asyncio.gather(
             fetch_edgar_filings(client, company.cik, ticker),
             fetch_finnhub_news(client, ticker),
             return_exceptions=True,
         )
 
+    # Accumulators: per-provider ok/error status, and every headline actually fetched.
     providers_status: dict[str, str] = {}
     all_headlines: list[dict] = []
 
+    # Record EDGAR's outcome -- a failed company lookup invalidates its
+    # result too (EDGAR needs a real CIK), so both cases are treated as one error.
     if company_lookup_failed or isinstance(edgar_result, Exception):
         if isinstance(edgar_result, Exception):
             log.warning("providers.edgar_failed", ticker=ticker, error=str(edgar_result))
@@ -206,6 +226,7 @@ async def fetch_and_persist_headlines(ticker: str, session_factory=async_session
         providers_status["edgar"] = "ok"
         all_headlines.extend(edgar_result)
 
+    # Record Finnhub's outcome the same way.
     if isinstance(finnhub_result, Exception):
         log.warning("providers.finnhub_failed", ticker=ticker, error=str(finnhub_result))
         providers_status["finnhub"] = "error"
@@ -213,13 +234,14 @@ async def fetch_and_persist_headlines(ticker: str, session_factory=async_session
         providers_status["finnhub"] = "ok"
         all_headlines.extend(finnhub_result)
 
+    # Persist everything this run actually fetched.
     async with session_factory() as session:
-        # Finalize the companies row: only now, only if there's real data
-        # that needs it -- see CONTEXT.md's Company entry for why this
-        # sequencing is what keeps this table free of rows for typos.
+        # Only create the companies row now, and only if real data needs it (see CONTEXT.md's Company entry).
         if company.cik is None and all_headlines:
             await session.merge(Company(ticker=ticker, cik=None, company_name=None))
 
+        # Upsert each headline, deduping by URL -- a second fetch updates the
+        # existing row instead of creating a duplicate.
         for headline in all_headlines:
             stmt = pg_insert(Headline).values(**headline)
             stmt = stmt.on_conflict_do_update(
@@ -235,6 +257,7 @@ async def fetch_and_persist_headlines(ticker: str, session_factory=async_session
 
         await session.commit()
 
+    # Map the per-provider outcomes to one overall status the caller can act on.
     ok_count = sum(1 for status in providers_status.values() if status == "ok")
     if ok_count == len(providers_status):
         status = "success"

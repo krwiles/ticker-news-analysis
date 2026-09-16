@@ -34,6 +34,7 @@ async def api_lifespan(app: FastAPI):
     reasoning as db.py's `engine`. Only wired in for `api` mode; `ui` never
     enqueues jobs."""
     app.state.arq_redis = await create_pool(RedisSettings.from_dsn(settings.redis_url))
+    # The app runs here, between startup (above) and shutdown (below).
     yield
     await app.state.arq_redis.aclose()
 
@@ -74,11 +75,16 @@ def split_today_recent(headlines: list[Headline], now: datetime) -> tuple[list[d
     """Pure function — `now` is a parameter, not `datetime.now()` called
     internally, so lesson 10 can test the Eastern-midnight/DST boundary
     against a fixed fake time instead of waiting for real midnight."""
+    # Anchor "today" to the US market's calendar day, not UTC.
     today_date = now.astimezone(EASTERN).date()
+    # Two buckets to fill below.
     today: list[dict] = []
     recent: list[dict] = []
+    # Walk every headline newest-first, so each bucket ends up sorted too.
     for headline in sorted(headlines, key=lambda h: h.published_at, reverse=True):
+        # Convert to the response shape before bucketing.
         entry = _headline_to_dict(headline)
+        # Same-day headlines go in Today, everything else in Recent.
         if headline.published_at.astimezone(EASTERN).date() == today_date:
             today.append(entry)
         else:
@@ -99,10 +105,13 @@ async def search(
     actually happens, once, so every caller can stay careless about case."""
     ticker = ticker.upper()
 
+    # Default in case the job below never returns a real result at all.
     providers_status: dict[str, str] = {}
     try:
+        # Enqueue lesson 7's fetch job and wait for it to finish, so Postgres has fresh data before we query it.
         job = await arq_redis.enqueue_job("fetch_headlines_job", ticker)
         result = await job.result(timeout=settings.job_timeout_seconds)
+        # Pull the job's own status and per-provider detail out of its result.
         status = result["status"]
         providers_status = result["providers"]
     except Exception as exc:  # noqa: BLE001 - timeout or unexpected job failure both surface the same way
@@ -111,18 +120,18 @@ async def search(
         log.warning("search.job_failed", ticker=ticker, error=f"{type(exc).__name__}: {exc}")
         status = "complete_failure"
 
-    # A precise instant, not a day-truncated one -- always includes the
-    # newest possible headlines right up to this moment. Plain UTC: being
-    # off by a few hours at the *old* edge of a week-long window doesn't
-    # matter here the way it does for the Today/Recent split below.
+    # Trailing 7-day window in plain UTC -- precision only matters for the Today/Recent split below.
     cutoff = datetime.now(timezone.utc) - timedelta(days=7)
 
+    # Query Postgres directly for this ticker's recent headlines -- the job
+    # itself never hands back headline data, per the module docstring.
     async with session_factory() as session:
         rows = await session.execute(
             select(Headline).where(Headline.ticker == ticker, Headline.published_at >= cutoff)
         )
         headlines = list(rows.scalars())
 
+    # Split into Today/Recent buckets for the response.
     today, recent = split_today_recent(headlines, datetime.now(timezone.utc))
 
     return {

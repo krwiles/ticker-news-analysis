@@ -34,6 +34,8 @@ def _edgar_filing(form: str, days_ago: int, accession: str):
 
 
 def _edgar_submissions(filings: list[dict]) -> dict:
+    # Transpose into EDGAR's real parallel-array shape (one list per field,
+    # not one dict per filing) -- see fetch_edgar_filings' own indexed loop.
     keys = ["form", "filingDate", "acceptanceDateTime", "accessionNumber", "primaryDocument", "primaryDocDescription"]
     return {"filings": {"recent": {k: [f[k] for f in filings] for k in keys}}}
 

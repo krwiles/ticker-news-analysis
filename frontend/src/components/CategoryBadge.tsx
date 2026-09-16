@@ -11,9 +11,7 @@ const LABEL: Record<Headline["category"], string> = {
   filing: "Filing",
 };
 
-// Distinct from SearchStatus's colors on purpose -- two separate visual
-// systems (what kind of document vs. how the fetch went) shouldn't blur
-// together.
+// Distinct from SearchStatus's colors on purpose -- different visual systems, shouldn't blur together.
 const COLOR: Record<Headline["category"], string> = {
   news: "bg-blue-100 text-blue-700",
   filing: "bg-purple-100 text-purple-700",

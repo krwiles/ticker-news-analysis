@@ -1,8 +1,6 @@
 import { API_BASE_URL } from "./config";
 
-// Mirrors search.py's _headline_to_dict field-for-field -- kept in sync by
-// hand, same trade-off models.py's own docstring names for the
-// dbmate/SQLAlchemy split (no shared schema generates both sides).
+// Mirrors search.py's _headline_to_dict field-for-field -- kept in sync by hand, no shared schema.
 export interface Headline {
   title: string;
   url: string;
@@ -15,23 +13,19 @@ export interface Headline {
 
 export interface SearchResponse {
   ticker: string;
-  // success: every provider responded. partial_failure: at least one
-  // didn't, but some results still came back. complete_failure: nothing
-  // new was fetched (see SearchStatus.tsx for how each renders).
+  // success: all providers ok. partial_failure: some didn't. complete_failure: nothing new fetched.
   status: "success" | "partial_failure" | "complete_failure";
   providers: Record<string, string>; // e.g. {"edgar": "ok", "finnhub": "error"} -- per-provider detail behind the one overall `status`
-  // Never overlapping -- a headline appears in exactly one of these two,
-  // already split server-side by US-Eastern calendar day (search.py's
-  // split_today_recent). Not re-derived here on purpose.
+  // Never overlapping -- already split server-side by Eastern calendar day (search.py's split_today_recent).
   today: Headline[];
   recent: Headline[];
 }
 
 export async function fetchSearch(ticker: string): Promise<SearchResponse> {
-  // Same cross-origin shape as health.ts's fetchHealth — the api container's
-  // CORS config (main.py) already allows this origin in; nothing new to set
-  // up for this endpoint specifically. See docs/adr/0002.
+  // Same cross-origin shape as fetchHealth -- api's CORS config (main.py) already allows this origin.
   const res = await fetch(`${API_BASE_URL}/api/search?ticker=${encodeURIComponent(ticker)}`);
+  // Treat any non-2xx as a failure the caller can catch, rather than
+  // returning a body that doesn't match SearchResponse's shape.
   if (!res.ok) {
     throw new Error(`/api/search responded ${res.status}`);
   }

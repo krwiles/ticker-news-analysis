@@ -24,6 +24,8 @@ async def heartbeat(ctx: dict) -> None:
     """An ARQ cron job, not enqueued by anything -- runs on its own schedule
     (see WorkerSettings.cron_jobs below), the only proof-of-life this
     process has since it runs no HTTP server of its own."""
+    # Write the current timestamp -- health.py's check_worker reads this key
+    # and compares its age to decide ok/stale.
     await ctx["redis"].set(WORKER_HEARTBEAT_KEY, str(time.time()))
     log.info("worker.heartbeat")
 

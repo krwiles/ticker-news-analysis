@@ -5,11 +5,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import * as searchModule from "../search";
 import { SearchPage } from "./SearchPage";
 
-// Module-mocked one layer up from search.test.ts's fetch-boundary mock --
-// SearchPage consumes fetchSearch, it doesn't implement it. This is this
-// project's frontend analogue of the backend's dependency_overrides layer
-// (test_search_endpoint.py): swap an imported module rather than an
-// injected parameter. See NOTES.md / [[di-mechanism-follows-two-independent-questions]].
+// Module-mocked one layer up from search.test.ts -- SearchPage just consumes fetchSearch.
+// Frontend analogue of the backend's dependency_overrides (test_search_endpoint.py).
 vi.mock("../search", () => ({
   fetchSearch: vi.fn(),
 }));

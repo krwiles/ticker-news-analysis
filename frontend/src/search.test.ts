@@ -1,10 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { fetchSearch, type SearchResponse } from "./search";
 
-// Mocks at the same boundary respx mocks on the backend -- the raw fetch
-// call itself, not a wrapper around it. This is search.ts's own test;
-// SearchPage.test.tsx mocks one layer up (search.ts as a whole module)
-// instead, mirroring the backend's dependency-override layer.
+// Mocks the raw fetch call, same boundary respx mocks on the backend.
+// SearchPage.test.tsx mocks one layer up instead (the whole search.ts module).
 describe("fetchSearch", () => {
   afterEach(() => {
     vi.unstubAllGlobals();

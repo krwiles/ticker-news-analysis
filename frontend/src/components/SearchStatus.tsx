@@ -4,19 +4,14 @@ interface SearchStatusProps {
   status: SearchResponse["status"];
 }
 
-// success gets a message too, deliberately -- not just the two failure
-// states. Knowing the latest news actually got fetched is worth surfacing
-// on its own, per spec 0001's "surface a simple success/partial-failure/
-// complete-failure status" (all three, not just the bad ones).
+// success gets a message too, deliberately -- not just the two failure states (spec 0001).
 const MESSAGE: Record<SearchResponse["status"], string> = {
   success: "All sources responded.",
   partial_failure: "Some results may be missing — one source didn't respond.",
   complete_failure: "Couldn't fetch new results right now — showing previously saved data.",
 };
 
-// Same dot-plus-label shape as StatusTile.tsx, kept as its own component
-// (not reused) since the domain is genuinely different -- a search
-// result's status, not a service-health check.
+// Same dot-plus-label shape as StatusTile.tsx, kept separate -- different domain (search status vs. health).
 const DOT_COLOR: Record<SearchResponse["status"], string> = {
   success: "bg-emerald-500",
   partial_failure: "bg-amber-500",

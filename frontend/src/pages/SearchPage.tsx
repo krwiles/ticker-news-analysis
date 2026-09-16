@@ -16,47 +16,38 @@ export function SearchPage() {
   const urlTicker = searchParams.get("ticker");
 
   async function runSearch(ticker: string) {
+    // Reset UI state before the fetch begins.
     setLoading(true);
     setError(null);
     try {
+      // Fetch and store the results on success.
       const result = await fetchSearch(ticker);
       setResults(result);
     } catch (err) {
+      // Store a human-readable error message and drop any stale results.
       setError(err instanceof Error ? err.message : "unknown error");
       setResults(null);
     } finally {
+      // Always clear the loading state, whether the fetch succeeded or failed.
       setLoading(false);
     }
   }
 
-  // The data-loading pattern: the URL itself drives what loads, not just a
-  // button click. Visiting /search?ticker=AAPL directly fetches with zero
-  // manual interaction -- this project's declarative-mode answer to what
-  // an Angular resolver does.
-  //
-  // Deliberately passed through as-is, not uppercased here -- the backend
-  // already normalizes case (search.py's `ticker.upper()`), so a lowercase
-  // URL ticker still resolves correctly without this component needing to
-  // duplicate that normalization on the read path.
+  // The URL itself drives what loads -- visiting /search?ticker=AAPL fetches with no click needed.
+  // Passed through as-is, not uppercased -- the backend already normalizes case.
   useEffect(() => {
     if (urlTicker) {
       runSearch(urlTicker);
     }
   }, [urlTicker]);
 
-  // Event-driven (form submit): normalizes once, writes the URL, and lets
-  // the effect above pick up the resulting param change and do the actual
-  // fetch -- one single fetch-triggering path, not two copies of it.
+  // Writes the URL; the effect above reacts to that change and does the actual fetch.
   function handleSearch(ticker: string) {
     setSearchParams({ ticker: ticker.toUpperCase() });
   }
 
-  // Refresh bypasses the URL entirely and calls runSearch directly -- the
-  // reason it needs its own trigger at all: resubmitting the *same*
-  // ticker via the search bar wouldn't change the URL, so it wouldn't
-  // re-fire the effect above. See lesson 13, and spec 0001's own words:
-  // Refresh "just calls the exact same GET /api/search again for the
-  // currently-shown ticker."
+  // Bypasses the URL and calls runSearch directly -- resubmitting the same ticker wouldn't
+  // change the URL, so the effect above wouldn't re-fire on its own.
   function handleRefresh() {
     if (urlTicker) {
       runSearch(urlTicker);

@@ -27,22 +27,12 @@ def create_app() -> FastAPI:
     lifespan = api_lifespan if settings.app_mode == "api" else None
     app = FastAPI(title="ticker-news-analysis", version="0.1.0", lifespan=lifespan)
 
-    # Explicit three-way match, not `if api ... else ui`: `worker` mode should
-    # never reach this function at all — it's selected entirely by
-    # docker-compose's `command:` override, which replaces this image's
-    # default CMD outright (see docs/adr/0001). An `if/else` would silently
-    # treat a misconfigured worker container (or any typo'd APP_MODE) as `ui`
-    # instead of failing loudly. This fails loudly instead.
+    # Explicit match, not if/else -- worker mode should never reach here (it's
+    # selected via docker-compose's command: override); this fails loudly instead of silently defaulting to ui.
     match settings.app_mode:
         case "api":
             log.info("app.mode", mode="api")
-            # The status page is served by the ui container (a different
-            # origin, same host different port) and fetches this container's
-            # /health directly — a real cross-origin request, not a
-            # same-origin one. Only ui's own origin is allowed in. See
-            # docs/adr/0002-cors-over-shared-health-router.md for why this
-            # beats the alternative (ui exposing the same aggregate router
-            # api does).
+            # ui fetches this container's /health cross-origin -- only ui's own origin is allowed in (ADR 0002).
             app.add_middleware(
                 CORSMiddleware,
                 allow_origins=[settings.ui_origin],
@@ -53,16 +43,10 @@ def create_app() -> FastAPI:
             app.include_router(search_router)
         case "ui":
             log.info("app.mode", mode="ui", static_dir=str(STATIC_DIR))
-            # Trivial per-container liveness only — the full aggregate lives
-            # on the api container exclusively, fetched cross-origin by the
-            # page.
+            # Trivial per-container liveness only -- the full aggregate lives on api, see above.
             app.include_router(ui_health_router)
-            # app.frontend() (FastAPI 0.138+) serves the built SPA as
-            # low-priority routes: normal path operations above are always
-            # checked first, regardless of registration order, and it falls
-            # back to index.html for client-side routes. Replaces a
-            # hand-rolled StaticFiles(html=True) mount, which relied on
-            # registration order to avoid shadowing routes.
+            # app.frontend() (FastAPI 0.138+) serves the SPA as low-priority routes -- other
+            # routes always match first, and it falls back to index.html for client-side routes.
             app.frontend("/", directory=STATIC_DIR)
         case other:
             raise RuntimeError(

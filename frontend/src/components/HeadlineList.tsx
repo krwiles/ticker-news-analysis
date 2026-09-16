@@ -9,6 +9,7 @@ interface HeadlineListProps {
 }
 
 export function HeadlineList({ headlines, emptyMessage }: HeadlineListProps) {
+  // Nothing to show yet -- render the caller's own empty-state message instead of an empty list.
   if (headlines.length === 0) {
     return <p className="text-sm text-slate-500">{emptyMessage}</p>;
   }

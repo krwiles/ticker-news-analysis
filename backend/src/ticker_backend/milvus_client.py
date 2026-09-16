@@ -11,14 +11,7 @@ from pymilvus import MilvusClient
 
 from ticker_backend.config import settings
 
-# Created once, at import time -- same reasoning as db.py's `engine`: a
-# connection belongs to the app's whole lifetime, not to any one call.
-#
-# Worth flagging for lesson 18/19, not solved here: MilvusClient's methods
-# are synchronous (blocking gRPC), while the code that will eventually call
-# this (the ARQ job in providers.py) is fully async. Calling it directly
-# inside an `async def` would block the event loop for that call's
-# duration -- the same CPU-bound-work-in-an-async-job concern lesson 8
-# named, needing the same run_in_executor treatment if it turns out to
-# matter at real call volume.
+# Created once, at import time -- same reasoning as db.py's `engine`.
+# Flag for lesson 18/19: MilvusClient's methods are synchronous (blocking
+# gRPC) against an async caller -- may need run_in_executor eventually.
 milvus_client = MilvusClient(uri=settings.milvus_uri)

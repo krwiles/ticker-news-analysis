@@ -9,8 +9,10 @@ from sqlalchemy.orm import DeclarativeBase
 
 from ticker_backend.config import settings
 
+# The one engine/connection pool for the app's whole lifetime.
 engine = create_async_engine(settings.database_url, pool_pre_ping=True)
 
+# Builds real AsyncSession instances bound to that engine.
 async_session_factory = async_sessionmaker(engine, expire_on_commit=False)
 
 

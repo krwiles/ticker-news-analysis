@@ -3,10 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { App } from "./App";
 
-// Rendering the full App tree pulls in StatusPage's own real,
-// useEffect-driven fetchHealth() call -- this test isn't "about"
-// StatusPage, but its side effects still run, so they need stubbing here
-// too, same discipline as search.test.ts's fetch boundary.
+// Rendering App also mounts StatusPage, whose real fetchHealth() call needs stubbing too.
 beforeEach(() => {
   vi.stubGlobal(
     "fetch",
