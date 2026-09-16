@@ -205,18 +205,20 @@ UI — not because that order is mandatory, just because it's the shape that's w
     once per run for every new headline that run found, not one call per headline.
 19. **The actual grouping logic** — combines 16–18 inside the existing `fetch_and_persist_headlines` job:
     oldest-to-newest processing of only new headlines, threshold search against Milvus, `story_id` assignment.
-    Likely the biggest lesson in this arc — the real feature logic, same weight lesson 7 carried in arc 2.
-    **A real gap confirmed while planning lesson 18, not yet closed**: today's upsert loop treats every
-    provider-returned headline identically, whether it's genuinely new or already sitting in `headlines` from an
-    earlier search/Refresh — there's no "have I already processed this URL" check anywhere yet. This lesson
-    needs to introduce one, for two independent reasons, not just one: (1) cost — embedding the same unchanged
-    headline repeatedly on every re-search/Refresh is pure waste; (2) correctness — spec 0002's own permanence
-    guarantee ("a Story's assignment, once made, is permanent — it is never re-evaluated later") means an
-    already-assigned headline must never be re-embedded or re-matched, not just that doing so would be
-    wasteful. The specific mechanism (a pre-query, a `RETURNING`-based check, or something else) is this
-    lesson's own call to make, not decided here. Worth naming now because a future sentiment-analysis spec will
-    need the identical "was this row genuinely new" checkpoint, for the identical compute-once-never-re-touch
-    reason — likely the same shared primitive, not a second one built from scratch later.
+    ✅ built (plan: `docs/plans/0019-*.md`, design: ADR 0011) — the new-vs-known gap flagged during lesson 18's
+    planning closed via `INSERT ... ON CONFLICT ... RETURNING (xmax = 0)` (verified live against a real
+    session before trusting it), not a pre-query. `story_primaries` Milvus collection: one vector per Story
+    (the founding member's, permanent), cosine metric, threshold 0.75 empirically measured against six real
+    headline pairs — the recurring-quarterly-report pair scored *highest* of all (0.943), direct live proof
+    that ADR 0006's day-scoping is load-bearing, not theoretical. News-matching gates on `OPENAI_API_KEY` being
+    configured (graceful degradation, not a test hack) — closed the real regression this caused in the existing
+    suite before it shipped. `run_in_executor` finally closed, three lessons after first flagged (8, 16, 18).
+    Three real bugs found live, not anticipated in planning: an unflushed insert invisible to the very next
+    search; the fix (explicit `flush()`) working but too slow at real scale (249 new headlines took 20s+),
+    replaced with `consistency_level="Strong"` (same correctness, 3.86s for the same data); and a search
+    result's primary-key field assumed to be named `"id"` when it's actually named after the schema
+    (`story_id`) — caught by printing a raw result rather than guessing twice. Full containerized sanity check:
+    real `/api/search?ticker=MSFT`, 3.57s, 188/188 new news headlines correctly grouped, zero worker errors.
 20. **Backend tests for grouping** — mocking OpenAI and Milvus at their boundaries, same `respx`-style
     discipline as `test_providers.py`. Mirrors lesson 10's shape.
 21. **`/api/search` reshaped for N days** — replaces the `today`/`recent` two-array response with something

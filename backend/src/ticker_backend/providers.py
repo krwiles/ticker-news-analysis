@@ -6,19 +6,28 @@ call these functions directly, no worker or server needed.
 """
 
 import asyncio
+import functools
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 import httpx
 import structlog
-from sqlalchemy import func
+from sqlalchemy import func, literal_column, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from ticker_backend.config import settings
 from ticker_backend.db import async_session_factory
-from ticker_backend.models import Company, Headline
+from ticker_backend.milvus_client import STORY_PRIMARIES_COLLECTION, ensure_story_primaries_collection, get_milvus_client
+from ticker_backend.models import Company, Headline, Story
 
 log = structlog.get_logger()
+
+# Same Eastern-day definition as search.py's own EASTERN (CONTEXT.md's
+# `Today` entry) -- Story grouping is scoped to a headline's own published
+# calendar day, not duplicated logic, just the same one-line constant.
+EASTERN = ZoneInfo("America/New_York")
 
 # News-worthy filing types only -- excludes routine Form 3/4/5 filings that'd flood results.
 # Titles are built from these descriptions since EDGAR's own description just restates the form type.
@@ -201,8 +210,8 @@ def embedding_input_text(title: str, summary: str | None) -> str:
 
 async def get_embeddings(texts: list[str], client: httpx.AsyncClient) -> list[list[float]]:
     """Every new headline's embedding vector in one request, for
-    Story-matching (spec 0002, ADR 0006/0007) -- not wired into
-    fetch_and_persist_headlines or Milvus yet, lesson 19 does that. Same
+    Story-matching (spec 0002, ADR 0006/0007) -- called from
+    _assign_stories (lesson 19) for genuinely-new news headlines only. Same
     provider-function shape as get_company/fetch_finnhub_news, per ADR
     0010: raw httpx, no `openai` SDK.
 
@@ -234,6 +243,116 @@ async def get_embeddings(texts: list[str], client: httpx.AsyncClient) -> list[li
         return [by_index[i] for i in range(len(texts))]
     except (KeyError, IndexError) as exc:
         raise ProviderFetchError(f"OpenAI embedding response missing data: {exc}") from exc
+
+
+async def _run_milvus(func_, *args, **kwargs):
+    """Runs one blocking pymilvus call off the event loop -- MilvusClient's
+    methods are synchronous gRPC, flagged as a gap since lesson 8 and closed
+    here, the first place this project actually calls Milvus from inside an
+    async job. Every Milvus call in this module goes through this."""
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, functools.partial(func_, *args, **kwargs))
+
+
+def _milvus_ticker_day_filter(ticker: str, day: str) -> str:
+    """Scopes a Milvus search to one ticker + one calendar day (spec 0002,
+    ADR 0006/0011) -- `ticker` comes from the search endpoint's URL, not
+    fully validated upstream, so it's escaped before going into the filter
+    string; `day` is always built by this module itself, already safe."""
+    escaped_ticker = ticker.replace("\\", "\\\\").replace('"', '\\"')
+    return f'ticker == "{escaped_ticker}" and day == "{day}"'
+
+
+async def _match_or_create_story(ticker: str, day: str, vector: list[float], session) -> uuid.UUID:
+    """One news headline's matching decision (spec 0002, ADR 0006/0011):
+    compare against every existing same-day-same-ticker Story's primary
+    vector, never every member of every Story. `session` already has the
+    matched/new Story available for the caller's Headline.story_id update --
+    this function itself never touches `headlines`.
+    """
+    # get_milvus_client() itself is deferred into the executor too -- its
+    # first real call is what actually opens the (blocking) connection.
+    #
+    # consistency_level="Strong" -- not an explicit flush() (tried first,
+    # found live to be real per-call overhead against a run with hundreds of
+    # new headlines, each a potential insert). Strong consistency gives the
+    # same read-your-own-writes guarantee (verified live: a same-process
+    # insert is visible to the very next search) without sealing a segment
+    # on every single insert.
+    hits = await _run_milvus(
+        lambda: get_milvus_client().search(
+            collection_name=STORY_PRIMARIES_COLLECTION,
+            data=[vector],
+            filter=_milvus_ticker_day_filter(ticker, day),
+            limit=1,
+            consistency_level="Strong",
+        )
+    )
+    # A hit above the similarity threshold means this headline belongs to an
+    # already-existing Story -- nothing new gets written to Milvus, since a
+    # matched (non-primary) headline's vector is never compared against again.
+    if hits and hits[0] and hits[0][0]["distance"] >= settings.story_similarity_threshold:
+        return uuid.UUID(hits[0][0]["story_id"])
+
+    # No match -- this headline founds a new Story, and its vector becomes
+    # that Story's one representative entry in Milvus, permanently.
+    story = Story(ticker=ticker)
+    session.add(story)
+    await session.flush()
+    await _run_milvus(
+        lambda: get_milvus_client().insert(
+            collection_name=STORY_PRIMARIES_COLLECTION,
+            data=[{"story_id": str(story.id), "ticker": ticker, "day": day, "embedding": vector}],
+        )
+    )
+    return story.id
+
+
+async def _assign_stories(
+    new_headlines: list[dict], ticker: str, client: httpx.AsyncClient, session_factory
+) -> None:
+    """Assigns a `story_id` to every genuinely-new headline from this run --
+    the actual grouping logic spec 0002 describes (ADR 0006/0009/0011).
+    Only ever called with headlines this exact run inserted for the first
+    time (see fetch_and_persist_headlines): an already-known headline's
+    story_id, once set, is never touched again.
+    """
+    # Filings never participate in grouping -- always a Story of one, by
+    # construction (CONTEXT.md's Story entry), no embedding spent on them.
+    filing_headlines = [h for h in new_headlines if h["category"] == "filing"]
+    # News, oldest-published-first: a later headline's candidate Stories
+    # include ones a headline earlier in this same loop just created.
+    news_headlines = sorted(
+        (h for h in new_headlines if h["category"] == "news"), key=lambda h: h["published_at"]
+    )
+
+    # News-matching needs OpenAI + Milvus -- skip it gracefully rather than
+    # crash the whole fetch job when that infrastructure isn't configured
+    # (e.g. no OPENAI_API_KEY set, same as this project's test/CI
+    # environment). Matches story_id's own staged-nullable rollout (lesson
+    # 17): headlines still get fetched and deduped correctly either way,
+    # just left ungrouped until grouping infrastructure is available.
+    match_news = bool(news_headlines) and bool(settings.openai_api_key)
+    embeddings: list[list[float]] = []
+    if match_news:
+        await _run_milvus(ensure_story_primaries_collection)
+        # Every new news headline's embedding, in one batched request (lesson 18).
+        texts = [embedding_input_text(h["title"], h["summary"]) for h in news_headlines]
+        embeddings = await get_embeddings(texts, client)
+
+    async with session_factory() as session:
+        for headline in filing_headlines:
+            story = Story(ticker=ticker)
+            session.add(story)
+            await session.flush()
+            await session.execute(update(Headline).where(Headline.id == headline["id"]).values(story_id=story.id))
+
+        for headline, vector in zip(news_headlines, embeddings) if match_news else []:
+            day = headline["published_at"].astimezone(EASTERN).date().isoformat()
+            story_id = await _match_or_create_story(ticker, day, vector, session)
+            await session.execute(update(Headline).where(Headline.id == headline["id"]).values(story_id=story_id))
+
+        await session.commit()
 
 
 async def fetch_and_persist_headlines(ticker: str, session_factory=async_session_factory) -> dict:
@@ -285,13 +404,17 @@ async def fetch_and_persist_headlines(ticker: str, session_factory=async_session
         all_headlines.extend(finnhub_result)
 
     # Persist everything this run actually fetched.
+    new_headlines: list[dict] = []
     async with session_factory() as session:
         # Only create the companies row now, and only if real data needs it (see CONTEXT.md's Company entry).
         if company.cik is None and all_headlines:
             await session.merge(Company(ticker=ticker, cik=None, company_name=None))
 
         # Upsert each headline, deduping by URL -- a second fetch updates the
-        # existing row instead of creating a duplicate.
+        # existing row instead of creating a duplicate. `xmax = 0` on the
+        # returned row distinguishes a genuine INSERT from an ON CONFLICT
+        # UPDATE (verified live, not assumed) -- this is what lets grouping
+        # below run only against headlines this run has never seen before.
         for headline in all_headlines:
             stmt = pg_insert(Headline).values(**headline)
             stmt = stmt.on_conflict_do_update(
@@ -302,10 +425,18 @@ async def fetch_and_persist_headlines(ticker: str, session_factory=async_session
                     "summary": stmt.excluded.summary,
                     "fetched_at": func.now(),
                 },
-            )
-            await session.execute(stmt)
+            ).returning(Headline.id, literal_column("(xmax = 0)").label("was_inserted"))
+            row = (await session.execute(stmt)).one()
+            if row.was_inserted:
+                new_headlines.append({**headline, "id": row.id})
 
         await session.commit()
+
+    # Group only genuinely-new headlines into Stories -- an already-known
+    # headline's story_id, once set, is never re-evaluated (spec 0002).
+    if new_headlines:
+        async with httpx.AsyncClient(timeout=10.0) as embed_client:
+            await _assign_stories(new_headlines, ticker, embed_client, session_factory)
 
     # Map the per-provider outcomes to one overall status the caller can act on.
     ok_count = sum(1 for status in providers_status.values() if status == "ok")
