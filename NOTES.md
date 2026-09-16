@@ -220,7 +220,12 @@ UI — not because that order is mandatory, just because it's the shape that's w
     (`story_id`) — caught by printing a raw result rather than guessing twice. Full containerized sanity check:
     real `/api/search?ticker=MSFT`, 3.57s, 188/188 new news headlines correctly grouped, zero worker errors.
 20. **Backend tests for grouping** — mocking OpenAI and Milvus at their boundaries, same `respx`-style
-    discipline as `test_providers.py`. Mirrors lesson 10's shape.
+    discipline as `test_providers.py`. Mirrors lesson 10's shape. **One specific case to include, confirmed
+    live during lesson 19's follow-up**: a "late match" test — a headline should still correctly match an
+    existing Story's primary many iterations after that Story was created, not just on the very next search.
+    Verified manually against real Milvus with `consistency_level="Strong"` (20 genuinely distinct intervening
+    Stories, the original still matched correctly 20 inserts later) — this needs a real, committed regression
+    test, not just the throwaway script that checked it this once.
 21. **`/api/search` reshaped for N days** — replaces the `today`/`recent` two-array response with something
     that represents an arbitrary number of days, each holding Stories. The one piece spec 0002 itself flagged
     as not yet designed (see its Open questions).
