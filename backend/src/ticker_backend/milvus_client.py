@@ -35,11 +35,17 @@ def get_milvus_client() -> MilvusClient:
     return _milvus_client
 
 
-def ensure_story_primaries_collection() -> None:
+def ensure_story_primaries_collection(client: MilvusClient | None = None) -> None:
     """Creates `story_primaries` if it doesn't already exist -- idempotent,
     safe to call on every worker startup rather than needing a one-time
-    migration step of its own."""
-    client = get_milvus_client()
+    migration step of its own.
+
+    `client` is injectable (ADR 0012) -- defaults to the real
+    get_milvus_client(), but a test can pass its own fake instead. Mirrors
+    this project's existing `session_factory`/`client: httpx.AsyncClient`
+    pattern, not a new convention.
+    """
+    client = client or get_milvus_client()
     if client.has_collection(STORY_PRIMARIES_COLLECTION):
         return
 

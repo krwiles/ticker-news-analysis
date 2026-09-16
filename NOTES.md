@@ -226,9 +226,32 @@ UI — not because that order is mandatory, just because it's the shape that's w
     Verified manually against real Milvus with `consistency_level="Strong"` (20 genuinely distinct intervening
     Stories, the original still matched correctly 20 inserts later) — this needs a real, committed regression
     test, not just the throwaway script that checked it this once.
+    **Two decisions made during this lesson's planning, recorded in ADR 0012, both to be built before the rest
+    of this lesson's test suite**: (1) the Milvus client becomes an injectable parameter on
+    `_match_or_create_story`/`_assign_stories`/`ensure_story_primaries_collection` (mirrors the
+    `session_factory`/`client` pattern already used everywhere else), tested against a hand-rolled in-memory
+    fake with a real cosine-similarity `search()`, not canned responses — this refactor must be done first, in
+    isolation, and re-verified against lesson 19's own live-verification scripts before any new tests get
+    written. (2) News-matching now degrades gracefully on *both* "OpenAI not configured" and "OpenAI configured
+    but transiently failing" (previously only the first case was graceful) — headlines always persist either
+    way, and the distinction is preserved via a new `grouping` status (`"ok"`/`"skipped"`/`"error"`) that flows
+    from `_assign_stories` through `fetch_and_persist_headlines`'s result into `/api/search`'s JSON response,
+    independent of the existing `status` field. Lesson 21's `/api/search` reshaping must preserve this field,
+    not drop it. The same "is my dependency configured and currently working" signal is flagged in ADR 0007 as
+    something a future sentiment-analysis spec should reuse, not re-derive.
+    ✅ built (plan: `docs/plans/0020-*.md`) — the Milvus DI refactor landed first, in isolation, re-verified
+    against all three of lesson 19's live-verification scripts before any test code was written. A late gap the
+    plan hadn't anticipated: `fetch_and_persist_headlines` itself also needed a `milvus` parameter (not just
+    `_assign_stories`) for the permanence test to work at all — found only once test-writing demanded it. All
+    three `grouping` outcomes (`"ok"`, `"skipped"`, `"error"` against a real OpenAI 401) verified live before
+    being written up as mocked tests. `_FakeMilvusClient` computes real cosine similarity, not canned
+    responses — its result shape doubles as a live regression test for lesson 19's "id" vs "story_id" bug.
+    10 new tests, 33/33 total. Verification per lesson 10's precedent: deliberately broke the threshold check,
+    confirmed exactly the two match-dependent tests failed, reverted.
 21. **`/api/search` reshaped for N days** — replaces the `today`/`recent` two-array response with something
     that represents an arbitrary number of days, each holding Stories. The one piece spec 0002 itself flagged
-    as not yet designed (see its Open questions).
+    as not yet designed (see its Open questions). Must preserve the `grouping` status field lesson 20/ADR 0012
+    adds to the response, not drop it while reshaping everything else.
 22. **Frontend: per-day lists + the `Story` component** — replaces `SearchPage`'s Today/Recent sections with
     one per day; a `Story` shows its primary headline per spec 0001's existing rules, plus an expandable list
     for other members when there are any. Capstone of this arc, same role lesson 14 played for arc 2.

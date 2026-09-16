@@ -14,6 +14,7 @@ from zoneinfo import ZoneInfo
 
 import httpx
 import structlog
+from pymilvus import MilvusException
 from sqlalchemy import func, literal_column, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
@@ -263,16 +264,18 @@ def _milvus_ticker_day_filter(ticker: str, day: str) -> str:
     return f'ticker == "{escaped_ticker}" and day == "{day}"'
 
 
-async def _match_or_create_story(ticker: str, day: str, vector: list[float], session) -> uuid.UUID:
+async def _match_or_create_story(ticker: str, day: str, vector: list[float], session, milvus) -> uuid.UUID:
     """One news headline's matching decision (spec 0002, ADR 0006/0011):
     compare against every existing same-day-same-ticker Story's primary
     vector, never every member of every Story. `session` already has the
     matched/new Story available for the caller's Headline.story_id update --
     this function itself never touches `headlines`.
+
+    `milvus` is a resolved client, not a default parameter here -- the
+    caller (_assign_stories) is the one place responsible for resolving the
+    real client vs. an injected fake (ADR 0012), so this function always
+    just uses whatever it's given.
     """
-    # get_milvus_client() itself is deferred into the executor too -- its
-    # first real call is what actually opens the (blocking) connection.
-    #
     # consistency_level="Strong" -- not an explicit flush() (tried first,
     # found live to be real per-call overhead against a run with hundreds of
     # new headlines, each a potential insert). Strong consistency gives the
@@ -280,7 +283,7 @@ async def _match_or_create_story(ticker: str, day: str, vector: list[float], ses
     # insert is visible to the very next search) without sealing a segment
     # on every single insert.
     hits = await _run_milvus(
-        lambda: get_milvus_client().search(
+        lambda: milvus.search(
             collection_name=STORY_PRIMARIES_COLLECTION,
             data=[vector],
             filter=_milvus_ticker_day_filter(ticker, day),
@@ -300,7 +303,7 @@ async def _match_or_create_story(ticker: str, day: str, vector: list[float], ses
     session.add(story)
     await session.flush()
     await _run_milvus(
-        lambda: get_milvus_client().insert(
+        lambda: milvus.insert(
             collection_name=STORY_PRIMARIES_COLLECTION,
             data=[{"story_id": str(story.id), "ticker": ticker, "day": day, "embedding": vector}],
         )
@@ -309,56 +312,96 @@ async def _match_or_create_story(ticker: str, day: str, vector: list[float], ses
 
 
 async def _assign_stories(
-    new_headlines: list[dict], ticker: str, client: httpx.AsyncClient, session_factory
-) -> None:
+    new_headlines: list[dict], ticker: str, client: httpx.AsyncClient, session_factory, milvus=None
+) -> str:
     """Assigns a `story_id` to every genuinely-new headline from this run --
     the actual grouping logic spec 0002 describes (ADR 0006/0009/0011).
     Only ever called with headlines this exact run inserted for the first
     time (see fetch_and_persist_headlines): an already-known headline's
     story_id, once set, is never touched again.
+
+    `milvus` is injectable (ADR 0012) -- a test passes its own fake; real
+    callers leave it None and the real client gets resolved below, lazily
+    and only when actually needed, so a run with nothing to group never
+    touches Milvus at all.
+
+    Returns "ok" (ran, or nothing new to group), "skipped" (no
+    OPENAI_API_KEY configured), or "error" (configured, but a real failure
+    was caught and grouping degraded gracefully) -- ADR 0012. Filings
+    always still get their own Story regardless of this outcome: only
+    news-matching depends on OpenAI/Milvus.
     """
     # Filings never participate in grouping -- always a Story of one, by
     # construction (CONTEXT.md's Story entry), no embedding spent on them.
+    # Committed in its own transaction, independent of news-matching below,
+    # so a later Milvus/OpenAI failure never undoes already-successful work.
     filing_headlines = [h for h in new_headlines if h["category"] == "filing"]
+    if filing_headlines:
+        async with session_factory() as session:
+            for headline in filing_headlines:
+                story = Story(ticker=ticker)
+                session.add(story)
+                await session.flush()
+                await session.execute(
+                    update(Headline).where(Headline.id == headline["id"]).values(story_id=story.id)
+                )
+            await session.commit()
+
     # News, oldest-published-first: a later headline's candidate Stories
     # include ones a headline earlier in this same loop just created.
     news_headlines = sorted(
         (h for h in new_headlines if h["category"] == "news"), key=lambda h: h["published_at"]
     )
+    if not news_headlines:
+        return "ok"
+    if not settings.openai_api_key:
+        return "skipped"
 
-    # News-matching needs OpenAI + Milvus -- skip it gracefully rather than
-    # crash the whole fetch job when that infrastructure isn't configured
-    # (e.g. no OPENAI_API_KEY set, same as this project's test/CI
-    # environment). Matches story_id's own staged-nullable rollout (lesson
-    # 17): headlines still get fetched and deduped correctly either way,
-    # just left ungrouped until grouping infrastructure is available.
-    match_news = bool(news_headlines) and bool(settings.openai_api_key)
-    embeddings: list[list[float]] = []
-    if match_news:
-        await _run_milvus(ensure_story_primaries_collection)
+    # Both "not configured" (above) and "configured but failing" (below)
+    # now degrade gracefully rather than crash the whole fetch job -- ADR
+    # 0012. The two cases stay distinguishable via the returned status, not
+    # collapsed into silence: something an operator (or a future UI) can
+    # actually tell apart.
+    try:
+        # Resolving the real client is itself a blocking call on first use
+        # (get_milvus_client()'s own connection) -- kept off the event loop
+        # like every other Milvus call. A test-injected fake needs none of
+        # this: it's already a live object, not a lazy connection to open.
+        milvus = milvus if milvus is not None else await _run_milvus(get_milvus_client)
+        await _run_milvus(ensure_story_primaries_collection, milvus)
         # Every new news headline's embedding, in one batched request (lesson 18).
         texts = [embedding_input_text(h["title"], h["summary"]) for h in news_headlines]
         embeddings = await get_embeddings(texts, client)
 
-    async with session_factory() as session:
-        for headline in filing_headlines:
-            story = Story(ticker=ticker)
-            session.add(story)
-            await session.flush()
-            await session.execute(update(Headline).where(Headline.id == headline["id"]).values(story_id=story.id))
+        async with session_factory() as session:
+            for headline, vector in zip(news_headlines, embeddings):
+                day = headline["published_at"].astimezone(EASTERN).date().isoformat()
+                story_id = await _match_or_create_story(ticker, day, vector, session, milvus)
+                await session.execute(
+                    update(Headline).where(Headline.id == headline["id"]).values(story_id=story_id)
+                )
+            await session.commit()
+    except (ProviderFetchError, MilvusException) as exc:
+        # Nothing from this attempt gets committed -- the session above
+        # closes without a commit on the way out, discarding any partial
+        # matching work, same all-or-nothing reasoning as any other
+        # transaction in this codebase.
+        log.warning("providers.grouping_failed", ticker=ticker, error=str(exc))
+        return "error"
 
-        for headline, vector in zip(news_headlines, embeddings) if match_news else []:
-            day = headline["published_at"].astimezone(EASTERN).date().isoformat()
-            story_id = await _match_or_create_story(ticker, day, vector, session)
-            await session.execute(update(Headline).where(Headline.id == headline["id"]).values(story_id=story_id))
-
-        await session.commit()
+    return "ok"
 
 
-async def fetch_and_persist_headlines(ticker: str, session_factory=async_session_factory) -> dict:
+async def fetch_and_persist_headlines(ticker: str, session_factory=async_session_factory, milvus=None) -> dict:
     """Fetch EDGAR + Finnhub concurrently, persist the results, report what
     happened. Runs as an ARQ job (see worker.py, ADR 0004) -- deliberately
-    plain and framework-agnostic so lesson 9 can call it directly."""
+    plain and framework-agnostic so lesson 9 can call it directly.
+
+    `milvus` just threads through to _assign_stories (ADR 0012) -- same
+    injectable-parameter shape as session_factory, so a test can exercise
+    the full fetch-then-group flow against a fake, not just _assign_stories
+    in isolation.
+    """
     # Normalize so every downstream lookup/write uses the same casing.
     ticker = ticker.upper()
 
@@ -434,9 +477,12 @@ async def fetch_and_persist_headlines(ticker: str, session_factory=async_session
 
     # Group only genuinely-new headlines into Stories -- an already-known
     # headline's story_id, once set, is never re-evaluated (spec 0002).
+    # "ok" by default: covers the case of nothing new to group at all, same
+    # as _assign_stories' own trivial-success return (ADR 0012).
+    grouping_status = "ok"
     if new_headlines:
         async with httpx.AsyncClient(timeout=10.0) as embed_client:
-            await _assign_stories(new_headlines, ticker, embed_client, session_factory)
+            grouping_status = await _assign_stories(new_headlines, ticker, embed_client, session_factory, milvus)
 
     # Map the per-provider outcomes to one overall status the caller can act on.
     ok_count = sum(1 for status in providers_status.values() if status == "ok")
@@ -451,4 +497,8 @@ async def fetch_and_persist_headlines(ticker: str, session_factory=async_session
         "status": status,
         "providers": providers_status,
         "headline_count": len(all_headlines),
+        # Independent of `status` above (ADR 0012) -- a grouping problem is
+        # an orthogonal concern from "did EDGAR/Finnhub respond", not folded
+        # into the same enum.
+        "grouping": grouping_status,
     }

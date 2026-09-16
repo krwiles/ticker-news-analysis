@@ -48,3 +48,12 @@ This doesn't change the decision above (OpenAI's API is still the chosen technol
 algorithm (a new headline is still compared against each existing same-day Story's primary, one at a time) —
 it only changes how the *vectors get fetched*: once per fetch job run, for every genuinely new headline that
 run found, not once per headline sequentially.
+
+## Revised after lesson 20's planning: failure-detection is shared infrastructure too, not just the API client
+
+This ADR's own Considered options already named "shared infrastructure (API client, secret management) a
+likely future sentiment-analysis spec will reuse" — that list was incomplete. ADR 0012 adds a third piece: the
+"is this dependency configured, and if so, is it currently working" signal, surfaced through the API response
+rather than only logged (see ADR 0012's `grouping` status field). Sentiment analysis will hit the identical
+shape of problem — a real external OpenAI call, inside the same fetch job, that can be unconfigured or
+transiently down — and should reuse that same observable pattern rather than re-deriving it.

@@ -60,7 +60,14 @@ async def test_search_success_returns_seeded_data(test_session_factory):
 
     app.dependency_overrides[get_session_factory] = lambda: test_session_factory
     app.dependency_overrides[get_arq_redis] = lambda: _FakeArqRedis(
-        _FakeJob(result={"status": "success", "providers": {"edgar": "ok", "finnhub": "ok"}, "headline_count": 1})
+        _FakeJob(
+            result={
+                "status": "success",
+                "providers": {"edgar": "ok", "finnhub": "ok"},
+                "headline_count": 1,
+                "grouping": "ok",
+            }
+        )
     )
     try:
         transport = ASGITransport(app=app)
@@ -73,6 +80,7 @@ async def test_search_success_returns_seeded_data(test_session_factory):
     body = response.json()
     assert body["status"] == "success"
     assert body["ticker"] == "AAPL"
+    assert body["grouping"] == "ok"
     assert len(body["today"]) == 1
     assert body["today"][0]["title"] == "A real headline"
 
@@ -95,5 +103,8 @@ async def test_search_job_timeout_still_returns_existing_data(test_session_facto
     body = response.json()
     assert body["status"] == "complete_failure"
     assert body["providers"] == {}
+    # The job never returned at all -- grouping's outcome genuinely can't be
+    # known, distinct from "ok"/"skipped"/"error" which all mean it ran (ADR 0012).
+    assert body["grouping"] == "unknown"
     assert len(body["today"]) == 1
     assert body["today"][0]["title"] == "Existing headline"

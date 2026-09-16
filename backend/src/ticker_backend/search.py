@@ -107,13 +107,19 @@ async def search(
 
     # Default in case the job below never returns a real result at all.
     providers_status: dict[str, str] = {}
+    # "unknown", not "ok"/"skipped"/"error" -- those three (ADR 0012) all
+    # mean grouping was actually evaluated; if the job itself never
+    # returned, grouping's outcome genuinely can't be known. Same "unknown
+    # means can't tell" convention health.py's check_worker already uses.
+    grouping_status = "unknown"
     try:
         # Enqueue lesson 7's fetch job and wait for it to finish, so Postgres has fresh data before we query it.
         job = await arq_redis.enqueue_job("fetch_headlines_job", ticker)
         result = await job.result(timeout=settings.job_timeout_seconds)
-        # Pull the job's own status and per-provider detail out of its result.
+        # Pull the job's own status, per-provider detail, and grouping outcome out of its result.
         status = result["status"]
         providers_status = result["providers"]
+        grouping_status = result["grouping"]
     except Exception as exc:  # noqa: BLE001 - timeout or unexpected job failure both surface the same way
         # asyncio.TimeoutError carries no message (str(exc) is empty) -- the
         # exception's own type is the only thing that says what happened.
@@ -138,6 +144,9 @@ async def search(
         "ticker": ticker,
         "status": status,
         "providers": providers_status,
+        # Independent of `status` above -- a grouping problem is a distinct,
+        # orthogonal concern from "did EDGAR/Finnhub respond" (ADR 0012).
+        "grouping": grouping_status,
         "today": today,
         "recent": recent,
     }
