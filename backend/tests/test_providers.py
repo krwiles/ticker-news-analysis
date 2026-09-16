@@ -17,7 +17,7 @@ from ticker_backend.providers import (
     fetch_edgar_filings,
     fetch_finnhub_news,
     get_company,
-    get_embedding,
+    get_embeddings,
 )
 
 TICKERS_JSON = {"0": {"cik_str": 320193, "ticker": "AAPL", "title": "Apple Inc."}}
@@ -110,32 +110,48 @@ async def test_finnhub_403_raises_typed_error(test_session_factory):
 
 
 @respx.mock
-async def test_get_embedding_returns_vector(test_session_factory):
+async def test_get_embeddings_places_vectors_by_index_not_array_order(test_session_factory):
+    """Response items deliberately out of index order -- proves the lookup
+    really uses each item's own `index` field, not array position (same
+    "insert out of order, prove the derivation is real" discipline as
+    test_story_primary_is_derived_as_earliest_published_headline)."""
     respx.post("https://api.openai.com/v1/embeddings").mock(
         return_value=httpx.Response(
             200,
             json={
                 "object": "list",
-                "data": [{"object": "embedding", "embedding": [0.1, 0.2, 0.3], "index": 0}],
+                "data": [
+                    {"object": "embedding", "embedding": [0.9, 0.9], "index": 1},
+                    {"object": "embedding", "embedding": [0.1, 0.1], "index": 0},
+                ],
                 "model": "text-embedding-3-small",
-                "usage": {"prompt_tokens": 8, "total_tokens": 8},
+                "usage": {"prompt_tokens": 12, "total_tokens": 12},
             },
         )
     )
     async with httpx.AsyncClient() as client:
-        embedding = await get_embedding("A real headline", client)
+        embeddings = await get_embeddings(["first headline", "second headline"], client)
 
-    assert embedding == [0.1, 0.2, 0.3]
+    assert embeddings == [[0.1, 0.1], [0.9, 0.9]]
 
 
 @respx.mock
-async def test_get_embedding_raises_typed_error_on_failure(test_session_factory):
+async def test_get_embeddings_raises_typed_error_on_failure(test_session_factory):
     respx.post("https://api.openai.com/v1/embeddings").mock(
         return_value=httpx.Response(401, json={"error": {"message": "Incorrect API key provided."}})
     )
     async with httpx.AsyncClient() as client:
         with pytest.raises(ProviderFetchError):
-            await get_embedding("A real headline", client)
+            await get_embeddings(["A real headline"], client)
+
+
+async def test_get_embeddings_empty_list_skips_the_network_call(test_session_factory):
+    # No respx mock registered at all -- if get_embeddings tried a real HTTP
+    # call for an empty batch, this would raise a connection error.
+    async with httpx.AsyncClient() as client:
+        embeddings = await get_embeddings([], client)
+
+    assert embeddings == []
 
 
 def test_embedding_input_text_uses_title_only_when_no_summary():

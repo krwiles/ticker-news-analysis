@@ -118,3 +118,30 @@ total, zero regressions.
 
 `fetch_and_persist_headlines` and `milvus_client.py` both remain untouched, exactly as scoped — lesson 19 is
 where this gets wired into the real matching flow.
+
+## Revised after initial build: batched, not one call per headline
+
+The "worth re-checking" flag above got checked immediately, not deferred to lesson 19: the single-call latency
+(2.23s) made the real risk concrete on its own — a search turning up tens of headlines, each embedded serially,
+would blow `job_timeout_seconds`'s 10s budget on embeddings alone. `get_embedding(text, client) -> list[float]`
+was replaced with `get_embeddings(texts: list[str], client) -> list[list[float]]`, using OpenAI's native array
+`input` support (one request for a whole batch, not one per item). Each returned vector is placed by its own
+`index` field rather than trusted to preserve array order.
+
+Live-verified against 10 realistic headlines: **1.13s** for the full batch — *faster* than the 1.83s
+single-headline baseline measured in the same run, and nowhere near the naive serial estimate of ~18.32s for
+the same 10 calls run one at a time. Confirms the premise: batch latency is flat against batch size, not
+linear, because the dominant cost is the network round-trip rather than per-item compute.
+
+Tests were revised, not just added to: the original two `get_embedding` tests became
+`test_get_embeddings_places_vectors_by_index_not_array_order` (response items deliberately returned out of
+index order, proving the placement logic is real — same "insert out of order" discipline as
+`test_story_primary_is_derived_as_earliest_published_headline`) and
+`test_get_embeddings_raises_typed_error_on_failure`, plus a new
+`test_get_embeddings_empty_list_skips_the_network_call` (no respx mock registered at all — proves the
+empty-input guard actually skips the call rather than just returning early after making one). 23/23 total.
+
+ADR 0007's Consequences and ADR 0010's Consequences were both updated in place to reflect the batched shape —
+same precedent as ADR 0009's in-place revision after lesson 17's circular-FK simplification. `lessons/0018-*.html`
+was rewritten to tell the real version-one/version-two story rather than presenting the batched version as if
+it were the only one ever built.

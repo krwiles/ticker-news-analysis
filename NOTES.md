@@ -190,18 +190,33 @@ UI — not because that order is mandatory, just because it's the shape that's w
     works even when headlines are inserted out of chronological order), full stack sanity check clean.
 18. **OpenAI embeddings integration** — a new provider-style call in `providers.py` (same shape as EDGAR/
     Finnhub), get real embeddings for real headline text, verify live. No Milvus wiring yet — just proves the
-    API call works. ✅ built (plan: `docs/plans/0018-*.md`) — `get_embedding()` + `embedding_input_text()`
+    API call works. ✅ built (plan: `docs/plans/0018-*.md`) — `get_embeddings()` + `embedding_input_text()`
     added to `providers.py` per ADR 0010's raw-httpx shape, `openai_api_key` wired into `config.py` and
     `docker-compose.yml`'s shared `&app-env`. Two decisions closed during planning: model
     (`text-embedding-3-small`) and input-text join format (`title` alone, or `title\n\nsummary` when present).
-    22/22 tests passing (18 existing + 4 new, zero regressions). Live-verified against OpenAI's real endpoint:
-    1536 dimensions confirmed (matches the model's documented size), response shape matched the assumption
-    exactly, real latency 2.23s — comfortably inside `job_timeout_seconds`'s 10s budget, closing the "worth
-    verifying live" flag ADR 0007 left open. `fetch_and_persist_headlines` and Milvus itself both still
-    untouched, as scoped — lesson 19 wires this in.
+    **Revised after the first live call**: a single isolated embedding measured 2.23s, which projects to ~18s
+    for a realistic 10-headline search — well past `job_timeout_seconds`'s 10s budget on embeddings alone.
+    Replaced the original one-call-per-headline `get_embedding()` with a batched `get_embeddings(texts, client)`
+    using OpenAI's native array `input` support, placing each vector by its own `index` field rather than
+    trusting response order. Live-verified: 10 headlines in one batched call took 1.13s — flat against batch
+    size, not linear. ADR 0007 and ADR 0010 both updated in place to record this (same precedent as ADR 0009's
+    revision in lesson 17). 23/23 tests passing, zero regressions. `fetch_and_persist_headlines` and Milvus
+    itself both still untouched, as scoped — lesson 19 wires this in, now knowing embeddings should be fetched
+    once per run for every new headline that run found, not one call per headline.
 19. **The actual grouping logic** — combines 16–18 inside the existing `fetch_and_persist_headlines` job:
     oldest-to-newest processing of only new headlines, threshold search against Milvus, `story_id` assignment.
     Likely the biggest lesson in this arc — the real feature logic, same weight lesson 7 carried in arc 2.
+    **A real gap confirmed while planning lesson 18, not yet closed**: today's upsert loop treats every
+    provider-returned headline identically, whether it's genuinely new or already sitting in `headlines` from an
+    earlier search/Refresh — there's no "have I already processed this URL" check anywhere yet. This lesson
+    needs to introduce one, for two independent reasons, not just one: (1) cost — embedding the same unchanged
+    headline repeatedly on every re-search/Refresh is pure waste; (2) correctness — spec 0002's own permanence
+    guarantee ("a Story's assignment, once made, is permanent — it is never re-evaluated later") means an
+    already-assigned headline must never be re-embedded or re-matched, not just that doing so would be
+    wasteful. The specific mechanism (a pre-query, a `RETURNING`-based check, or something else) is this
+    lesson's own call to make, not decided here. Worth naming now because a future sentiment-analysis spec will
+    need the identical "was this row genuinely new" checkpoint, for the identical compute-once-never-re-touch
+    reason — likely the same shared primitive, not a second one built from scratch later.
 20. **Backend tests for grouping** — mocking OpenAI and Milvus at their boundaries, same `respx`-style
     discipline as `test_providers.py`. Mirrors lesson 10's shape.
 21. **`/api/search` reshaped for N days** — replaces the `today`/`recent` two-array response with something

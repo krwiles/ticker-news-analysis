@@ -25,31 +25,60 @@
 
   <h2>An ADR that named this function before it existed</h2>
   <p>
-    While planning this lesson, a question surfaced that had never been asked out loud before: should
-    <code>get_embedding</code> use OpenAI's official <code>openai</code> Python package, or stay on raw
-    <code>httpx</code> like every provider call so far? EDGAR has no SDK at all, so <code>fetch_edgar_filings</code>
-    never had a choice — but Finnhub and OpenAI both have official clients, and this project had just never
-    written down <em>why</em> it wasn't using them.
+    While planning this lesson, a question surfaced that had never been asked out loud before: should the new
+    embedding call use OpenAI's official <code>openai</code> Python package, or stay on raw <code>httpx</code>
+    like every provider call so far? EDGAR has no SDK at all, so <code>fetch_edgar_filings</code> never had a
+    choice — but Finnhub and OpenAI both have official clients, and this project had just never written down
+    <em>why</em> it wasn't using them.
   </p>
   <p>
     The answer became <a href="../docs/adr/0010-raw-http-not-provider-sdks.md">ADR 0010</a>, and it's worth
-    reading closely for one detail: it lists <code>get_embedding</code> as an existing example of the shared
-    provider shape — written <em>before</em> the function itself was built. That's the ADR discipline this
+    reading closely for one detail: it lists <code>get_embeddings</code> as an existing example of the shared
+    provider shape — written <em>before</em> the function itself was built (originally under a different,
+    singular name — see below). That's the ADR discipline this
     project has been practicing since spec 0002 (see <code>learning-records/0007</code>): settle the
     architectural question in writing first, then implement against it, not the other way around.
   </p>
 
-  <h2>The function itself</h2>
+  <h2>Version one: a single call per headline</h2>
+  <p>
+    The function that first proved OpenAI's endpoint worked took one headline's text in and returned one vector
+    out — the same shape every other provider function uses. It worked, it was tested, and a real call against
+    OpenAI confirmed the response shape (<code>data[0].embedding</code>) and a 1536-dimension result, settling
+    the number <code>milvus_client.py</code>'s own docstring had been waiting on since lesson 16.
+  </p>
+  <p>
+    That single real call also measured something worth sitting with: about <strong>2 seconds</strong> of
+    latency. Fine for one headline — but a real search can turn up tens of headlines in one fetch, and
+    <code>fetch_and_persist_headlines</code> runs under a hard 10-second budget
+    (<code>job_timeout_seconds</code>, ADR 0004). One call per headline, run serially, doesn't fit: 10 headlines
+    at ~2s each is already past the budget on its own, before EDGAR or Finnhub even run.
+  </p>
+
+  <h2>The question that undid it: does this need to be N calls at all?</h2>
+  <p>
+    OpenAI's embeddings endpoint accepts <code>input</code> as a string <em>or an array of strings</em> — a
+    detail easy to miss reading the single-call version in isolation, but obvious once the latency number made
+    a per-headline loop look infeasible. Nothing about Story-matching (ADR 0006) requires embeddings to be
+    fetched one at a time; only the <em>comparison</em> step is inherently sequential (each new headline checked
+    against each existing Story's primary). The fetch step itself can be one request for every new headline a
+    search turns up.
+  </p>
+
+  <h2>Version two: one batched request</h2>
   <p class="filename">backend/src/ticker_backend/providers.py</p>
   <pre><code>OPENAI_EMBEDDING_MODEL = "text-embedding-3-small"
 
 
-async def get_embedding(text: str, client: httpx.AsyncClient) -> list[float]:
+async def get_embeddings(texts: list[str], client: httpx.AsyncClient) -> list[list[float]]:
+    if not texts:
+        return []
+
     try:
         response = await client.post(
             "https://api.openai.com/v1/embeddings",
             headers={"Authorization": f"Bearer {settings.openai_api_key}"},
-            json={"model": OPENAI_EMBEDDING_MODEL, "input": text},
+            json={"model": OPENAI_EMBEDDING_MODEL, "input": texts},
         )
         response.raise_for_status()
         body = response.json()
@@ -57,17 +86,17 @@ async def get_embedding(text: str, client: httpx.AsyncClient) -> list[float]:
         raise ProviderFetchError(f"OpenAI embedding fetch failed: {exc}") from exc
 
     try:
-        return body["data"][0]["embedding"]
+        by_index = {item["index"]: item["embedding"] for item in body["data"]}
+        return [by_index[i] for i in range(len(texts))]
     except (KeyError, IndexError) as exc:
         raise ProviderFetchError(f"OpenAI embedding response missing data: {exc}") from exc</code></pre>
   <p>
-    Compare this against <code>fetch_finnhub_news</code> and the shape is identical on purpose: an
-    <code>httpx.AsyncClient</code> passed in (never created here — the caller owns connection lifetime, same
-    reasoning as every other provider function), a typed <code>ProviderFetchError</code> on any failure, no
-    provider-specific SDK object anywhere. The only real difference from Finnhub's call is the second
-    <code>try</code>/<code>except</code> — OpenAI's success response is nested one level deeper
-    (<code>data[0].embedding</code>) than Finnhub's flat array, so there are two distinct ways this call can fail:
-    the HTTP request itself, or a 200 response whose body doesn't have the shape expected.
+    Same provider shape as before — <code>httpx.AsyncClient</code> passed in, typed <code>ProviderFetchError</code>
+    on failure, no SDK — plus two real additions. First, an empty-input guard: lesson 19 will call this once per
+    fetch job run with however many <em>new</em> headlines that run found, which is often zero, and zero
+    headlines shouldn't mean a wasted network call. Second, each vector is placed into the result by its own
+    <code>index</code> field rather than trusted to come back in request order — cheap insurance against a
+    batch API that doesn't document a strict ordering guarantee.
   </p>
 
   <h2>Two decisions ADR 0007 left open</h2>
@@ -87,7 +116,7 @@ async def get_embedding(text: str, client: httpx.AsyncClient) -> list[float]:
     <li>
       <strong>What text to embed.</strong> ADR 0007 said "title + summary, when present" but never specified the
       join. Pulled into its own small, pure function so the decision is independently testable, not buried
-      inside <code>get_embedding</code> itself:
+      inside <code>get_embeddings</code> itself:
       <pre><code>def embedding_input_text(title: str, summary: str | None) -> str:
     if summary is None:
         return title
@@ -98,52 +127,60 @@ async def get_embedding(text: str, client: httpx.AsyncClient) -> list[float]:
     </li>
   </ul>
 
-  <h2>Live verification: what actually happened</h2>
+  <h2>Live verification: does batching actually help?</h2>
   <p>
-    Same discipline lessons 7 and 8 established for EDGAR/Finnhub — mocked tests prove the code handles known
-    shapes correctly, but only a real call proves the <em>assumed</em> shape is the <em>actual</em> shape. One
-    real request, using a real headline's title and summary:
+    The whole point of version two was a hypothesis — one batched request should cost roughly the same as one
+    isolated call, regardless of how many headlines are in it, because the dominant cost is the network
+    round-trip, not per-item compute. Tested directly against 10 realistic headlines, not assumed:
   </p>
-  <pre><code>embedding length (dimensions): 1536
-elapsed: 2.23s (job_timeout_seconds budget: 10s)</code></pre>
+  <pre><code>single call (1 headline):     1.83s
+batched call (10 headlines):  1.13s
+naive serial estimate (10×):  18.32s
+job_timeout_seconds budget:   10s</code></pre>
   <p>
-    Three things confirmed, none of them assumed in advance: the response really does nest the vector at
-    <code>data[0].embedding</code> exactly as coded; the model really does produce 1536 numbers, settling the
-    Milvus dimension question for lesson 19; and — closing an uncertainty ADR 0007 named explicitly ("worth
-    verifying live once real embedding latency exists to measure, not assumed fine in advance") — a single call
-    costs about 2 seconds, well inside the 10-second <code>job_timeout_seconds</code> budget the fetch job
-    already runs under.
+    The batched call didn't just avoid scaling linearly — it came back <em>faster</em> than the single-headline
+    baseline (ordinary request-to-request variance, not a real trend, but proof the batch endpoint isn't
+    penalizing larger inputs). The naive serial estimate for the same 10 headlines — <code>18.32s</code> — makes
+    the original per-headline design's real cost concrete: it would have blown the entire
+    <code>job_timeout_seconds</code> budget on embeddings alone, before EDGAR or Finnhub even ran. This closes
+    the uncertainty ADR 0007 flagged explicitly ("worth verifying live once real embedding latency exists to
+    measure, not assumed fine in advance") — see its own revised Consequences section for the full write-up.
   </p>
-  <div class="callout">
-    <p>
-      That last number comes with a caveat worth carrying into lesson 19: 2.23s was measured for <em>one</em>
-      isolated call. Once this runs inside the real fetch job — potentially once per new headline, alongside
-      EDGAR and Finnhub in the same <code>asyncio.gather</code> — the real question becomes total time across
-      however many headlines a single search turns up, not the cost of one call in isolation.
-    </p>
-  </div>
 
   <h2>Check your understanding</h2>
 
   <div class="check">
-    <p class="q">Q1. <code>get_embedding</code> has two separate <code>try</code>/<code>except</code> blocks,
+    <p class="q">Q1. <code>get_embeddings</code> has two separate <code>try</code>/<code>except</code> blocks,
     not one. What distinct failure does each one guard against?</p>
     <details>
       <summary>Reveal answer</summary>
       <p class="answer">The first guards the HTTP call itself -- a network error, a timeout, or a non-2xx
       status (a bad API key, a rate limit, a server error). The second guards a *successful* 200 response whose
-      JSON body doesn't have the expected data[0].embedding shape -- a different failure mode entirely, worth
-      its own typed error and its own message, rather than letting a raw KeyError leak out uncaught.</p>
+      JSON body doesn't have the expected data[i].embedding shape for every item -- a different failure mode
+      entirely, worth its own typed error and its own message, rather than letting a raw KeyError leak out
+      uncaught.</p>
     </details>
   </div>
 
   <div class="check">
-    <p class="q">Q2. Why does <code>embedding_input_text</code> exist as its own top-level function instead of
-    being three lines inline inside <code>get_embedding</code>?</p>
+    <p class="q">Q2. Why does <code>get_embeddings</code> place each vector by its <code>index</code> field
+    instead of just returning <code>[item["embedding"] for item in body["data"]]</code> in array order?</p>
+    <details>
+      <summary>Reveal answer</summary>
+      <p class="answer">Array order would only be correct if OpenAI's batch response is guaranteed to preserve
+      request order -- a real assumption, not verified. Each response item already carries its own index field
+      naming which input position it corresponds to, so placing by index costs almost nothing and removes the
+      assumption entirely: correct even if a future response ever came back reordered.</p>
+    </details>
+  </div>
+
+  <div class="check">
+    <p class="q">Q3. Why does <code>embedding_input_text</code> exist as its own top-level function instead of
+    being three lines inline inside <code>get_embeddings</code>?</p>
     <details>
       <summary>Reveal answer</summary>
       <p class="answer">It's the one piece of this lesson with genuine decision logic -- how to join title and
-      summary -- as opposed to get_embedding's mechanical HTTP-call-in, vector-out shape. Pulling it out means
+      summary -- as opposed to get_embeddings' mechanical HTTP-call-in, vectors-out shape. Pulling it out means
       it can be tested directly (two tests, no-summary and with-summary) without needing a mocked HTTP call at
       all, the same reasoning search.py's split_today_recent already established for keeping pure decision logic
       separate from the I/O around it.</p>
@@ -159,8 +196,9 @@ elapsed: 2.23s (job_timeout_seconds budget: 10s)</code></pre>
     </p>
   </div>
 
-  <p class="ask">Anything unclear about why two try/except blocks were needed, or how the 1536-dimension result
-  connects to lesson 19's Milvus collection schema? Ask your teacher (this agent).</p>
+  <p class="ask">Anything unclear about why batching resolves the latency problem without changing ADR 0006's
+  matching algorithm, or how the 1536-dimension result connects to lesson 19's Milvus collection schema? Ask
+  your teacher (this agent).</p>
 
   <div class="nav">
     <a href="0017-stories-table-and-migration.html">← Lesson 17: The stories table + migration</a>

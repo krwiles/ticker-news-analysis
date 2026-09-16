@@ -31,3 +31,20 @@ Decision: OpenAI's embeddings API.
 - `OPENAI_API_KEY` joins `FINNHUB_API_KEY` as a required secret for the app to fully function.
 - The CPU-bound-work-off-the-event-loop pattern (`run_in_executor`) stays unbuilt by this decision — a
   deliberate deferral, not a closed door, if a future feature needs it for a genuinely CPU-bound task.
+
+## Revised after lesson 18's live verification: batched, not one call per headline
+
+The latency flag above was real: one isolated call measured ~2s live. A single search can turn up tens of
+headlines, and a naive one-call-per-headline loop was confirmed live to project to ~18s for just 10 headlines —
+well past `job_timeout_seconds`'s 10s budget on its own, before EDGAR/Finnhub even run.
+
+Resolved by batching: OpenAI's embeddings endpoint accepts `input` as an array natively, so
+`get_embeddings(texts: list[str], client)` sends every new headline's text in one request instead of one
+request per headline. Live-verified: 10 headlines in one batched call took 1.13s — flat, not linear, against
+batch size. Each returned vector is placed by its own `index` field, not assumed array order, in case OpenAI's
+batch responses ever return out of order.
+
+This doesn't change the decision above (OpenAI's API is still the chosen technology) or ADR 0006's matching
+algorithm (a new headline is still compared against each existing same-day Story's primary, one at a time) —
+it only changes how the *vectors get fetched*: once per fetch job run, for every genuinely new headline that
+run found, not once per headline sequentially.

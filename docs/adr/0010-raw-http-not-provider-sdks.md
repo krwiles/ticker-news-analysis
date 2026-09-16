@@ -19,7 +19,8 @@ Decision: keep using raw `httpx` for every provider, including ones with an offi
 
 - Every provider function shares one shape (`client: httpx.AsyncClient` in, `ProviderFetchError` on failure, a
   normalized dict out) — true of `get_company`, `fetch_edgar_filings`, `fetch_finnhub_news`, and now
-  `get_embedding`, specifically because none of them special-case a provider's own SDK conventions.
+  `get_embeddings` (batched, per lesson 18's live latency finding — see ADR 0007's revised Consequences),
+  specifically because none of them special-case a provider's own SDK conventions.
 - `respx` (this project's test-mocking library) mocks at the `httpx` transport layer — one mocking strategy
   covers every provider test in `test_providers.py`. An SDK-based provider would need its own, different mocking
   approach, since most SDKs don't route through `httpx` internally.

@@ -199,26 +199,39 @@ def embedding_input_text(title: str, summary: str | None) -> str:
     return f"{title}\n\n{summary}"
 
 
-async def get_embedding(text: str, client: httpx.AsyncClient) -> list[float]:
-    """A single headline's embedding vector, for Story-matching (spec 0002,
-    ADR 0006/0007) -- not wired into fetch_and_persist_headlines or Milvus
-    yet, lesson 19 does that. Same provider-function shape as get_company/
-    fetch_finnhub_news, per ADR 0010: raw httpx, no `openai` SDK."""
-    # Call OpenAI's embeddings endpoint for this one piece of text.
+async def get_embeddings(texts: list[str], client: httpx.AsyncClient) -> list[list[float]]:
+    """Every new headline's embedding vector in one request, for
+    Story-matching (spec 0002, ADR 0006/0007) -- not wired into
+    fetch_and_persist_headlines or Milvus yet, lesson 19 does that. Same
+    provider-function shape as get_company/fetch_finnhub_news, per ADR
+    0010: raw httpx, no `openai` SDK.
+
+    Batched, not one call per headline: OpenAI's endpoint accepts `input`
+    as an array natively, and a live-measured ~2s per isolated call (lesson
+    18) makes a per-headline loop infeasible for a real fetch with tens of
+    headlines. Order is placed via each item's own `index` field, not
+    assumed from array position.
+    """
+    # Nothing to embed -- skip the network call entirely rather than send an empty batch.
+    if not texts:
+        return []
+
+    # One request for the whole batch.
     try:
         response = await client.post(
             "https://api.openai.com/v1/embeddings",
             headers={"Authorization": f"Bearer {settings.openai_api_key}"},
-            json={"model": OPENAI_EMBEDDING_MODEL, "input": text},
+            json={"model": OPENAI_EMBEDDING_MODEL, "input": texts},
         )
         response.raise_for_status()
         body = response.json()
     except (httpx.HTTPError, ValueError) as exc:
         raise ProviderFetchError(f"OpenAI embedding fetch failed: {exc}") from exc
 
-    # Pull the vector out of the response's one-item data array.
+    # Place each vector by its own index, not by trusting response order.
     try:
-        return body["data"][0]["embedding"]
+        by_index = {item["index"]: item["embedding"] for item in body["data"]}
+        return [by_index[i] for i in range(len(texts))]
     except (KeyError, IndexError) as exc:
         raise ProviderFetchError(f"OpenAI embedding response missing data: {exc}") from exc
 
