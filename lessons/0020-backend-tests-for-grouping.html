@@ -1,0 +1,192 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 20 — Backend Tests for Grouping</title>
+<link rel="stylesheet" href="../assets/lesson.css">
+</head>
+<body>
+<div class="lesson">
+
+  <p class="eyebrow">Lesson 20 of 20 · ticker-news-analysis stack (infra arc — Arc 4)</p>
+  <h1>Backend tests for grouping</h1>
+  <p class="subtitle">A fake that computes real cosine similarity, a failure path that had to be built before
+  it could be tested, and one more DI gap lesson 19 left behind.</p>
+
+  <div class="callout">
+    <p>
+      Mirrors lesson 10's shape: pure logic, mocked integration tests, explicit failure paths, and a final
+      step that deliberately breaks something real to prove the tests actually catch it.
+    </p>
+  </div>
+
+  <h2>Step zero: the refactor comes before the tests, not with them</h2>
+  <p>
+    Lesson 19's Milvus calls reached a global <code>get_milvus_client()</code> internally — the one place in
+    this grouping code that wasn't parameter-injected the way everything else already is. Before writing a
+    single test, that got fixed in isolation: <code>milvus=None</code> added to every function that touches
+    Milvus, defaulting to the real client. Then, before moving on, all three of lesson 19's own
+    live-verification scripts got re-run against the real stack — not just the existing `pytest` suite — to
+    confirm byte-for-byte identical behavior. Only after that came back clean did any lesson 20 code get
+    written.
+  </p>
+
+  <h2>A fake that computes real cosine similarity, not canned answers</h2>
+  <p>
+    <code>respx</code> can mock OpenAI because OpenAI is plain HTTP. Milvus talks gRPC — nothing `respx`
+    touches. The fix isn't a dumb stub that just returns a fixed response regardless of input; it's a small
+    in-memory store with a <em>real</em> similarity search:
+  </p>
+  <pre><code>def search(self, collection_name, data, filter, limit, **kwargs):
+    ticker, day = _parse_ticker_day_filter(filter)
+    query = data[0]
+    candidates = [row for row in self.rows if row["ticker"] == ticker and row["day"] == day]
+    scored = sorted(
+        ({"story_id": row["story_id"], "distance": _cosine_similarity(query, row["embedding"]), "entity": {}}
+         for row in candidates),
+        key=lambda hit: hit["distance"], reverse=True,
+    )
+    return [scored[:limit]]</code></pre>
+  <p>
+    This matters because the thing worth testing isn't "was <code>search()</code> called" — it's "did the code
+    make the <em>right matching decision</em>." A fake that just returns a fixed hit would pass every test
+    regardless of whether the real threshold logic worked at all. This one actually computes similarity, so a
+    genuinely wrong threshold comparison makes a real test fail — proven directly, not assumed (see the
+    verification section below).
+  </p>
+  <div class="callout">
+    <p>
+      Worth being honest about what this fake can't do: it's a Python dict, always perfectly consistent. It
+      can't regression-test Milvus's real <code>consistency_level="Strong"</code> behavior — that's an
+      infrastructure fact, not application logic, and no fake substitutes for it. Lesson 19's own throwaway
+      scripts stay around for that, checked manually, not folded into this suite.
+    </p>
+  </div>
+
+  <h2>The failure path had to be built before it could be tested</h2>
+  <p>
+    Writing this lesson's failure-path tests surfaced a real inconsistency lesson 19 shipped with: no
+    <code>OPENAI_API_KEY</code> configured skipped grouping gracefully, but a <em>configured</em> key that's
+    temporarily unreachable propagated and failed the whole job — even though headlines were already safely
+    persisted. Fixed before any test for it existed:
+  </p>
+  <pre><code>try:
+    milvus = milvus if milvus is not None else await _run_milvus(get_milvus_client)
+    await _run_milvus(ensure_story_primaries_collection, milvus)
+    texts = [embedding_input_text(h["title"], h["summary"]) for h in news_headlines]
+    embeddings = await get_embeddings(texts, client)
+    async with session_factory() as session:
+        for headline, vector in zip(news_headlines, embeddings):
+            ...
+        await session.commit()
+except (ProviderFetchError, MilvusException) as exc:
+    log.warning("providers.grouping_failed", ticker=ticker, error=str(exc))
+    return "error"</code></pre>
+  <p>
+    Both cases now degrade gracefully — headlines always persist — but stay distinguishable through a new
+    <code>grouping</code> field (<code>"ok"</code> / <code>"skipped"</code> / <code>"error"</code>) that flows
+    from <code>_assign_stories</code> through the job result into <code>/api/search</code>'s own JSON response.
+    Verified live before being written up as a mocked test: a real invalid API key against OpenAI's real
+    endpoint produced a real 401, caught cleanly, logged, returned <code>"error"</code>, headline still
+    persisted — the exact behavior the test below asserts, proven against reality first.
+  </p>
+  <p>
+    One deliberate design choice worth naming: filings commit in their <em>own</em> transaction, separate from
+    news-matching. A Milvus outage midway through matching rolls back that attempt's news assignments — but
+    never touches filings, which don't depend on Milvus at all. Discarding already-successful, independent work
+    just because something unrelated failed later would be a worse outcome than the failure itself.
+  </p>
+
+  <h2>A gap found only once the tests demanded it</h2>
+  <p>
+    The permanence test needed to call the real <code>fetch_and_persist_headlines</code> orchestrator (not
+    <code>_assign_stories</code> directly — that's the whole point, proving the <em>caller's</em> new-vs-known
+    logic, not just the grouping function in isolation) with a fake Milvus injected. That function didn't have
+    anywhere to inject one at all — only <code>_assign_stories</code>, one level down, did. Same fix as step
+    zero, one level higher: <code>milvus=None</code> added to <code>fetch_and_persist_headlines</code> too,
+    threaded straight through. A small, mechanical gap — but one the plan hadn't anticipated, only test-writing
+    surfaced it.
+  </p>
+  <p class="filename">backend/tests/test_grouping.py</p>
+  <pre><code>embeddings_route = respx.post("https://api.openai.com/v1/embeddings").mock(...)
+first = await fetch_and_persist_headlines("GOOG", session_factory=test_session_factory, milvus=fake)
+second = await fetch_and_persist_headlines("GOOG", session_factory=test_session_factory, milvus=fake)
+
+assert embeddings_route.call_count == 1  # the second run must never re-embed an already-known headline</code></pre>
+  <p>
+    Checking the mock's own call count, not just that the outcome looks unchanged, is the stronger assertion —
+    it proves the already-known headline was never even <em>handed</em> to grouping a second time, not just
+    that grouping happened to produce the same answer twice.
+  </p>
+
+  <h2>Verification: break something real, watch the right tests fail</h2>
+  <p>
+    Same discipline lesson 10 established. The threshold comparison got commented out (<code>if False and
+    hits and ...</code>) and the suite re-run: exactly the two match-dependent tests failed — the same-event
+    grouping test and the late-match test — every non-matching test (different ticker, different day,
+    genuinely different content) stayed green, because they were never relying on a match succeeding in the
+    first place. Reverted; 33/33 clean again.
+  </p>
+
+  <h2>Check your understanding</h2>
+
+  <div class="check">
+    <p class="q">Q1. Why does the fake Milvus client compute real cosine similarity instead of just returning a
+    fixed, pre-decided hit?</p>
+    <details>
+      <summary>Reveal answer</summary>
+      <p class="answer">A fixed response would only prove the code called search() -- it wouldn't prove the
+      matching *decision* (compare the score against the threshold, match or found a new Story) is actually
+      correct. A fake that computes a real score makes a genuinely broken threshold comparison fail a real
+      test, which is exactly what the verification step at the end demonstrated directly, not just assumed.</p>
+    </details>
+  </div>
+
+  <div class="check">
+    <p class="q">Q2. Why do filings commit in their own transaction, separate from news-matching, rather than
+    all being part of one shared session?</p>
+    <details>
+      <summary>Reveal answer</summary>
+      <p class="answer">Filings never depend on OpenAI or Milvus at all -- they always succeed. If they shared
+      one transaction with news-matching and a Milvus failure happened partway through the news loop, the
+      whole transaction (including the filing work that had nothing to do with the failure) would roll back
+      too. Committing them separately means a later, unrelated failure can never discard already-successful,
+      independent work.</p>
+    </details>
+  </div>
+
+  <div class="check">
+    <p class="q">Q3. The permanence test asserts <code>embeddings_route.call_count == 1</code> after two runs.
+    Why is that a stronger check than just asserting the two runs produced the same <code>story_id</code>?</p>
+    <details>
+      <summary>Reveal answer</summary>
+      <p class="answer">Asserting the same story_id only proves the *outcome* looks unchanged -- it wouldn't
+      catch a bug where the code re-embeds and re-matches the headline on the second run but happens to land on
+      the same answer both times, by chance or because there's nothing else for it to match against. Asserting
+      the call count proves the already-known headline was never even handed to grouping a second time, which
+      is the actual permanence guarantee spec 0002 describes.</p>
+    </details>
+  </div>
+
+  <div class="source">
+    <p class="label">Primary sources</p>
+    <p>
+      <a href="../docs/adr/0012-grouping-dependency-injection-and-failure-signaling.md">ADR 0012 — grouping DI and failure signaling</a> ·
+      <a href="../docs/adr/0011-milvus-story-collection-design.md">ADR 0011 — the story_primaries collection design</a> ·
+      <a href="../docs/plans/0010-testing-search-feature.md">Lesson 10's plan — the precedent this lesson mirrors</a>
+    </p>
+  </div>
+
+  <p class="ask">Anything unclear about why the fake can prove the late-match case but not the real
+  consistency_level behavior, or why fetch_and_persist_headlines needed its own milvus parameter on top of
+  _assign_stories'? Ask your teacher (this agent).</p>
+
+  <div class="nav">
+    <a href="0019-the-actual-grouping-logic.html">← Lesson 19: The actual grouping logic</a>
+    <span>Next → Lesson 21: /api/search reshaped for N days (not yet written)</span>
+  </div>
+
+</div>
+</body>
+</html>
