@@ -40,10 +40,20 @@ The single record for one piece of tracked news content about a Ticker: its titl
 Outlet — often absent), its raw content (the full article/filing body — distinct from `summary`, fetched later
 by following the URL, not populated in the first pass of this feature), a `category` (`news` or `filing`), when
 it was published, and — eventually — a computed `sentiment` (`positive`/`neutral`/`negative`, plus a one-word
-gloss and a one-sentence summary).
+gloss and a one-sentence rationale — see spec 0005).
 _Avoid_: Source, Article (an example of the `news` category, not a synonym for the whole concept)
 _Category values_: `news`, `filing` — _Avoid (field name)_: kind, type
 _Sentiment values_: `positive`, `neutral`, `negative` — _Avoid_: "sentiment category" (collides with `category` above)
+_Gloss_: a single, more specific word for *what kind* of positive/neutral/negative a Headline's sentiment is —
+e.g. "bullish" or "reassuring" for `positive`, "alarming" or "concerning" for `negative`, "routine" or
+"procedural" for `neutral`. The enum says the direction; the gloss says the flavor. _Avoid_: treating the
+gloss as just a restatement of the enum value (e.g. gloss = "positive") — it should always be more specific
+than that.
+_Rationale_: the one-sentence explanation of *why* a Headline's sentiment was classified as it was. Distinct
+from `summary` despite both being short prose — `summary` is a provider-sourced blurb about the headline
+itself; rationale is an LLM-generated explanation of the sentiment judgment. _Avoid_: "summary" as a name for
+this field — the collision with the existing provider-sourced `summary` is exactly what this note exists to
+prevent.
 _Summary vs. raw content_: `summary` is a short blurb, always cheap/free from the Provider; raw content is the
 full body, fetched separately and not yet built — don't conflate the two under one field.
 
@@ -61,7 +71,9 @@ Headline belongs to exactly one Story, even one with no near-duplicates (a "stor
 Headline — its earliest-published member, fixed permanently once set — is what's shown as the Story's face in
 the UI and what later same-day candidates are compared against; other members appear only via an expandable
 list. Filing-category Headlines never participate in grouping — always a Story of one, by construction.
-Grouping never spans two calendar days or two tickers.
+Grouping never spans two calendar days or two tickers. A Story with more than one member also carries an
+aggregate sentiment — the average of its members' own sentiment scores, never independently computed — see
+spec 0005.
 _Avoid_: "Group" as the noun — the `Today` entry above already uses "grouped" as a plain verb for the
 unrelated day-bucketing concept; reusing "Group" here risks exactly the collision that entry's own _Avoid_ is
 meant to prevent elsewhere.
