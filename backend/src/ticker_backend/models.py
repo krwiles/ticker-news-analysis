@@ -11,7 +11,7 @@ import uuid
 from datetime import datetime
 from typing import Literal
 
-from sqlalchemy import DateTime, Text, func, text
+from sqlalchemy import DateTime, Float, Integer, Text, func, text
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -41,10 +41,16 @@ class Company(Base):
 class Headline(Base):
     """One piece of tracked news content about a Ticker — see CONTEXT.md.
 
-    `sentiment` deliberately not here yet -- pushed to a later spec.
-
     `story_id` is nullable for now -- ADR 0009's eventual NOT NULL design,
     tightened once real matching logic populates it on every insert path.
+
+    Sentiment columns (spec 0005 / ADR 0014) are all nullable, no backfill --
+    `NULL` means "not yet attempted", same staged-rollout pattern
+    `outlet`/`summary`/`story_id` already used. No stored enum column: the
+    `positive`/`neutral`/`negative` value is derived from `sentiment_score`
+    at read time, never stored (ADR 0009's own derive-don't-store
+    precedent). `sentiment_status` (`ok`/`skipped`/`error`) is distinct
+    from a bare `NULL` -- see ADR 0014 for why that distinction matters.
     """
 
     __tablename__ = "headlines"
@@ -65,6 +71,10 @@ class Headline(Base):
         DateTime(timezone=True), server_default=func.now()
     )
     story_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), default=None)
+    sentiment_score: Mapped[int | None] = mapped_column(Integer, default=None)
+    sentiment_gloss: Mapped[str | None] = mapped_column(Text, default=None)
+    sentiment_rationale: Mapped[str | None] = mapped_column(Text, default=None)
+    sentiment_status: Mapped[Literal["ok", "skipped", "error"] | None] = mapped_column(Text, default=None)
 
     def __repr__(self) -> str:
         return f"Headline(ticker={self.ticker!r}, category={self.category!r}, title={self.title!r})"
@@ -73,7 +83,15 @@ class Headline(Base):
 class Story(Base):
     """The event Headlines can share on a given day — see CONTEXT.md.
     No stored primary reference: it's always the earliest-published
-    member, found via `ORDER BY published_at ASC LIMIT 1` — see ADR 0009."""
+    member, found via `ORDER BY published_at ASC LIMIT 1` — see ADR 0009.
+
+    `sentiment_average`/`sentiment_score_count` (spec 0005 / ADR 0014) are
+    an incrementally-updated running average, not a live `AVG(...)` query --
+    a deliberate exception to this class's own no-redundant-state precedent,
+    chosen because it's the option requiring the least new code. Only
+    members that reach `sentiment_status = 'ok'` ever count -- `skipped`/
+    `error` members are excluded entirely, never treated as zero.
+    """
 
     __tablename__ = "stories"
 
@@ -81,6 +99,8 @@ class Story(Base):
         UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")
     )
     ticker: Mapped[str] = mapped_column(Text)
+    sentiment_average: Mapped[float | None] = mapped_column(Float, default=None)
+    sentiment_score_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
 
     def __repr__(self) -> str:
         return f"Story(ticker={self.ticker!r})"

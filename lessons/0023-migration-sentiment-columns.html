@@ -1,0 +1,165 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 23 — Migration: Sentiment Columns</title>
+<link rel="stylesheet" href="../assets/lesson.css">
+</head>
+<body>
+<div class="lesson">
+
+  <p class="eyebrow">Lesson 23 of 23 · ticker-news-analysis stack (sentiment arc — Arc 5)</p>
+  <h1>Migration: sentiment columns</h1>
+  <p class="subtitle">Schema before logic, same shape as lessons 6 and 17 — and the same "derive, don't store" principle from lesson 17, reapplied to a brand new feature before any code needed correcting it this time.</p>
+
+  <div class="callout">
+    <p>
+      No sentiment-computing logic yet — that's lesson 26. This lesson is purely six new nullable columns:
+      four on <code>headlines</code>, two on <code>stories</code>. Everything here comes from a real grilling
+      round on spec 0005 (<code>docs/specs/0005-headline-sentiment-analysis.md</code>) and its technical
+      approach (<code>docs/adr/0014-sentiment-analysis-technical-approach.md</code>) — this lesson is where
+      those decisions actually became a schema.
+    </p>
+  </div>
+
+  <h2>The question lesson 17 already answered, asked again on purpose</h2>
+  <p>
+    Spec 0005 fixes three sentiment values — <code>positive</code>, <code>neutral</code>, <code>negative</code>
+    — plus a 0-100 numeric score the model actually produces. The enum is <em>derived</em> from the score by a
+    fixed rule, never asked of the model independently. So: does the enum get its own column too?
+  </p>
+  <p>
+    This is the exact same question lesson 17 already worked through for <code>stories.primary_headline_id</code>
+    — <em>is this fact actually new information, or is it fully determined by data already stored elsewhere?</em>
+    The enum is a pure function of <code>sentiment_score</code>. Storing it as a second column recreates
+    precisely the "two facts that must stay in sync" problem lesson 17 removed on purpose (see ADR 0009).
+  </p>
+  <p>
+    <strong>Decision: no stored enum, on either table.</strong> Only <code>sentiment_score</code> (an integer,
+    0-100) gets a column. Whatever later code turns a score into <code>"positive"</code>/<code>"neutral"</code>/
+    <code>"negative"</code> for display does it by reading the number, every time — never by reading a second,
+    separately-written column that could quietly drift out of sync with the first.
+  </p>
+
+  <h2>Why a bare <code>NULL</code> isn't enough: the case for <code>sentiment_status</code></h2>
+  <p>
+    Every new <code>headlines</code> column is nullable, same staged-rollout pattern <code>outlet</code>/
+    <code>summary</code>/<code>story_id</code> already used. But sentiment runs as its own background job,
+    decoupled from the search that persisted the headline in the first place — and that raises a real question
+    a synchronous feature never had to answer: once a poll finds <code>sentiment_score IS NULL</code>, what does
+    that actually mean?
+  </p>
+  <p>
+    It's ambiguous three different ways: still being computed (keep polling, it's coming); skipped, because the
+    OpenAI dependency wasn't configured when this run happened (won't come <em>this</em> run, but isn't
+    permanently dead either); or errored, a real attempt that failed (same deal). A frontend that can't tell
+    these apart either polls forever for something that will never resolve this run, or gives up on an arbitrary
+    timeout instead of actually knowing what happened. <code>sentiment_status</code> — <code>ok</code>/
+    <code>skipped</code>/<code>error</code>, itself nullable — is what makes that distinction real.
+  </p>
+
+  <h2>Why <code>stories</code> doesn't get an equivalent status column</h2>
+  <p>
+    A natural instinct, once <code>headlines</code> has one: shouldn't the Story-level aggregate need the same
+    thing? It doesn't, and the reason is worth sitting with rather than just copying the pattern reflexively.
+    <code>sentiment_score_count</code> already answers the only question the aggregate actually needs answered:
+  </p>
+  <ul>
+    <li><code>count &gt; 0</code> — there's a real average, show it.</li>
+    <li><code>count == 0</code> — there isn't one yet.</li>
+  </ul>
+  <p>
+    The aggregate never needs to know <em>why</em> the count is still zero — that reason lives on each
+    individual member's own <code>sentiment_status</code>, visible on that member's own pill if you actually
+    look at it. And a page-level "is sentiment configured and working" signal (its own component, mirroring
+    <code>GroupingStatus</code>) already answers the dependency-health question once, for the whole page. A
+    Story-level copy of that same signal would just be redundant — the same "does this column encode anything
+    new?" test lesson 17 already applied, this time answered before any code shipped, not after.
+  </p>
+
+  <h2>The other real decision hiding in <code>sentiment_score_count</code>: what actually gets counted</h2>
+  <p>
+    <code>stories.sentiment_average</code> is an incrementally-updated running average, not a live
+    <code>AVG(...)</code> query recomputed on every read — a deliberate exception to lesson 17's own
+    derive-don't-store precedent, chosen because it needs the least new code (the standard cumulative-moving-
+    average update, <code>new_average = old_average + (new_score - old_average) / new_count</code>, is O(1) per
+    new member instead of re-scanning every member on every read). That's lesson 26's problem to build, not this
+    one's — but this lesson still has to get the <em>count</em> right, because it decides what the eventual
+    average will and won't include.
+  </p>
+  <p>
+    Only a member that actually reaches <code>sentiment_status = 'ok'</code> ever increments it. A
+    <code>skipped</code> or <code>error</code>ed member is excluded entirely — never treated as a zero. Why this
+    matters: sentiment isn't fully permanent the way it first looked. Only a <em>real score</em> is permanent;
+    <code>skipped</code>/<code>error</code> stay eligible for a later retry, if some future request happens to
+    touch that same headline again. If a skipped member had been counted as a zero contribution now, a later
+    successful retry would need to "un-count" a phantom value that was never real — exactly the kind of
+    redundant, drift-prone state this project keeps choosing not to build.
+  </p>
+
+  <h2>Verified live before writing a single line of the migration</h2>
+  <p>
+    <code>ALTER TABLE ... ADD COLUMN</code> on a table with real, existing rows has a reputation for being
+    slow or lock-heavy on some databases — worth actually checking against the real dev database
+    (headlines: 2000+ rows, stories: 800+ rows) rather than assuming Postgres 17 handles it the same way:
+  </p>
+  <pre><code>BEGIN;
+ALTER TABLE headlines ADD COLUMN sentiment_score_test INTEGER;      -- 1.397 ms
+ALTER TABLE headlines ADD COLUMN sentiment_status_test TEXT;        -- 0.249 ms
+ALTER TABLE stories ADD COLUMN sentiment_score_count_test
+  INTEGER NOT NULL DEFAULT 0;                                       -- 1.649 ms
+ROLLBACK;</code></pre>
+  <p>
+    All three, including the <code>NOT NULL DEFAULT 0</code> one, completed in under 2ms. Postgres 11+
+    optimizes a constant default to a metadata-only change — no full table rewrite, no real lock concern at
+    this project's scale. Run inside a transaction and rolled back, so nothing was actually persisted by the
+    check itself; the real migration ran separately, for real, afterward.
+  </p>
+
+  <h2>Check your understanding</h2>
+
+  <div class="check">
+    <p class="q">Q1. Why doesn't <code>sentiment</code> (the positive/neutral/negative enum) get its own column?</p>
+    <details>
+      <summary>Reveal answer</summary>
+      <p class="answer">It's fully determined by <code>sentiment_score</code> via a fixed threshold rule --
+      storing it separately would create two facts that have to agree with each other, with nothing enforcing
+      that they do. Same principle as lesson 17's stories.primary_headline_id: if a fact is fully derivable
+      from data already stored, storing it again is redundant state, not a safety net.</p>
+    </details>
+  </div>
+
+  <div class="check">
+    <p class="q">Q2. A Headline's <code>sentiment_status</code> is <code>'error'</code>. Is that permanent?</p>
+    <details>
+      <summary>Reveal answer</summary>
+      <p class="answer">No -- only a real score (sentiment_status eventually becoming 'ok') is permanent.
+      'error' and 'skipped' both stay eligible for a later retry, if some future request happens to include
+      that same headline again. That's exactly why a Story's sentiment_score_count only increments on 'ok' --
+      an 'error'ed member might still succeed later, and shouldn't have been counted as a zero in the
+      meantime.</p>
+    </details>
+  </div>
+
+  <div class="source">
+    <p class="label">Primary sources</p>
+    <p>
+      <a href="../docs/specs/0005-headline-sentiment-analysis.md">Spec 0005 — Headline Sentiment Analysis</a> ·
+      <a href="../docs/adr/0014-sentiment-analysis-technical-approach.md">ADR 0014 — sentiment technical approach</a> ·
+      <a href="../docs/adr/0009-stories-table-not-bare-column.md">ADR 0009 — derive, don't store</a> ·
+      <a href="https://www.postgresql.org/docs/current/sql-altertable.html">PostgreSQL docs — ALTER TABLE</a>
+    </p>
+  </div>
+
+  <p class="ask">Anything unclear about why sentiment_status needs three real states plus NULL, or how the
+  running average in lesson 26 will actually use sentiment_score_count? Ask your teacher (this agent).</p>
+
+  <div class="nav">
+    <a href="0022-frontend-per-day-lists-and-story-component.html">← Lesson 22: frontend per-day lists + the Story component</a>
+    <span>Next → Lesson 24: OpenAI sentiment classification call (coming next)</span>
+  </div>
+
+</div>
+</body>
+</html>

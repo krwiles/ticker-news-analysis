@@ -319,6 +319,23 @@ endpoint, endpoint before UI.
     gloss, rationale, status) and a running average + member count on `stories` (ADR 0014's incremental
     aggregate, and exactly what ADR 0009 speculated `stories` might eventually need). Schema-only, no app
     logic wired yet — mirrors lesson 6/17's shape.
+    ✅ built (plan: `docs/plans/0023-*.md`) — two decisions confirmed with the user before writing the
+    migration, both already recorded in the plan rather than re-litigated here: no stored `sentiment` enum on
+    either table (derived from `sentiment_score` at read time, same "derive, don't store" principle lesson
+    17 already established for `stories.primary_headline_id`), and `stories` deliberately does *not* get its
+    own status column — `sentiment_score_count == 0` already says everything the aggregate needs to know,
+    without needing to know *why*. Final shape: `headlines` gains `sentiment_score`/`sentiment_gloss`/
+    `sentiment_rationale`/`sentiment_status` (all nullable, plain `TEXT`, no `CHECK` constraints — matches
+    `category`'s own precedent); `stories` gains `sentiment_average` (nullable float) and
+    `sentiment_score_count` (`INTEGER NOT NULL DEFAULT 0`, incrementing only on a real `'ok'` score —
+    `skipped`/`error` members are excluded entirely, never treated as a zero, since only a real score is
+    actually permanent). Verified live, inside a rolled-back transaction against the real dev database
+    (~2000+ headlines, ~800+ stories), that all three `ALTER TABLE` statements — including the `NOT NULL
+    DEFAULT 0` one — complete in under 2ms; Postgres's constant-default fast path applies, no table rewrite.
+    Migration applied cleanly to both databases (7ms/12ms). 46/46 backend tests unchanged, 59/59 frontend
+    unaffected. Live sanity check hit the same real `headlines_ticker_fkey` constraint lesson 21 already found
+    for `story_id` — a fresh `Headline` needs a real `Company` row first — same discipline, not a new kind of
+    surprise.
 24. **OpenAI sentiment classification call** — a new provider-style call (mirrors lesson 18's embeddings
     integration): given a headline's title + `summary`, get back a score/gloss/rationale via a raw HTTP chat
     completion call (ADR 0010's raw-httpx discipline, not an SDK); enum derived from the score by one
