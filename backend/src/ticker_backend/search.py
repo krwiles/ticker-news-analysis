@@ -68,25 +68,59 @@ def _headline_to_dict(headline: Headline) -> dict:
     }
 
 
-def split_today_recent(headlines: list[Headline], now: datetime) -> tuple[list[dict], list[dict]]:
-    """Pure function — `now` is a parameter, not `datetime.now()` called
-    internally, so lesson 10 can test the Eastern-midnight/DST boundary
-    against a fixed fake time instead of waiting for real midnight."""
-    # Anchor "today" to the US market's calendar day, not UTC.
+def _group_into_stories(headlines: list[Headline]) -> list[dict]:
+    """Groups same-`story_id` headlines into one Story dict (primary +
+    other_members). A `story_id=None` headline (grouping skipped/errored,
+    ADR 0012) becomes its own singleton Story rather than merging with other
+    null-story headlines or disappearing."""
+    # Bucket by story_id, falling back to the headline's own id when there's no Story yet.
+    groups: dict[object, list[Headline]] = {}
+    for headline in headlines:
+        key = headline.story_id if headline.story_id is not None else headline.id
+        groups.setdefault(key, []).append(headline)
+
+    # Within each group, earliest-published is the primary (ADR 0009); the rest are other_members, newest-first.
+    stories = []
+    for members in groups.values():
+        members_oldest_first = sorted(members, key=lambda h: h.published_at)
+        primary, *rest = members_oldest_first
+        stories.append(
+            {
+                "story_id": str(primary.story_id) if primary.story_id is not None else None,
+                "primary": _headline_to_dict(primary),
+                "other_members": [_headline_to_dict(h) for h in reversed(rest)],
+            }
+        )
+    return stories
+
+
+def build_daily_view(headlines: list[Headline], now: datetime) -> list[dict]:
+    """One entry per calendar day (Eastern), each holding that day's Stories
+    (ADR 0013). Pure function — `now` is a parameter, not `datetime.now()`
+    called internally, so DST/boundary behavior stays testable without
+    waiting for real midnight.
+
+    Today is always included, even with zero Stories; earlier days appear
+    only when they have at least one (ADR 0013) -- no padding out to a
+    fixed 7-day scaffold."""
     today_date = now.astimezone(EASTERN).date()
-    # Two buckets to fill below.
-    today: list[dict] = []
-    recent: list[dict] = []
-    # Walk every headline newest-first, so each bucket ends up sorted too.
-    for headline in sorted(headlines, key=lambda h: h.published_at, reverse=True):
-        # Convert to the response shape before bucketing.
-        entry = _headline_to_dict(headline)
-        # Same-day headlines go in Today, everything else in Recent.
-        if headline.published_at.astimezone(EASTERN).date() == today_date:
-            today.append(entry)
-        else:
-            recent.append(entry)
-    return today, recent
+
+    # Bucket raw headlines by their own Eastern day first -- a Story's members
+    # already share one day by construction (ADR 0006), so grouping within
+    # each day bucket below can't accidentally split or merge across days.
+    by_day: dict = {}
+    for headline in headlines:
+        day = headline.published_at.astimezone(EASTERN).date()
+        by_day.setdefault(day, []).append(headline)
+    by_day.setdefault(today_date, [])
+
+    # Newest day first; each day's Stories newest-first by primary's published_at.
+    days = []
+    for day in sorted(by_day.keys(), reverse=True):
+        stories = _group_into_stories(by_day[day])
+        stories.sort(key=lambda story: story["primary"]["published_at"], reverse=True)
+        days.append({"date": day.isoformat(), "is_today": day == today_date, "stories": stories})
+    return days
 
 
 @router.get("/api/search")
@@ -129,8 +163,8 @@ async def search(
         )
         headlines = list(rows.scalars())
 
-    # Split into Today/Recent buckets for the response.
-    today, recent = split_today_recent(headlines, datetime.now(timezone.utc))
+    # One entry per calendar day, each holding that day's Stories (ADR 0013).
+    days = build_daily_view(headlines, datetime.now(timezone.utc))
 
     return {
         "ticker": ticker,
@@ -139,6 +173,5 @@ async def search(
         # Independent of `status` above -- a grouping problem is a distinct,
         # orthogonal concern from "did EDGAR/Finnhub respond" (ADR 0012).
         "grouping": grouping_status,
-        "today": today,
-        "recent": recent,
+        "days": days,
     }

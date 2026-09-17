@@ -249,9 +249,24 @@ UI — not because that order is mandatory, just because it's the shape that's w
     10 new tests, 33/33 total. Verification per lesson 10's precedent: deliberately broke the threshold check,
     confirmed exactly the two match-dependent tests failed, reverted.
 21. **`/api/search` reshaped for N days** — replaces the `today`/`recent` two-array response with something
-    that represents an arbitrary number of days, each holding Stories. The one piece spec 0002 itself flagged
-    as not yet designed (see its Open questions). Must preserve the `grouping` status field lesson 20/ADR 0012
-    adds to the response, not drop it while reshaping everything else.
+    that represents an arbitrary number of days, each holding Stories. Must preserve the `grouping` status
+    field lesson 20/ADR 0012 adds to the response, not drop it while reshaping everything else.
+    ✅ built (plan: `docs/plans/0021-*.md`, design: ADR 0013) — two decisions made during planning, both
+    accepted deliberately rather than deferred: the response shape is replaced outright, not rolled out
+    additively (breaks the current frontend until lesson 22 — accepted, not guarded against), and only Today
+    is always emitted; earlier days appear only when they actually have a Story (no rigid 7-day scaffold of
+    mostly-empty buckets). `split_today_recent` replaced by `_group_into_stories` + `build_daily_view` in
+    `search.py`, both pure functions in the same "`now` passed in explicitly" style as the function they
+    replaced — every existing DST/Eastern-boundary test ported into the new shape, not dropped. One real gap
+    caught only by planning ahead of code, not live: a `story_id=None` headline (grouping skipped/errored,
+    ADR 0012) must become its own singleton Story rather than merging with every other null-story headline —
+    a naive `groupby(story_id)` would have silently collapsed them all into one fake Story, exactly the failure
+    mode ADR 0012's graceful degradation exists to prevent. Caught a second real gap only while writing the
+    integration test: `headlines.story_id` has a live FK constraint into `stories` (not previously exercised
+    by a test using a bare `uuid4()`) — fixed by seeding real `Story` rows first, not by weakening the test.
+    38/38 tests passing (5 new). Live-verified against the real running stack (rebuilt `api`/`worker`): a real
+    `/api/search?ticker=AAPL` returned 8 day-buckets (today empty, 7 populated), several genuinely multi-member
+    Stories (one with 4 other members), zero worker/api errors.
 22. **Frontend: per-day lists + the `Story` component** — replaces `SearchPage`'s Today/Recent sections with
     one per day; a `Story` shows its primary headline per spec 0001's existing rules, plus an expandable list
     for other members when there are any. Capstone of this arc, same role lesson 14 played for arc 2.

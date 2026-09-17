@@ -1,0 +1,178 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 21 — /api/search Reshaped for N Days</title>
+<link rel="stylesheet" href="../assets/lesson.css">
+</head>
+<body>
+<div class="lesson">
+
+  <p class="eyebrow">Lesson 21 of 21 · ticker-news-analysis stack (infra arc — Arc 4)</p>
+  <h1>/api/search reshaped for N days</h1>
+  <p class="subtitle">Spec 0002's last undesigned piece: replacing a fixed Today/Recent split with a variable
+  list of days, each holding Stories instead of flat headlines.</p>
+
+  <div class="callout">
+    <p>
+      A breaking API change, made deliberately rather than rolled out gradually — the first time this arc has
+      done that. Everything else about this lesson (the reshape logic itself) is a pure-function extension of
+      the pattern <code>split_today_recent</code> already established.
+    </p>
+  </div>
+
+  <h2>Two decisions before any code — recorded in ADR 0013</h2>
+  <p>
+    Every earlier lesson in this arc shipped non-breaking: a nullable column, an unused table, an additive
+    <code>grouping</code> field. This one genuinely can't be additive without real cost — carrying both
+    <code>today</code>/<code>recent</code> <em>and</em> a new <code>days</code> field in parallel would mean
+    writing and testing two reshaping paths for a frontend that's about to be rebuilt anyway (lesson 22).
+    Decision: replace the shape now, accept that the running frontend breaks until lesson 22 catches up. This
+    is a personal project with no other users and the two lessons are built back to back — a real trade-off,
+    made deliberately, not stumbled into.
+  </p>
+  <p>
+    Second decision: how many days does "one list per day" actually mean? A rigid 7-day scaffold would pad
+    the response with empty buckets on the common case (a ticker with sparse news). Chosen instead: Today is
+    <em>always</em> present, even with zero Stories — "nothing happened today" is a real, useful signal, the
+    same one spec 0001's own empty "Today" section already showed. Every earlier day only appears if it
+    actually has at least one Story.
+  </p>
+
+  <h2>The reshape is still a pure function — just building a tree, not two flat lists</h2>
+  <p>
+    <code>/api/search</code> already pulls the full flat list of matching headlines from Postgres in one
+    query. Nothing about <em>that</em> changed. The reshape — grouping headlines into Stories, then bucketing
+    Stories into days — replaces <code>split_today_recent</code>, but keeps its exact shape: a pure function,
+    <code>now</code> passed in as a parameter rather than called internally, so every DST/Eastern-boundary
+    case from lesson 10 stays testable without waiting for real midnight.
+  </p>
+  <p class="filename">backend/src/ticker_backend/search.py</p>
+  <pre><code>def build_daily_view(headlines: list[Headline], now: datetime) -> list[dict]:
+    today_date = now.astimezone(EASTERN).date()
+
+    by_day: dict = {}
+    for headline in headlines:
+        day = headline.published_at.astimezone(EASTERN).date()
+        by_day.setdefault(day, []).append(headline)
+    by_day.setdefault(today_date, [])  # Today is always present, even empty
+
+    days = []
+    for day in sorted(by_day.keys(), reverse=True):
+        stories = _group_into_stories(by_day[day])
+        stories.sort(key=lambda story: story["primary"]["published_at"], reverse=True)
+        days.append({"date": day.isoformat(), "is_today": day == today_date, "stories": stories})
+    return days</code></pre>
+  <p>
+    One implementation choice worth naming: headlines are bucketed into days <em>first</em>, then each day's
+    bucket is grouped into Stories independently — not the other way around (group into Stories, then bucket
+    by the primary's day). Both give the same answer, since a Story's members always share one Eastern day by
+    construction (ADR 0006's day-scoping). But bucketing first doesn't have to <em>rely</em> on that invariant
+    holding — it just reflects each headline's own real day, regardless.
+  </p>
+
+  <h2>A null story_id must become its own Story, not disappear or merge</h2>
+  <p>
+    ADR 0012 made grouping degrade gracefully: if OpenAI isn't configured, or fails mid-run, headlines still
+    persist with <code>story_id = NULL</code> rather than being lost. That guarantee is worthless if the
+    <em>display</em> layer then silently drops them or, worse, merges every ungrouped headline into one giant
+    fake Story because they all share the same "key" (<code>None</code>). Both failure modes are real risks a
+    naive <code>groupby(story_id)</code> would hit:
+  </p>
+  <pre><code>def _group_into_stories(headlines: list[Headline]) -> list[dict]:
+    groups: dict[object, list[Headline]] = {}
+    for headline in headlines:
+        key = headline.story_id if headline.story_id is not None else headline.id
+        groups.setdefault(key, []).append(headline)
+    ...</code></pre>
+  <p>
+    Falling back to the headline's own <code>id</code> when <code>story_id</code> is <code>None</code> gives
+    every ungrouped headline its own unique group key — its own singleton Story — rather than colliding on the
+    shared value <code>None</code>.
+  </p>
+
+  <h2>A real FK constraint, found only once the integration test needed it</h2>
+  <p>
+    Writing a test that seeds a headline with an arbitrary <code>uuid4()</code> as its <code>story_id</code>
+    hit a real, previously-unexercised constraint:
+  </p>
+  <pre><code>sqlalchemy.exc.IntegrityError: ForeignKeyViolationError: insert or update on table "headlines"
+violates foreign key constraint "headlines_story_id_fkey"
+DETAIL: Key (story_id)=(f701d546-...) is not present in table "stories".</code></pre>
+  <p>
+    <code>headlines.story_id</code> really does reference <code>stories.id</code> — no prior test had ever
+    tried to fabricate a fake one. Fixed the same way production code always does it: create the real
+    <code>Story</code> row first, then assign its actual <code>id</code> to the headline — not by loosening
+    the test or the constraint.
+  </p>
+
+  <h2>Live verification</h2>
+  <p>
+    Rebuilt <code>api</code>/<code>worker</code> and hit the real endpoint against real, previously-fetched
+    data:
+  </p>
+  <pre><code>GET /api/search?ticker=AAPL
+→ 8 day-buckets: Today (empty, correctly still present), 7 populated earlier days
+→ several genuinely multi-member Stories, one primary with 4 other_members
+→ zero worker/api errors</code></pre>
+
+  <h2>Check your understanding</h2>
+
+  <div class="check">
+    <p class="q">Q1. Why does this lesson replace the response shape outright instead of adding <code>days</code>
+    alongside the existing <code>today</code>/<code>recent</code> fields, unlike every earlier lesson in this
+    arc?</p>
+    <details>
+      <summary>Reveal answer</summary>
+      <p class="answer">Every earlier lesson's change was cheap to make additive (a nullable column, an unused
+      table, one new field). Here, keeping both shapes alive would mean writing and testing two full reshaping
+      paths for a frontend that's being rebuilt in the very next lesson anyway -- real extra cost for a
+      transitional state nobody needs to see, on a personal project with no other users.</p>
+    </details>
+  </div>
+
+  <div class="check">
+    <p class="q">Q2. Why does <code>_group_into_stories</code> use the headline's own <code>id</code> as a
+    fallback key instead of just grouping by <code>story_id</code> directly?</p>
+    <details>
+      <summary>Reveal answer</summary>
+      <p class="answer">Every headline with story_id=None would share the exact same key (None) under a plain
+      groupby, silently merging every currently-ungrouped headline into one fake Story -- exactly the failure
+      ADR 0012's graceful degradation exists to prevent. Falling back to each headline's own unique id keeps
+      them as separate singleton Stories instead.</p>
+    </details>
+  </div>
+
+  <div class="check">
+    <p class="q">Q3. Why does <code>build_daily_view</code> bucket headlines into days before grouping them
+    into Stories, rather than grouping into Stories first and deriving each Story's day from its primary?</p>
+    <details>
+      <summary>Reveal answer</summary>
+      <p class="answer">Both orders give the same answer today, since a Story's members always share one
+      Eastern day by construction (ADR 0006's day-scoping). But bucketing by day first doesn't depend on that
+      invariant holding -- it reflects each headline's own real day directly, rather than trusting that no
+      Story could ever end up spanning two days.</p>
+    </details>
+  </div>
+
+  <div class="source">
+    <p class="label">Primary sources</p>
+    <p>
+      <a href="../docs/adr/0013-api-response-reshaped-into-daily-stories.md">ADR 0013 — the response reshape decisions</a> ·
+      <a href="../docs/specs/0002-daily-story-grouping.md">Spec 0002 — Daily Story Grouping</a> ·
+      <a href="../docs/adr/0006-story-grouping-via-embedding-similarity.md">ADR 0006 — day-scoped grouping</a>
+    </p>
+  </div>
+
+  <p class="ask">Anything unclear about why the frontend is allowed to break here, or why the FK constraint on
+  story_id wasn't caught earlier? Ask your teacher (this agent).</p>
+
+  <div class="nav">
+    <a href="0020-backend-tests-for-grouping.html">← Lesson 20: Backend tests for grouping</a>
+    <span>Next → Lesson 22: Frontend per-day lists + the Story component (not yet written)</span>
+  </div>
+
+</div>
+</body>
+</html>
