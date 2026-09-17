@@ -1,0 +1,140 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 24 — OpenAI Sentiment Classification Call</title>
+<link rel="stylesheet" href="../assets/lesson.css">
+</head>
+<body>
+<div class="lesson">
+
+  <p class="eyebrow">Lesson 24 of 24 · ticker-news-analysis stack (sentiment arc — Arc 5)</p>
+  <h1>OpenAI sentiment classification call</h1>
+  <p class="subtitle">Same shape lesson 18 used for embeddings — prove the call works in isolation, nothing wired yet — except the model itself talked back with a real problem this time, not just a shape to confirm.</p>
+
+  <div class="callout">
+    <p>
+      No filing content, no job wiring, no Story aggregate — that's lessons 25/26. This lesson is one new
+      function, <code>get_sentiment()</code>, and the two things it took to make it trustworthy: a schema
+      that guarantees the shape, and a prompt fix for a failure mode the model produced on the very first
+      real call.
+    </p>
+  </div>
+
+  <h2>Not a batch call — a real difference from embeddings, not just a smaller one</h2>
+  <p>
+    <code>get_embeddings()</code> sends many headlines in <em>one</em> request, using OpenAI's native array
+    <code>input</code> support. Chat Completions has no equivalent — every call is one conversation, one
+    response, always. So <code>get_sentiment()</code> takes a single piece of text and returns a single
+    result:
+  </p>
+  <pre><code>async def get_sentiment(text: str, client: httpx.AsyncClient) -> dict:
+    ...
+    response = await client.post(
+        "https://api.openai.com/v1/chat/completions",
+        headers={"Authorization": f"Bearer {settings.openai_api_key}"},
+        json={
+            "model": OPENAI_SENTIMENT_MODEL,
+            "messages": [...],
+            "response_format": {"type": "json_schema", "json_schema": {...}},
+        },
+    )</code></pre>
+  <p>
+    Concurrency across many headlines happens the other way — firing several <code>get_sentiment()</code>
+    calls at once with <code>asyncio.gather</code>, the same pattern already verified live elsewhere in this
+    project (20 concurrent calls, 6.64s wall-clock). That's lesson 26's job to build, not this one's — mirroring
+    this function's shape after <code>get_embeddings</code>' batching would have been the wrong move here, not
+    just an unnecessary one.
+  </p>
+
+  <h2>Structured Outputs: guarantee the shape, don't parse free text</h2>
+  <p>
+    <code>response_format: {"type": "json_schema", "json_schema": {...}, "strict": true}</code> tells the model
+    to return exactly <code>{"score": int, "gloss": str, "rationale": str}</code>, not a paragraph that
+    happens to contain those facts somewhere. Verified live against the real API before trusting it — OpenAI's
+    own docs were ambiguous about which current models support this on which endpoint, so rather than trust an
+    uncertain summary, the real thing got tested directly against <code>gpt-5-nano</code> on
+    <code>/v1/chat/completions</code>. It worked, cleanly, on the first try.
+  </p>
+
+  <h2>The first real call also proved something was wrong</h2>
+  <p>
+    Spec 0005's own Success Criteria are explicit: the one-word gloss must never just restate the enum
+    (<code>gloss = "positive"</code> fails outright). The very first live call, with a prompt that only asked
+    for a score/gloss/rationale with no further guidance, produced exactly that failure:
+  </p>
+  <pre><code>{"score": 92, "gloss": "Positive", "rationale": "Apple beat earnings estimates..."}</code></pre>
+  <p>
+    Not a hypothetical risk the spec worried about in the abstract — the very first real output. Fixed with an
+    explicit instruction in the system prompt (never restate positive/neutral/negative; give a more specific
+    word — <em>bullish</em>, <em>reassuring</em>, <em>routine</em>, <em>concerning</em>, <em>alarming</em>) and
+    reverified across three different real-ish cases before writing the real function:
+  </p>
+  <pre><code>Apple beats earnings expectations...       -> score: 97, gloss: "bullish"
+Company X reports layoffs...                -> score: 28, gloss: "concerning"
+Company Y schedules annual shareholder mtg. -> score: 50, gloss: "routine"</code></pre>
+  <p>
+    Three genuinely different situations, three genuinely different glosses — not the same three words
+    recycled, and never the bare enum.
+  </p>
+
+  <h2>A second real bug, found while trying to verify the first fix</h2>
+  <div class="callout">
+    <p>
+      A standalone script importing <code>get_sentiment</code> directly failed immediately, before ever
+      reaching OpenAI — the exact same <code>NoSuchModuleError</code> bug found and fixed in
+      <code>health.py</code> during an earlier lesson. <code>providers.py</code> had the identical root cause:
+      <code>pymilvus</code>'s own import unconditionally loads this repo's root <code>.env</code> (meant for
+      <code>dbmate</code>), which can silently corrupt <code>DATABASE_URL</code> if it happens before
+      <code>ticker_backend.config</code> is imported. Every existing test file that touches
+      <code>providers.py</code> happened to dodge this by importing <code>config</code> first anyway — never
+      by design, just coincidence of import order. Fixed the same way: reordered the import, with a comment
+      explaining why the order actually matters, so a future edit doesn't undo the fix without realizing it.
+    </p>
+  </div>
+
+  <h2>Check your understanding</h2>
+
+  <div class="check">
+    <p class="q">Q1. Why can't <code>get_sentiment</code> batch many headlines into one request the way <code>get_embeddings</code> does?</p>
+    <details>
+      <summary>Reveal answer</summary>
+      <p class="answer">The embeddings endpoint has native array-input support -- one request, many texts in,
+      many vectors out. Chat Completions doesn't work that way: every call is exactly one conversation, one
+      response. Concurrency across many headlines has to happen by firing multiple separate calls at once
+      (asyncio.gather), not by combining them into one request.</p>
+    </details>
+  </div>
+
+  <div class="check">
+    <p class="q">Q2. The very first live call returned <code>gloss: "Positive"</code>. Was that a bug in <code>get_sentiment</code>'s code?</p>
+    <details>
+      <summary>Reveal answer</summary>
+      <p class="answer">No -- the code worked exactly as written; the schema was satisfied, the call
+      succeeded. The problem was the prompt itself gave the model no reason not to just restate the enum.
+      Fixed by instructing the model explicitly never to do that, then reverifying live across several
+      different real cases -- a prompt problem, not a code problem, but a real one either way.</p>
+    </details>
+  </div>
+
+  <div class="source">
+    <p class="label">Primary sources</p>
+    <p>
+      <a href="../docs/specs/0005-headline-sentiment-analysis.md">Spec 0005 — Headline Sentiment Analysis</a> ·
+      <a href="../docs/adr/0014-sentiment-analysis-technical-approach.md">ADR 0014 — sentiment technical approach</a> ·
+      <a href="https://developers.openai.com/api/docs/guides/structured-outputs">OpenAI docs — Structured Outputs</a>
+    </p>
+  </div>
+
+  <p class="ask">Anything unclear about why Structured Outputs beats parsing free text, or want to see what a
+  malformed/refused response would actually look like? Ask your teacher (this agent).</p>
+
+  <div class="nav">
+    <a href="0023-migration-sentiment-columns.html">← Lesson 23: migration: sentiment columns</a>
+    <span>Next → Lesson 25: filing content extraction (coming next)</span>
+  </div>
+
+</div>
+</body>
+</html>

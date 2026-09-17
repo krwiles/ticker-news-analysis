@@ -7,6 +7,7 @@ call these functions directly, no worker or server needed.
 
 import asyncio
 import functools
+import json
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -14,7 +15,6 @@ from zoneinfo import ZoneInfo
 
 import httpx
 import structlog
-from pymilvus import MilvusException
 from sqlalchemy import func, literal_column, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
@@ -22,6 +22,16 @@ from ticker_backend.config import settings
 from ticker_backend.db import async_session_factory
 from ticker_backend.milvus_client import STORY_PRIMARIES_COLLECTION, ensure_story_primaries_collection, get_milvus_client
 from ticker_backend.models import Company, Headline, Story
+
+# Must come after the ticker_backend imports above, not just alphabetized
+# with the other third-party imports -- pymilvus's own import unconditionally
+# calls load_dotenv() (pymilvus/settings.py), which can inject this repo's
+# root .env (meant for docker-compose/dbmate) into os.environ and corrupt
+# DATABASE_URL for Settings() if it hasn't been constructed yet. Same
+# landmine found and fixed in health.py during spec 0003 -- verified live
+# here too: a standalone script importing this module directly broke until
+# reordered the same way.
+from pymilvus import MilvusException
 
 log = structlog.get_logger()
 
@@ -44,6 +54,30 @@ SEC_TICKERS_URL = "https://www.sec.gov/files/company_tickers.json"
 # Cheapest OpenAI embedding tier (1536 dimensions) -- see ADR 0007/lesson 18. This dimension count is what
 # lesson 19's Milvus collection schema is built against, so changing this model later is a real migration.
 OPENAI_EMBEDDING_MODEL = "text-embedding-3-small"
+
+# Cheapest chat-completion tier as of lesson 24 -- see ADR 0014. Re-verify before trusting this is
+# still cheapest; pricing already moved once during that ADR's own research.
+OPENAI_SENTIMENT_MODEL = "gpt-5-nano"
+
+# Structured Outputs schema (spec 0005) -- guarantees this exact shape back, not free text to parse.
+# gloss must never restate the enum itself ("positive") -- verified live that a naive prompt does exactly
+# that; this instruction is what fixes it, confirmed against real headlines before shipping.
+_SENTIMENT_SYSTEM_PROMPT = (
+    "Score this stock news headline from 0 (most negative) to 100 (most positive). "
+    "Give a one-word gloss describing what KIND of positive/neutral/negative this is "
+    "(e.g. bullish, reassuring, routine, concerning, alarming) -- never a restatement "
+    "of positive/neutral/negative itself. Give a one-sentence rationale for the score."
+)
+_SENTIMENT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "score": {"type": "integer"},
+        "gloss": {"type": "string"},
+        "rationale": {"type": "string"},
+    },
+    "required": ["score", "gloss", "rationale"],
+    "additionalProperties": False,
+}
 
 
 class ProviderFetchError(Exception):
@@ -233,6 +267,41 @@ async def get_embeddings(texts: list[str], client: httpx.AsyncClient) -> list[li
         return [by_index[i] for i in range(len(texts))]
     except (KeyError, IndexError) as exc:
         raise ProviderFetchError(f"OpenAI embedding response missing data: {exc}") from exc
+
+
+async def get_sentiment(text: str, client: httpx.AsyncClient) -> dict:
+    """One headline's sentiment (spec 0005/ADR 0014) -- unlike get_embeddings,
+    Chat Completions has no native array-input batching, so this is always
+    one call per headline; concurrency across many headlines happens via
+    asyncio.gather at the call site (lesson 26), not in here. Structured
+    Outputs guarantees the {"score", "gloss", "rationale"} shape rather than
+    parsing free text."""
+    try:
+        response = await client.post(
+            "https://api.openai.com/v1/chat/completions",
+            headers={"Authorization": f"Bearer {settings.openai_api_key}"},
+            json={
+                "model": OPENAI_SENTIMENT_MODEL,
+                "messages": [
+                    {"role": "system", "content": _SENTIMENT_SYSTEM_PROMPT},
+                    {"role": "user", "content": text},
+                ],
+                "response_format": {
+                    "type": "json_schema",
+                    "json_schema": {"name": "sentiment", "strict": True, "schema": _SENTIMENT_SCHEMA},
+                },
+            },
+        )
+        response.raise_for_status()
+        body = response.json()
+    except (httpx.HTTPError, ValueError) as exc:
+        raise ProviderFetchError(f"OpenAI sentiment fetch failed: {exc}") from exc
+
+    # Structured Outputs guarantees the schema, but the content is still a JSON *string* to parse.
+    try:
+        return json.loads(body["choices"][0]["message"]["content"])
+    except (KeyError, IndexError, json.JSONDecodeError) as exc:
+        raise ProviderFetchError(f"OpenAI sentiment response missing data: {exc}") from exc
 
 
 async def _run_milvus(func_, *args, **kwargs):

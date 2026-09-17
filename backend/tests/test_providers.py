@@ -18,6 +18,7 @@ from ticker_backend.providers import (
     fetch_finnhub_news,
     get_company,
     get_embeddings,
+    get_sentiment,
 )
 
 TICKERS_JSON = {"0": {"cik_str": 320193, "ticker": "AAPL", "title": "Apple Inc."}}
@@ -156,6 +157,38 @@ async def test_get_embeddings_empty_list_skips_the_network_call(test_session_fac
         embeddings = await get_embeddings([], client)
 
     assert embeddings == []
+
+
+@respx.mock
+async def test_get_sentiment_returns_structured_score_gloss_rationale(test_session_factory):
+    respx.post("https://api.openai.com/v1/chat/completions").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {
+                            "content": '{"score": 90, "gloss": "bullish", "rationale": "Strong earnings beat."}'
+                        }
+                    }
+                ]
+            },
+        )
+    )
+    async with httpx.AsyncClient() as client:
+        sentiment = await get_sentiment("Apple beats earnings expectations.", client)
+
+    assert sentiment == {"score": 90, "gloss": "bullish", "rationale": "Strong earnings beat."}
+
+
+@respx.mock
+async def test_get_sentiment_raises_typed_error_on_failure(test_session_factory):
+    respx.post("https://api.openai.com/v1/chat/completions").mock(
+        return_value=httpx.Response(401, json={"error": {"message": "Incorrect API key provided."}})
+    )
+    async with httpx.AsyncClient() as client:
+        with pytest.raises(ProviderFetchError):
+            await get_sentiment("A real headline", client)
 
 
 def test_embedding_input_text_uses_title_only_when_no_summary():

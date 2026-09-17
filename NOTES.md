@@ -338,13 +338,24 @@ endpoint, endpoint before UI.
     surprise.
 24. **OpenAI sentiment classification call** — a new provider-style call (mirrors lesson 18's embeddings
     integration): given a headline's title + `summary`, get back a score/gloss/rationale via a raw HTTP chat
-    completion call (ADR 0010's raw-httpx discipline, not an SDK); enum derived from the score by one
-    consistent rule. No filing content, no job wiring, no Story aggregate yet — just proves the call works,
-    same scope discipline lesson 18 kept for embeddings. **Two things ADR 0014 flagged as needing
-    re-verification at this point, not assumed from the ADR**: the model choice (`gpt-5-nano` was cheapest
-    when checked, but pricing already moved once during that same discussion) and the actual score-to-enum
-    threshold cutoffs (not yet chosen anywhere — same empirical-tuning treatment lesson 19 gave
-    `story_similarity_threshold`, not a guessed number).
+    completion call (ADR 0010's raw-httpx discipline, not an SDK). No filing content, no job wiring, no
+    Story aggregate yet — just proves the call works, same scope discipline lesson 18 kept for embeddings.
+    **Rescoped during planning**: the score-to-enum threshold cutoffs, originally sketched for this lesson,
+    move to lesson 26 instead — the closer precedent is lesson 18 (prove the call) vs. lesson 19 (the real
+    matching logic, where `story_similarity_threshold` actually got tuned against real data), not one lesson
+    doing both. Confirmed with the user before building.
+    ✅ built (plan: `docs/plans/0024-*.md`) — model choice re-verified live (`gpt-5-nano` still cheapest, no
+    change since ADR 0014). Structured Outputs (`response_format: json_schema`) used instead of parsing free
+    text — verified live against the real API before trusting OpenAI's own ambiguous docs on which models
+    support it. **A real problem found on the very first live call, not hypothetical**: the naive prompt's
+    `gloss` came back as `"Positive"` — a bare restatement of the enum, exactly what spec 0005's Success
+    Criteria forbid. Fixed with an explicit system-prompt instruction, reverified across three different
+    real-ish cases (`bullish`/97, `concerning`/28, `routine`/50) before shipping. `embedding_input_text` is
+    reused directly for sentiment's input (confirmed with the user — the join logic is currently identical
+    for both callers, no new `sentiment_input_text` written). A second real bug, unrelated to sentiment
+    itself: `providers.py` had the exact same `pymilvus`-import-order landmine `health.py` was fixed for
+    during spec 0003 — never exposed until a standalone script imported this module directly. Fixed the
+    same way, with the same explanatory comment. 48/48 tests (2 new), zero regressions.
 25. **Filing content extraction** — the three-tier strategy from ADR 0014 (structural anchor extraction by
     matching the anchor `id`, not visible label text; plain-text heading search fallback; blind
     head-truncation fallback), as a standalone content-preparation step given a raw filing URL. Substantial,
@@ -356,7 +367,10 @@ endpoint, endpoint before UI.
     grouping uses): selects input per Headline (news vs. filing, using lesson 25's extraction for filings),
     applies the right content cap, calls lesson 24's classifier, persists results + status to `headlines`,
     and incrementally updates the owning Story's running average via the cumulative-moving-average formula
-    (including the first-member special case — no prior average to update from).
+    (including the first-member special case — no prior average to update from). **Also where the
+    score-to-enum threshold cutoffs get empirically tuned** (moved here from lesson 24 during that lesson's
+    own planning) — real data to tune against only exists once this lesson's real pipeline is wired, the
+    same reason lesson 19 is where `story_similarity_threshold` was tuned, not lesson 18.
 27. **Backend tests for the sentiment job** — mirrors lesson 20's dedicated testing lesson. Mocking OpenAI at
     its boundary; the three-tier extraction fallback tested against fixtures modeling the three real cases
     ADR 0014 found live (anchor present, anchor present but label-mismatched, no anchor and content
