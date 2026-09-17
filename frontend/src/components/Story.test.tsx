@@ -28,16 +28,21 @@ function story(overrides: Partial<StoryType> = {}): StoryType {
 
 describe("Story", () => {
   it("always renders the primary headline", () => {
+    // Arrange + act: render a Story with a known primary headline.
     render(<Story story={story({ primary: headline({ title: "The primary" }) })} />);
+    // Assert: the primary headline's link is shown.
     expect(screen.getByRole("link", { name: "The primary" })).toBeInTheDocument();
   });
 
   it("shows no disclosure at all for a Story of one", () => {
+    // Arrange + act: render a Story with no other members.
     render(<Story story={story({ other_members: [] })} />);
+    // Assert: no "more sources" disclosure is rendered.
     expect(screen.queryByText(/more source/)).not.toBeInTheDocument();
   });
 
   it("hides other_members behind a closed disclosure by default", () => {
+    // Arrange + act: render a Story with one other member.
     render(
       <Story
         story={story({
@@ -45,6 +50,7 @@ describe("Story", () => {
         })}
       />,
     );
+    // Assert: the disclosure summary is shown but starts closed.
     expect(screen.getByText(/\+1 more source/)).toBeInTheDocument();
     // Present in the DOM (details content is never removed), but not open yet.
     const details = screen.getByText(/\+1 more source/).closest("details")!;
@@ -52,6 +58,7 @@ describe("Story", () => {
   });
 
   it("reveals other_members when the disclosure is opened", async () => {
+    // Arrange: render a Story with one other member.
     render(
       <Story
         story={story({
@@ -60,13 +67,16 @@ describe("Story", () => {
       />,
     );
 
+    // Act: open the disclosure.
     const user = userEvent.setup();
     await user.click(screen.getByText(/\+1 more source/));
 
+    // Assert: the previously-hidden member is now visible.
     expect(screen.getByRole("link", { name: "A hidden member" })).toBeInTheDocument();
   });
 
   it("pluralizes the coverage count correctly", () => {
+    // Arrange + act: render a Story with two other members.
     render(
       <Story
         story={story({
@@ -77,6 +87,7 @@ describe("Story", () => {
         })}
       />,
     );
+    // Assert: the count label is pluralized.
     expect(screen.getByText("+2 more sources")).toBeInTheDocument();
   });
 });
