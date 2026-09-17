@@ -40,6 +40,26 @@ function headline(overrides: Partial<searchModule.Headline> = {}): searchModule.
   };
 }
 
+function story(overrides: Partial<searchModule.Story> = {}): searchModule.Story {
+  return {
+    story_id: "11111111-1111-1111-1111-111111111111",
+    primary: headline(),
+    other_members: [],
+    ...overrides,
+  };
+}
+
+function response(overrides: Partial<searchModule.SearchResponse> = {}): searchModule.SearchResponse {
+  return {
+    ticker: "AAPL",
+    status: "success",
+    providers: { edgar: "ok", finnhub: "ok" },
+    grouping: "ok",
+    days: [],
+    ...overrides,
+  };
+}
+
 describe("SearchPage", () => {
   beforeEach(() => {
     fetchSearch.mockReset();
@@ -67,13 +87,11 @@ describe("SearchPage", () => {
     expect(screen.getByText(/searching/i)).toBeInTheDocument();
 
     // Now let the fetch actually complete.
-    resolveFetch({
-      ticker: "AAPL",
-      status: "success",
-      providers: { edgar: "ok", finnhub: "ok" },
-      today: [headline({ title: "A real headline", outlet: "Yahoo" })],
-      recent: [],
-    });
+    resolveFetch(
+      response({
+        days: [{ date: "2026-09-11", is_today: true, stories: [story({ primary: headline({ title: "A real headline" }) })] }],
+      }),
+    );
 
     await waitFor(() => {
       expect(screen.getByRole("link", { name: "A real headline" })).toBeInTheDocument();
@@ -81,43 +99,58 @@ describe("SearchPage", () => {
     expect(screen.queryByText(/searching/i)).not.toBeInTheDocument();
   });
 
-  it("renders Today and Recent as two separate sections, never merged", async () => {
-    // One headline in each bucket, deliberately different categories/providers too.
-    fetchSearch.mockResolvedValue({
-      ticker: "AAPL",
-      status: "success",
-      providers: { edgar: "ok", finnhub: "ok" },
-      today: [headline({ title: "Today's headline", url: "https://example.com/today" })],
-      recent: [
-        headline({
-          title: "Recent headline",
-          url: "https://example.com/recent",
-          category: "filing",
-          provider: "sec_edgar",
-        }),
-      ],
-    });
+  it("renders each day as its own section, never merged", async () => {
+    fetchSearch.mockResolvedValue(
+      response({
+        days: [
+          {
+            date: "2026-09-17",
+            is_today: true,
+            stories: [story({ primary: headline({ title: "Today's headline", url: "https://example.com/today" }) })],
+          },
+          {
+            date: "2026-09-16",
+            is_today: false,
+            stories: [
+              story({
+                primary: headline({
+                  title: "Earlier headline",
+                  url: "https://example.com/earlier",
+                  category: "filing",
+                  provider: "sec_edgar",
+                }),
+              }),
+            ],
+          },
+        ],
+      }),
+    );
 
     renderSearchPage();
     await searchFor("AAPL");
 
     const todaySection = (await screen.findByRole("heading", { name: "Today" })).closest("section")!;
     expect(within(todaySection).getByRole("link", { name: "Today's headline" })).toBeInTheDocument();
-    expect(within(todaySection).queryByRole("link", { name: "Recent headline" })).not.toBeInTheDocument();
+    expect(within(todaySection).queryByRole("link", { name: "Earlier headline" })).not.toBeInTheDocument();
 
-    const recentSection = screen.getByRole("heading", { name: "Recent" }).closest("section")!;
-    expect(within(recentSection).getByRole("link", { name: "Recent headline" })).toBeInTheDocument();
-    expect(within(recentSection).queryByRole("link", { name: "Today's headline" })).not.toBeInTheDocument();
+    const earlierSection = screen.getByRole("heading", { name: "September 16" }).closest("section")!;
+    expect(within(earlierSection).getByRole("link", { name: "Earlier headline" })).toBeInTheDocument();
+    expect(within(earlierSection).queryByRole("link", { name: "Today's headline" })).not.toBeInTheDocument();
   });
 
-  it("shows Today's own empty message when Today is empty but Recent has entries -- spec 0001's 'empty Today is normal' guarantee", async () => {
-    fetchSearch.mockResolvedValue({
-      ticker: "AAPL",
-      status: "success",
-      providers: { edgar: "ok", finnhub: "ok" },
-      today: [],
-      recent: [headline({ title: "Recent headline", url: "https://example.com/recent" })],
-    });
+  it("shows Today's own empty message when Today is empty but an earlier day has entries", async () => {
+    fetchSearch.mockResolvedValue(
+      response({
+        days: [
+          { date: "2026-09-17", is_today: true, stories: [] },
+          {
+            date: "2026-09-16",
+            is_today: false,
+            stories: [story({ primary: headline({ title: "Earlier headline", url: "https://example.com/earlier" }) })],
+          },
+        ],
+      }),
+    );
 
     renderSearchPage();
     await searchFor("AAPL");
@@ -125,18 +158,12 @@ describe("SearchPage", () => {
     const todaySection = (await screen.findByRole("heading", { name: "Today" })).closest("section")!;
     expect(within(todaySection).getByText("No headlines today.")).toBeInTheDocument();
 
-    const recentSection = screen.getByRole("heading", { name: "Recent" }).closest("section")!;
-    expect(within(recentSection).getByRole("link", { name: "Recent headline" })).toBeInTheDocument();
+    const earlierSection = screen.getByRole("heading", { name: "September 16" }).closest("section")!;
+    expect(within(earlierSection).getByRole("link", { name: "Earlier headline" })).toBeInTheDocument();
   });
 
   it("shows the human-readable status message, not the raw status value", async () => {
-    fetchSearch.mockResolvedValue({
-      ticker: "AAPL",
-      status: "partial_failure",
-      providers: { edgar: "ok", finnhub: "error" },
-      today: [],
-      recent: [],
-    });
+    fetchSearch.mockResolvedValue(response({ status: "partial_failure", providers: { edgar: "ok", finnhub: "error" } }));
 
     renderSearchPage();
     await searchFor("AAPL");
@@ -147,14 +174,19 @@ describe("SearchPage", () => {
     expect(screen.queryByText("partial_failure")).not.toBeInTheDocument();
   });
 
-  it("shows a Refresh button once results exist, and clicking it re-fetches the same ticker", async () => {
-    fetchSearch.mockResolvedValue({
-      ticker: "AAPL",
-      status: "success",
-      providers: { edgar: "ok", finnhub: "ok" },
-      today: [],
-      recent: [],
+  it("shows the grouping status underneath the response status", async () => {
+    fetchSearch.mockResolvedValue(response({ grouping: "skipped" }));
+
+    renderSearchPage();
+    await searchFor("AAPL");
+
+    await waitFor(() => {
+      expect(screen.getByText(/isn't configured/i)).toBeInTheDocument();
     });
+  });
+
+  it("shows a Refresh button once results exist, and clicking it re-fetches the same ticker", async () => {
+    fetchSearch.mockResolvedValue(response());
 
     renderSearchPage();
     await searchFor("AAPL");
@@ -181,13 +213,17 @@ describe("SearchPage", () => {
   });
 
   it("loads automatically when the URL already has a ticker param -- the data-loading pattern", async () => {
-    fetchSearch.mockResolvedValue({
-      ticker: "AAPL",
-      status: "success",
-      providers: { edgar: "ok", finnhub: "ok" },
-      today: [headline({ title: "Loaded from the URL", url: "https://example.com/url-driven" })],
-      recent: [],
-    });
+    fetchSearch.mockResolvedValue(
+      response({
+        days: [
+          {
+            date: "2026-09-17",
+            is_today: true,
+            stories: [story({ primary: headline({ title: "Loaded from the URL", url: "https://example.com/url-driven" }) })],
+          },
+        ],
+      }),
+    );
 
     // No searchFor() call -- nothing is typed or clicked. The URL alone
     // should be enough to trigger a fetch.
@@ -202,13 +238,7 @@ describe("SearchPage", () => {
   });
 
   it("still functions when the URL's ticker is lowercase -- case is not enforced on the read path", async () => {
-    fetchSearch.mockResolvedValue({
-      ticker: "AAPL",
-      status: "success",
-      providers: { edgar: "ok", finnhub: "ok" },
-      today: [],
-      recent: [],
-    });
+    fetchSearch.mockResolvedValue(response());
 
     renderSearchPage(["/search?ticker=aapl"]);
 

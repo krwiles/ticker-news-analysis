@@ -12,8 +12,8 @@ describe("fetchSearch", () => {
     ticker: "AAPL",
     status: "success",
     providers: { edgar: "ok", finnhub: "ok" },
-    today: [],
-    recent: [],
+    grouping: "ok",
+    days: [],
   };
 
   it("requests /api/search with the URL-encoded ticker", async () => {

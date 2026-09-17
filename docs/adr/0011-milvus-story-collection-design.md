@@ -62,6 +62,44 @@ The **recurring-report pair scored highest of all (0.943)**, purely from structu
 different quarters — this is direct empirical confirmation that ADR 0006's day-scoping requirement is
 load-bearing, not theoretical: without it, no threshold could distinguish that pair from a genuine duplicate.
 
+## Threshold re-examined against a larger, independent sample (post-lesson-22)
+
+A real production split surfaced the question of whether 0.75 was still right: five headlines about Microsoft's
+8% dividend increase (Sept 16) split into two Stories, because the two founding headlines scored 0.7247 —
+just under the cutoff. Rather than tune against that one pair, a new, larger, independent experiment was run:
+33 real headlines across four tickers (NVDA, AMZN, AAPL, GOOGL), forming 31 same-event pairs (verified by
+reading title+summary, blind to any similarity score) across seven distinct real events, and 6 deliberately
+*hard* different-event pairs — same company/topic, verifiably different specific news (e.g. "Micron stock
+sank on sector pressure" vs "Micron rated Strong Buy on DRAM scarcity"; "Google Cloud x Deutsche Bank" vs
+"Google x Accenture" — two distinct partnership announcements). The 0.75 value and every prior finding above
+were deliberately not consulted while building the sample or assigning labels.
+
+Sorted same-event scores: `0.563, 0.572, 0.606, 0.645, 0.651, 0.673, 0.701, 0.717, 0.720, 0.725, 0.731, 0.774,
+0.776, 0.785, 0.786, 0.799, 0.803, 0.804, 0.813, 0.829, 0.830, 0.832, 0.840, 0.851, 0.857, 0.872, 0.873, 0.874,
+0.887, 0.892, 0.907`. Sorted different-event scores: `0.405, 0.537, 0.599, 0.604, 0.716, 0.746`.
+
+**Finding: the two distributions genuinely overlap.** 11 of 31 same-event pairs (35%) score below the highest
+different-event pair (0.746) — no single global threshold can catch all 31 without also crossing into
+different-event territory. This is a real property of comparing two headlines' embeddings at this granularity,
+not a symptom of an uncalibrated number.
+
+**Finding: 0.75 already sits in the best available zero-false-positive position.** There is a genuine gap in
+this sample between 0.731 (the highest same-event score below the overlap) and 0.774 (the next one up) — and
+the highest different-event score, 0.746, falls inside that exact gap. Any threshold in `(0.746, 0.774]`
+produces the identical outcome: the same 20/31 same-event pairs correctly matched, 0/6 false positives. 0.75
+is already inside that range.
+
+**Finding: the MSFT split specifically cannot be fixed without a demonstrated new false positive.** Catching
+the 0.7247 pair would require a threshold ≤ 0.7247, which also crosses 0.716 — pulling in the Google
+Cloud/Deutsche Bank vs. Google/Accenture pair (0.746) as a real false merge of two different announcements.
+
+Decision: **0.75 stands, re-confirmed rather than left untouched.** The MSFT split (and the other ~10 same-
+event pairs in this sample scoring below the gap) is accepted as a real, now-quantified limitation of
+comparing only against a Story's primary with one global threshold — not a miscalibration. A different fix
+(comparing against more than a Story's primary) is the same formal-clustering option ADR 0006 already
+considered and rejected for complexity; this finding doesn't reopen that trade-off, it just confirms the
+current threshold is a reasonable point on it.
+
 ## Two real bugs found live, not caught until real data forced them
 
 - **`insert()` isn't searchable until made visible, and `flush()` is the wrong fix for a sequential loop.** A

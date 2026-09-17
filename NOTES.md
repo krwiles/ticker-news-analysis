@@ -270,7 +270,39 @@ UI — not because that order is mandatory, just because it's the shape that's w
 22. **Frontend: per-day lists + the `Story` component** — replaces `SearchPage`'s Today/Recent sections with
     one per day; a `Story` shows its primary headline per spec 0001's existing rules, plus an expandable list
     for other members when there are any. Capstone of this arc, same role lesson 14 played for arc 2.
-23. **Frontend tests for the new Story UI** — mirrors lesson 12's shape.
+    ✅ built (plan discussed inline in conversation, design decisions below) — two decisions made before any
+    code: display `grouping` status underneath the existing `SearchStatus` (a new `GroupingStatus` component,
+    same dot+message shape, distinguishing all four states — `ok`/`skipped`/`error`/`unknown` — per ADR 0012's
+    own forward-looking note about future UI messaging); and delete `HeadlineList` entirely rather than keep
+    it as an unused wrapper, since `Story` renders `other_members` directly via a newly-extracted
+    `HeadlineCard`. New components: `HeadlineCard` (one headline, shared by a Story's primary and its
+    members), `Story` (primary + a native `<details>` disclosure for other members, no local state needed),
+    `DaySection` (one day's heading + its Stories), `GroupingStatus`. A real bug caught and fixed before it
+    shipped, not left as a gotcha: `day.date` is a plain `"YYYY-MM-DD"` string, and `new Date("2026-09-16")`
+    parses as UTC midnight — formatting that with `toLocaleDateString()` renders as the *previous* day in any
+    timezone west of UTC, Eastern included. Fixed by parsing the string's components manually and using the
+    local-time `Date` constructor instead, with a dedicated regression test. Unlike arc 2's lesson 11/12 split,
+    this lesson's own tests were written inline as part of the same change (13 new: `HeadlineCard`, `Story`,
+    `DaySection`, `GroupingStatus`, plus rewritten `SearchPage`/`search.ts` fixtures) rather than deferred to a
+    separate lesson — 51/51 frontend tests passing, `tsc --noEmit` clean. Live-verified only partially: the
+    `ui` container was rebuilt and confirmed serving (200, correct title, clean startup logs), but no browser-
+    automation tool was available in this session to actually click through the rendered page — flagged
+    explicitly rather than assumed, with a manual check in a real browser recommended before calling this
+    fully done. This also completes lesson 23 as originally sketched below (a separate frontend-tests lesson);
+    that slot is superseded, not left as stale future work — same "arcs get reshaped once real per-lesson work
+    happens" precedent this file already states at its close.
+23. ~~**Frontend tests for the new Story UI**~~ — superseded: lesson 22 above wrote its own tests inline
+    rather than as a separate follow-up lesson.
+
+**Post-lesson-22 investigation: the 0.75 similarity threshold, re-examined.** Using the real UI, a genuine
+same-event split was spotted live (five MSFT dividend headlines split into two Stories over a 0.7247-vs-0.75
+miss). Rather than retune to that one case, ran an independent, larger experiment against real data across
+four tickers (33 headlines, 31 same-event pairs, 6 deliberately hard different-event pairs) — see ADR 0011's
+new section for full methodology and numbers. Result: the two distributions genuinely overlap (no threshold
+gets perfect separation), and 0.75 already sits in the best available zero-false-positive position this
+sample supports. Threshold left unchanged, but now re-confirmed against real, independently-built evidence
+rather than left untouched by default. The MSFT split itself is accepted as a real, now-quantified limitation
+of the primary-only/single-threshold design, not fixed.
 
 Not committed to this exact split or order — the real per-lesson plans (once each one actually gets planned)
 may reshape it, same as arc 2's did.

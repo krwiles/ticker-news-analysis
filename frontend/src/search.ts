@@ -11,14 +11,33 @@ export interface Headline {
   published_at: string; // ISO 8601, already the right instant -- no client-side timezone math needed to display it
 }
 
+// One real-world event's coverage -- primary renders in full, other_members
+// (if any) sit behind an expandable list. story_id is null when grouping
+// was skipped or failed (ADR 0012) -- still its own Story, never dropped.
+export interface Story {
+  story_id: string | null;
+  primary: Headline;
+  other_members: Headline[];
+}
+
+// One calendar day (Eastern), holding that day's Stories. Only Today is ever
+// empty -- earlier days are included only when they have at least one Story (ADR 0013).
+export interface DayGroup {
+  date: string; // "YYYY-MM-DD", Eastern calendar date -- no time component
+  is_today: boolean;
+  stories: Story[];
+}
+
 export interface SearchResponse {
   ticker: string;
   // success: all providers ok. partial_failure: some didn't. complete_failure: nothing new fetched.
   status: "success" | "partial_failure" | "complete_failure";
   providers: Record<string, string>; // e.g. {"edgar": "ok", "finnhub": "error"} -- per-provider detail behind the one overall `status`
-  // Never overlapping -- already split server-side by Eastern calendar day (search.py's split_today_recent).
-  today: Headline[];
-  recent: Headline[];
+  // Independent of `status` -- a grouping problem is a distinct concern from "did EDGAR/Finnhub respond" (ADR 0012).
+  // "unknown" means the fetch job itself never returned, so grouping's outcome genuinely can't be known.
+  grouping: "ok" | "skipped" | "error" | "unknown";
+  // Newest day first; Today always present (even with zero Stories), earlier days only when non-empty.
+  days: DayGroup[];
 }
 
 export async function fetchSearch(ticker: string): Promise<SearchResponse> {

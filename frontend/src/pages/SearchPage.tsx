@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { useSearchParams } from "react-router";
-import { HeadlineList } from "../components/HeadlineList";
+import { DaySection } from "../components/DaySection";
+import { GroupingStatus } from "../components/GroupingStatus";
 import { SearchBar } from "../components/SearchBar";
 import { SearchStatus } from "../components/SearchStatus";
 import { fetchSearch, type SearchResponse } from "../search";
@@ -81,7 +82,7 @@ export function SearchPage() {
 
       {results && !loading && (
         <div className="mt-6">
-          <div className="mb-4 flex items-center justify-between gap-3">
+          <div className="mb-1 flex items-center justify-between gap-3">
             <SearchStatus status={results.status} />
             <button
               type="button"
@@ -92,16 +93,13 @@ export function SearchPage() {
               Refresh
             </button>
           </div>
+          <div className="mb-4">
+            <GroupingStatus grouping={results.grouping} />
+          </div>
 
-          <section className="mb-8">
-            <h2 className="mb-3 text-sm font-semibold uppercase tracking-wide text-slate-500">Today</h2>
-            <HeadlineList headlines={results.today} emptyMessage="No headlines today." />
-          </section>
-
-          <section>
-            <h2 className="mb-3 text-sm font-semibold uppercase tracking-wide text-slate-500">Recent</h2>
-            <HeadlineList headlines={results.recent} emptyMessage="No other headlines in the past week." />
-          </section>
+          {results.days.map((day) => (
+            <DaySection key={day.date} day={day} />
+          ))}
         </div>
       )}
     </main>

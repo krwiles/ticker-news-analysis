@@ -1,0 +1,171 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 22 — Frontend Per-Day Lists and the Story Component</title>
+<link rel="stylesheet" href="../assets/lesson.css">
+</head>
+<body>
+<div class="lesson">
+
+  <p class="eyebrow">Lesson 22 of 22 · ticker-news-analysis stack (infra arc — Arc 4 — capstone)</p>
+  <h1>Frontend: per-day lists + the Story component</h1>
+  <p class="subtitle">Consuming lesson 21's new shape, a native disclosure instead of any local state, and a
+  date-formatting bug caught before it ever shipped.</p>
+
+  <div class="callout">
+    <p>
+      Capstone of this arc, same role lesson 14 played for arc 2: spec 0002 is fully built after this, not
+      just modeled. Pure frontend — no backend or API changes, everything consumed here already shipped in
+      lesson 21.
+    </p>
+  </div>
+
+  <h2>One headline's markup, extracted once, used twice</h2>
+  <p>
+    A Story's primary and its other members need to render <em>identically</em> — same title/link, same
+    category badge, same outlet/date line, same optional summary. Rather than write that markup twice (or have
+    it quietly drift apart over time), it's pulled into one component and shared:
+  </p>
+  <pre><code>export function HeadlineCard({ headline }: HeadlineCardProps) {
+  return (
+    &lt;div className="rounded-lg border border-slate-200 bg-white px-4 py-3 shadow-sm"&gt;
+      ...
+    &lt;/div&gt;
+  );
+}</code></pre>
+  <p>
+    <code>Story</code> then becomes almost embarrassingly small: <code>&lt;HeadlineCard headline={story.primary} /&gt;</code>,
+    plus — only when there's anything to show — a disclosure for the rest.
+  </p>
+
+  <h2>An expandable list with zero local state</h2>
+  <p>
+    The obvious React instinct is a boolean <code>useState</code> and an <code>onClick</code> toggling it.
+    None of that is needed here — HTML already has a native disclosure element that does exactly this:
+  </p>
+  <pre><code>{story.other_members.length > 0 && (
+  &lt;details&gt;
+    &lt;summary&gt;+{story.other_members.length} more source{story.other_members.length === 1 ? "" : "s"}&lt;/summary&gt;
+    &lt;div&gt;
+      {story.other_members.map((member) => &lt;HeadlineCard key={member.url} headline={member} /&gt;)}
+    &lt;/div&gt;
+  &lt;/details&gt;
+)}</code></pre>
+  <p>
+    The browser handles open/closed entirely on its own. A Story of one (the common case for most headlines)
+    renders no disclosure at all — the condition on <code>other_members.length</code> means there's nothing to
+    click, not a disclosure that opens onto emptiness.
+  </p>
+
+  <h2>A real bug, caught before it shipped: date parsing that silently shifts a day</h2>
+  <p>
+    <code>day.date</code> arrives as a plain string, <code>"2026-09-16"</code> — no time, no timezone. The
+    obvious way to turn that into a human-readable label is <code>new Date(day.date)</code>. That's exactly
+    the wrong move:
+  </p>
+  <pre><code>new Date("2026-09-16")              // parsed as UTC midnight
+  .toLocaleDateString()             // formatted in the *viewer's local* timezone</code></pre>
+  <p>
+    For anyone west of UTC — including US Eastern, the timezone this date came from in the first place — that
+    can render as <strong>September 15</strong>, silently. Same class of bug the backend's DST tests exist to
+    catch, just surfacing on the frontend side now that dates cross the wire as bare strings. Fixed by parsing
+    the components manually and using the local-time constructor, which never gets reinterpreted through
+    another timezone:
+  </p>
+  <pre><code>function parseIsoDateLocal(isoDate: string): Date {
+  const [year, month, day] = isoDate.split("-").map(Number);
+  return new Date(year, month - 1, day);
+}</code></pre>
+  <p>
+    Caught with a dedicated regression test before this ever reached a browser — not found by clicking around
+    and noticing the date looked wrong.
+  </p>
+
+  <h2>Grouping status, displayed for the first time</h2>
+  <p>
+    ADR 0012 added the <code>grouping</code> field to <code>/api/search</code>'s response back in lesson 20,
+    explicitly flagging it as something a future UI would want to surface. This lesson is that future UI —
+    <code>GroupingStatus</code> mirrors <code>SearchStatus</code>'s exact dot-plus-message shape, sitting
+    directly underneath it, distinguishing all four real states (<code>ok</code>/<code>skipped</code>/
+    <code>error</code>/<code>unknown</code>) rather than just success-vs-failure.
+  </p>
+
+  <h2>A real deletion, not a deprecated leftover</h2>
+  <p>
+    <code>HeadlineList</code> — the component that rendered spec 0001's flat Today/Recent lists — has no
+    remaining call site once <code>Story</code> renders <code>other_members</code> directly through
+    <code>HeadlineCard</code>. Deleted outright, along with its test file, rather than kept around as an
+    unused wrapper "just in case" — this codebase's own convention for code that's genuinely, verifiably dead.
+  </p>
+
+  <h2>Verification, and an honest gap</h2>
+  <p>
+    51/51 frontend tests passing (13 new), <code>tsc --noEmit</code> clean, the <code>ui</code> container
+    rebuilt and confirmed serving without errors. What's <em>not</em> been done: an actual browser
+    click-through — no browser-automation tool was available in this session. Stated plainly rather than
+    quietly assumed: green tests and clean types prove logic and shape, not that a human looking at the
+    rendered page sees what's intended. A manual check is worth doing before treating this as fully verified.
+  </p>
+
+  <h2>Check your understanding</h2>
+
+  <div class="check">
+    <p class="q">Q1. Why does <code>Story</code> render no <code>&lt;details&gt;</code> element at all for a
+    Story of one, rather than a disclosure that just opens onto an empty list?</p>
+    <details>
+      <summary>Reveal answer</summary>
+      <p class="answer">A disclosure implies there's something to reveal. Rendering one that opens onto
+      nothing would be a UI element with no purpose, and would visually clutter the far more common case (a
+      Story with no other members) for no benefit -- the length check gates whether the whole element exists,
+      not just whether it starts open or closed.</p>
+    </details>
+  </div>
+
+  <div class="check">
+    <p class="q">Q2. Why does <code>new Date("2026-09-16")</code> risk displaying the wrong day, and why does
+    manually splitting the string and using <code>new Date(year, month - 1, day)</code> fix it?</p>
+    <details>
+      <summary>Reveal answer</summary>
+      <p class="answer">A bare "YYYY-MM-DD" string is parsed as UTC midnight by Date's string constructor.
+      Formatting that moment in the viewer's local timezone can land on the previous calendar day for anyone
+      west of UTC. The local-time constructor takes year/month/day as plain numbers with no timezone
+      reinterpretation at all, so the displayed day always matches the input's day, regardless of what
+      timezone the browser happens to be in.</p>
+    </details>
+  </div>
+
+  <div class="check">
+    <p class="q">Q3. Why was <code>HeadlineList</code> deleted rather than kept around, even though nothing in
+    this lesson strictly required removing it?</p>
+    <details>
+      <summary>Reveal answer</summary>
+      <p class="answer">Once Story renders other_members directly via HeadlineCard, HeadlineList has zero
+      remaining call sites -- it's genuinely, verifiably dead code, not a component that might be needed again
+      soon. This codebase's own convention is to delete code once you're certain it's unused rather than keep
+      unused wrappers "just in case," since an unused component left behind is a maintenance cost with no
+      offsetting benefit.</p>
+    </details>
+  </div>
+
+  <div class="source">
+    <p class="label">Primary sources</p>
+    <p>
+      <a href="../docs/plans/0022-frontend-per-day-lists-and-story-component.md">Lesson 22's plan doc</a> ·
+      <a href="../docs/adr/0012-grouping-dependency-injection-and-failure-signaling.md">ADR 0012 — the grouping-status decision this lesson fulfills</a> ·
+      <a href="../docs/specs/0002-daily-story-grouping.md">Spec 0002 — Daily Story Grouping</a>
+    </p>
+  </div>
+
+  <p class="ask">Anything unclear about why the <details> element needs no state, or want to walk through
+  actually opening this in a browser together? Ask your teacher (this agent).</p>
+
+  <div class="nav">
+    <a href="0021-api-search-reshaped-for-n-days.html">← Lesson 21: /api/search reshaped for N days</a>
+    <span>Arc 4 complete — spec 0002 fully built.</span>
+  </div>
+
+</div>
+</body>
+</html>
