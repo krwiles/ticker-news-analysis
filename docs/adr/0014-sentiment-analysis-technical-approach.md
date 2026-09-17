@@ -90,10 +90,30 @@ aggregate section below, where that speculation turns out to be exactly right, j
 and returned within the same request that ran grouping, then discarded, because grouping is synchronous with
 the fetch job. Sentiment can't do that: it runs in a background job, and whatever eventually reads the result
 (a browser poll) is a *different, later* request than whatever triggered the job. A bare `NULL` can't
-distinguish "still pending" from "skipped, will never arrive" from "errored, will never arrive" — without a
-persisted status, the frontend either polls forever for headlines that will never resolve, or needs an
-arbitrary timeout as a substitute for actually knowing what happened. The column is what lets the frontend
-*know* when to stop polling instead of guessing.
+distinguish "still pending" from "skipped, not resolving this run" from "errored, not resolving this run" —
+without a persisted status, the frontend either polls forever for headlines that won't resolve this run, or
+needs an arbitrary timeout as a substitute for actually knowing what happened. The column is what lets the
+frontend *know* when to stop polling instead of guessing — and it does double duty as the signal the job
+itself uses to know which headlines are still worth retrying (see Retry eligibility, below).
+
+### Retry eligibility: only a real score is terminal, not `skipped` or `error`
+
+Originally modeled `skipped`/`error` the same way `check_milvus`'s `not_initialized`/`error` states work —
+a settled outcome for that attempt. Reconsidered: unlike a Milvus health check (which just reports the
+current instant's state, nothing to retry), a Headline's sentiment is worth actually getting right
+eventually. A `skipped` Headline (no `OPENAI_API_KEY` configured at the time) should get a real score once
+the key *is* configured; an `error`ed one (a transient API failure) should get a real score if a later
+attempt just succeeds. Generalization: **only `ok` (a real score) is permanent.** `skipped` and `error` are
+both eligible for a future retry — the same reasoning applies to both, not just literal failures.
+
+This changes the job's own selection query from "headlines with `sentiment_status IS NULL`" to "headlines
+without a real score yet" (`sentiment_status IS NULL OR sentiment_status IN ('skipped', 'error')`) — but
+scoped to whatever headlines one backend request's own results already include, never a dedicated sweep of
+the whole table (see the Non-goal in spec 0005: no backfill job). A previously skipped/errored Headline only
+actually gets retried if a later request happens to pull it up again (e.g. a Refresh, or re-searching the
+same ticker) — which is also exactly why the Story aggregate has to exclude non-`ok` members rather than
+treat them as zero: a phantom value would need "correcting" later when a retry succeeds, which is exactly
+the kind of redundant, drift-prone state this project avoids elsewhere (ADR 0009).
 
 ## Filing content extraction: a three-tier strategy, evidence-backed across three real filers
 
@@ -176,8 +196,14 @@ is O(1) per new member rather than re-scanning every member on every read. This 
 running average and a member count on `stories` — two new columns, and exactly the thing ADR 0009 speculated
 `stories` might eventually need ("a likely future sentiment-analysis spec's need to store an aggregate
 sentiment score per Story") when it kept that table deliberately minimal. Real edge case: the *first* member
-added to a Story has no prior average to update from — that insert has to set `average = score, count = 1`
-directly rather than applying the general formula.
+to actually reach `ok` has no prior average to update from — that update has to set `average = score,
+count = 1` directly rather than applying the general formula.
+
+Only a member reaching `ok` ever folds into this running average — `skipped`/`error` members are never
+counted, not even as a placeholder value, since (per Retry eligibility, above) they might still succeed on
+a later run, and a stored average can't "un-count" a phantom contribution once a real value needs to replace
+it. If a Story's members are all still `skipped`/`error`, the count stays 0 and there's no real average to
+show yet.
 
 **The aggregate is allowed to visibly update more than once** as different members' sentiment resolves at
 different times — a deliberate, explicit exception to individual Headlines' "sentiment is permanent, set

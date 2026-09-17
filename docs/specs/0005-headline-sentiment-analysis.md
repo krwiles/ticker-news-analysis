@@ -40,10 +40,15 @@ closely, without reading everything closely first.
   action (no manual refresh needed, though one still works).
 - That catch-up is visually invisible except for the sentiment itself: nothing else on the page flashes,
   reflows, or reorders while it happens (see Outputs below for the exact visible shape).
-- Once computed, a Headline's sentiment is permanent — never re-evaluated later, mirroring Story's own
-  once-set-never-touched rule. A Story's *aggregate*, unlike an individual Headline's sentiment, is allowed to
-  visibly update more than once — it naturally reflects however many members have resolved so far, and
-  updates again as more do, rather than waiting for every member to finish before showing anything.
+- Once a Headline actually receives a real score, it's permanent — never re-evaluated later, mirroring
+  Story's own once-set-never-touched rule. A skipped or errored attempt is different: it isn't a dead end —
+  a later request that happens to touch the same Headline again is allowed to retry it. Only a real score,
+  once it exists, is untouchable.
+- A Story's *aggregate*, unlike an individual Headline's sentiment, is allowed to visibly update more than
+  once — it naturally reflects however many members currently have a real score, and updates again as more
+  do (including a member that only succeeds on a later retry), rather than waiting for every member to
+  finish before showing anything. A member that's skipped or errored is excluded from the aggregate entirely
+  until it actually has a real score — it never pulls the average toward a phantom value in the meantime.
 
 ## Inputs / data sources
 
@@ -69,11 +74,14 @@ closely, without reading everything closely first.
   of its own members' already-computed scores, never a separate model call of its own.
 - No fetching a news headline's full source article — title + `summary` is the input; considered and
   rejected as unnecessary for what this project needs.
-- No re-evaluation of an already-computed sentiment.
+- No re-evaluation of a Headline that already has a real score.
 - No manual override or correction of a computed sentiment by a user.
 - No sentiment trend or aggregate view (e.g. "AAPL sentiment over the past week").
-- No retroactive backfill of sentiment onto Headlines that existed before this feature ships, unless decided
-  otherwise during grilling.
+- No dedicated backfill/reprocessing job that sweeps the whole history looking for missed or failed
+  sentiment — the sentiment job only ever runs scoped to one backend request's own results, the same way the
+  existing fetch job does. A previously skipped or errored Headline can still end up with a real sentiment
+  later, but only as a side effect of a later request happening to include it again — never a deliberate bulk
+  pass.
 
 ## Core entities & terminology
 
@@ -89,9 +97,11 @@ as small text.
 
 While pending, the pill shows as an empty, greyed-out placeholder with no gloss or score yet. Once computed,
 only that pill changes, in place, to its real color, gloss, and score, and the rationale text appears
-beneath it — no other part of the page flashes, reflows, or reorders when this happens. A
-sentiment-computation failure or "not configured" state is surfaced the same way `GroupingStatus` currently
-surfaces grouping's own status, not silently.
+beneath it — no other part of the page flashes, reflows, or reorders when this happens.
+
+A page-level sentiment status, mirroring `GroupingStatus`'s existing dot+message shape (`ok`/`skipped`/
+`error`/`unknown`), sits alongside it — grouping and sentiment are independent dependencies that can succeed
+or fail on their own, so they get their own separate status lines rather than one merged signal.
 
 **A Story with more than one member** — the same condition that already shows the "+N more sources"
 disclosure (spec 0002) — nests its existing display (the primary Headline's card, plus that disclosure,
@@ -121,13 +131,16 @@ for the primary's own pill.
   shifts position, or disappears — the only visible change, for any given headline, is its own greyed-out
   placeholder becoming its real sentiment.
 - An unusually large filing doesn't cause a failure or stall processing — it's still analyzed.
-- A Headline's sentiment never changes after being set, even if the same headline is somehow re-processed.
+- Once a Headline has a real score, it never changes, even if the same headline is somehow re-processed. A
+  Headline that was only ever skipped or errored is not held to this — it can still receive a real score
+  later, if a later request happens to include it again.
 - Two headlines about the same real-world event (already grouped into one Story, per spec 0002) don't need to
   agree on sentiment — each Headline's sentiment is independent.
 - A Headline's enum and score are always consistent with each other, and a Story's enum and aggregate score
   are always consistent with each other — both derived by the identical rule.
 - A Story's displayed aggregate score always equals the true average of whichever members currently have a
-  computed score, verifiable against those members' own individual scores directly.
+  real score, verifiable against those members' own individual scores directly — a skipped or errored member
+  never pulls that average toward a phantom value in the meantime.
 - The primary Headline inside a Story's outer card renders identically — same pill, same pending behavior —
   to how it would render as a standalone Headline; being inside a Story changes nothing about it.
 - A Story with only one member never shows the outer Story card, the "Story" pill, or an aggregate pill.
