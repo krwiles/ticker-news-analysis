@@ -11,11 +11,11 @@ describe("MilvusStatus", () => {
     expect(screen.getByText("1404 stories indexed")).toBeInTheDocument();
   });
 
-  it("pluralizes a single indexed story correctly", () => {
+  it("stays plural even at exactly one indexed story", () => {
     // Arrange + act: render with exactly one story indexed.
     render(<MilvusStatus milvus={{ status: "ok", vector_count: 1 }} />);
-    // Assert: singular wording, not "1 stories".
-    expect(screen.getByText("1 story indexed")).toBeInTheDocument();
+    // Assert: always-plural wording, deliberate -- matches the Database tile's own counts (spec 0004).
+    expect(screen.getByText("1 stories indexed")).toBeInTheDocument();
   });
 
   it("shows a distinct, non-alarming label when not yet initialized", () => {

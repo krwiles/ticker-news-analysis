@@ -24,7 +24,9 @@ const LABEL: Record<MilvusCheck["status"], string> = {
 function detailFor(milvus: MilvusCheck): string | undefined {
   switch (milvus.status) {
     case "ok":
-      return `${milvus.vector_count} ${milvus.vector_count === 1 ? "story" : "stories"} indexed`;
+      // Always plural, even at 1 -- deliberate, matches the Database
+      // tile's own counts (spec 0004), not grammatically "correct".
+      return `${milvus.vector_count} stories indexed`;
     case "not_initialized":
       return "Collection not created yet";
     case "error":

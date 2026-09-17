@@ -28,7 +28,12 @@ export function StatusTile({ name, status, detail }: StatusTileProps) {
     <div className="flex items-center justify-between rounded-lg border border-slate-200 bg-white px-4 py-3 shadow-sm">
       <div>
         <p className="font-medium text-slate-900">{name}</p>
-        {detail && <p className="text-sm text-slate-500">{detail}</p>}
+        {/* One line per "\n"-separated part -- e.g. Database's per-table counts (spec 0004) -- rather than one line that wraps. */}
+        {detail?.split("\n").map((line) => (
+          <p key={line} className="text-sm text-slate-500">
+            {line}
+          </p>
+        ))}
       </div>
       <div className="flex items-center gap-2">
         <span className={`h-2.5 w-2.5 rounded-full ${DOT_COLOR[status]}`} />
