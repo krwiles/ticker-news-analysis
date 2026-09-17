@@ -307,6 +307,56 @@ of the primary-only/single-threshold design, not fixed.
 Not committed to this exact split or order — the real per-lesson plans (once each one actually gets planned)
 may reshape it, same as arc 2's did.
 
+### Arc 5 — Headline Sentiment Analysis (spec 0005), rough outline
+
+Opened 2026-09-17, once `docs/specs/0005-headline-sentiment-analysis.md` was finalized via a full grilling
+round and its technical approach recorded in `docs/adr/0014-sentiment-analysis-technical-approach.md`. Rough
+sketch, not yet per-lesson planned — same starting shape arcs 2 and 4 had before real per-lesson planning
+reshaped them. Sequenced the same way: infra/schema before business logic, business logic before the
+endpoint, endpoint before UI.
+
+23. **Migration: sentiment columns** — nullable columns on `headlines` (score, the enum derived from it,
+    gloss, rationale, status) and a running average + member count on `stories` (ADR 0014's incremental
+    aggregate, and exactly what ADR 0009 speculated `stories` might eventually need). Schema-only, no app
+    logic wired yet — mirrors lesson 6/17's shape.
+24. **OpenAI sentiment classification call** — a new provider-style call (mirrors lesson 18's embeddings
+    integration): given a headline's title + `summary`, get back a score/gloss/rationale via a raw HTTP chat
+    completion call (ADR 0010's raw-httpx discipline, not an SDK); enum derived from the score by one
+    consistent rule. No filing content, no job wiring, no Story aggregate yet — just proves the call works,
+    same scope discipline lesson 18 kept for embeddings. **Two things ADR 0014 flagged as needing
+    re-verification at this point, not assumed from the ADR**: the model choice (`gpt-5-nano` was cheapest
+    when checked, but pricing already moved once during that same discussion) and the actual score-to-enum
+    threshold cutoffs (not yet chosen anywhere — same empirical-tuning treatment lesson 19 gave
+    `story_similarity_threshold`, not a guessed number).
+25. **Filing content extraction** — the three-tier strategy from ADR 0014 (structural anchor extraction by
+    matching the anchor `id`, not visible label text; plain-text heading search fallback; blind
+    head-truncation fallback), as a standalone content-preparation step given a raw filing URL. Substantial,
+    real-world HTML-parsing work — deserves its own lesson, mirroring lesson 19's dedicated treatment of "the
+    actual grouping logic." The content-size caps (filings ~20k tokens, news ~500 — both explicitly working
+    values in ADR 0014) get reconfirmed against a broader real sample here, not treated as final.
+26. **The actual sentiment job** — wires 23-25 together inside a new background job, separate from
+    `fetch_and_persist_headlines` per ADR 0014's job-architecture decision (not the same synchronous job
+    grouping uses): selects input per Headline (news vs. filing, using lesson 25's extraction for filings),
+    applies the right content cap, calls lesson 24's classifier, persists results + status to `headlines`,
+    and incrementally updates the owning Story's running average via the cumulative-moving-average formula
+    (including the first-member special case — no prior average to update from).
+27. **Backend tests for the sentiment job** — mirrors lesson 20's dedicated testing lesson. Mocking OpenAI at
+    its boundary; the three-tier extraction fallback tested against fixtures modeling the three real cases
+    ADR 0014 found live (anchor present, anchor present but label-mismatched, no anchor and content
+    incorporated by reference elsewhere); the incremental average update including the first-member edge
+    case; all three `sentiment_status` outcomes (`ok`/`skipped`/`error`).
+28. **`/api/search` reshaped again** — response gains per-Headline sentiment fields and each Story's
+    aggregate; must stay pollable as the *same* shape (per ADR 0014's chosen "poll the full response" design,
+    not a new lightweight status endpoint) — mirrors lesson 21's shape.
+29. **Frontend: sentiment UI + polling** — `SearchPage` gains a poll loop (mirrors `StatusPage`'s existing
+    pattern); `HeadlineCard` gains the sentiment pill (gloss + score together, colored by enum, greyed-out
+    while pending, rationale as small text beneath); `Story` gains the nested outer card (its own "Story"
+    pill + aggregate pill) for multi-member Stories only — the primary Headline inside it gets zero special
+    treatment. Capstone of this arc, same role lesson 22 played for arc 4.
+
+Not committed to this exact split or order — the real per-lesson plans (once each one actually gets planned)
+may reshape it, same as arcs 2 and 4's did.
+
 ## Preferences
 - Wants an example data table created once the spec round produces a real entity to model it on (lesson 6 above), not before — don't front-load schema/domain work into earlier lessons. Satisfied: spec 0001 + `CONTEXT.md` now exist, arc 2 is modeled on them.
 - Confirmed (2026-09-08): prefers small vertical slices over front-loaded theory or a build-everything-then-explain approach — a short concept intro right before building each slice, then verify it against the live stack, then move to the next slice. This is why arc 2 became 6 (now 7) lessons instead of 3.
