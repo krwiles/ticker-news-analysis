@@ -5,6 +5,7 @@ endpoint (this one) reports on the whole skeleton instead of the browser
 polling each container directly.
 """
 
+import asyncio
 import time
 
 import structlog
@@ -14,6 +15,15 @@ from sqlalchemy import text
 
 from ticker_backend.config import settings
 from ticker_backend.db import engine
+from ticker_backend.milvus_client import STORY_PRIMARIES_COLLECTION
+
+# Must come after the ticker_backend imports above, not just alphabetized
+# with the other third-party imports -- pymilvus's own import unconditionally
+# calls load_dotenv() (pymilvus/settings.py), which can inject this repo's
+# root .env (meant for docker-compose/dbmate) into os.environ and corrupt
+# DATABASE_URL for Settings() if it hasn't been constructed yet. Verified
+# live: importing pymilvus first breaks create_async_engine's URL parsing.
+from pymilvus import MilvusClient
 
 log = structlog.get_logger()
 router = APIRouter()
@@ -21,6 +31,10 @@ router = APIRouter()
 # The worker proves it's alive by writing a timestamp here on a cron job.
 WORKER_HEARTBEAT_KEY = "worker:heartbeat"
 WORKER_STALE_AFTER_SECONDS = 30
+
+# Short and explicit -- a hanging/unreachable Milvus must fail fast, not
+# stall the rest of /api/health (spec 0003).
+MILVUS_CHECK_TIMEOUT_SECONDS = 2.0
 
 
 async def check_db() -> dict:
@@ -70,6 +84,35 @@ async def check_worker(client: Redis | None) -> dict:
     return {"status": "ok", "age_seconds": age_seconds}
 
 
+def check_milvus(client: MilvusClient | None = None) -> dict:
+    """Vector-store check for the status page (spec 0003). Sync, like every
+    pymilvus call -- health() below runs it off the event loop, same reason
+    providers.py's _run_milvus exists. `client` is injectable for tests,
+    same convention as ensure_story_primaries_collection.
+
+    A fresh client per call, closed when we made it -- mirrors check_redis's
+    own convention, not milvus_client.py's long-lived worker singleton,
+    which has a different lifecycle and no timeout."""
+    owns_client = client is None
+    try:
+        if client is None:
+            client = MilvusClient(uri=settings.milvus_uri, timeout=MILVUS_CHECK_TIMEOUT_SECONDS)
+        # Reachable, but grouping may never have run yet -- a real, expected
+        # state (e.g. no OPENAI_API_KEY configured), not an error.
+        if not client.has_collection(STORY_PRIMARIES_COLLECTION, timeout=MILVUS_CHECK_TIMEOUT_SECONDS):
+            return {"status": "not_initialized"}
+        # Collection exists -- report how many Stories are actually indexed.
+        stats = client.get_collection_stats(STORY_PRIMARIES_COLLECTION, timeout=MILVUS_CHECK_TIMEOUT_SECONDS)
+        return {"status": "ok", "vector_count": stats["row_count"]}
+    except Exception as exc:  # noqa: BLE001 - report any failure, don't crash the health check
+        log.warning("health.milvus_check_failed", error=str(exc))
+        return {"status": "error", "detail": str(exc)}
+    finally:
+        # Only close what we opened ourselves -- an injected test client isn't ours to close.
+        if owns_client and client is not None:
+            client.close()
+
+
 @router.get("/api/health")
 async def health() -> dict:
     """The one aggregate endpoint `api` mode exposes -- see the module
@@ -84,12 +127,15 @@ async def health() -> dict:
     # Close the connection now that both Redis-dependent checks are done.
     if redis_client is not None:
         await redis_client.aclose()
+    # Milvus is sync/blocking (pymilvus) -- run off the event loop, like providers.py's _run_milvus.
+    milvus_status = await asyncio.get_running_loop().run_in_executor(None, check_milvus)
 
     return {
         "api": {"status": "ok"},
         "db": db_status,
         "redis": redis_status,
         "worker": worker_status,
+        "milvus": milvus_status,
     }
 
 

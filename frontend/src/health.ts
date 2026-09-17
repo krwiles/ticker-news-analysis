@@ -9,6 +9,18 @@ export interface Check {
   age_seconds?: number; // worker only -- how long ago its last heartbeat was written
 }
 
+// Milvus has a genuine third real state ("not_initialized" -- reachable,
+// but the collection hasn't been created yet, e.g. no OPENAI_API_KEY
+// configured) that isn't an error, so it gets its own type rather than
+// stretching CheckStatus (spec 0003) -- same reasoning as SearchResponse's
+// own "grouping" field. "unknown" is frontend-only, the pre-first-poll
+// fallback: the backend itself never emits it.
+export type MilvusCheck =
+  | { status: "ok"; vector_count: number }
+  | { status: "not_initialized" }
+  | { status: "error"; detail: string }
+  | { status: "unknown" };
+
 // One entry per container/service /api/health actually checks -- see
 // health.py's health() for the aggregate this mirrors field-for-field.
 export interface HealthResponse {
@@ -16,6 +28,7 @@ export interface HealthResponse {
   db: Check;
   redis: Check;
   worker: Check;
+  milvus: MilvusCheck;
 }
 
 export async function fetchHealth(): Promise<HealthResponse> {

@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { MilvusStatus } from "../components/MilvusStatus";
 import { StatusTile } from "../components/StatusTile";
 import { fetchHealth, type HealthResponse } from "../health";
 
@@ -56,6 +57,7 @@ export function StatusPage() {
             (health?.worker.age_seconds !== undefined ? `heartbeat ${health.worker.age_seconds}s ago` : undefined)
           }
         />
+        <MilvusStatus milvus={health?.milvus ?? { status: "unknown" }} />
       </div>
 
       {error && <p className="mt-6 text-sm text-red-600">Couldn&apos;t reach the API: {error}</p>}
