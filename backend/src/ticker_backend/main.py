@@ -39,7 +39,9 @@ def create_app() -> FastAPI:
                 allow_methods=["*"],
                 allow_headers=["*"],
             )
+            # Aggregate health check (db/redis/worker/milvus) -- see health.py.
             app.include_router(health_router)
+            # /api/search -- fetch, group, and kick off sentiment -- see search.py.
             app.include_router(search_router)
         case "ui":
             log.info("app.mode", mode="ui", static_dir=str(STATIC_DIR))

@@ -11,44 +11,56 @@ describe("SearchBar", () => {
   });
 
   it("updates the input as the user types", async () => {
+    // Arrange: render, grab the input.
     const user = userEvent.setup();
     render(<SearchBar onSearch={vi.fn()} />);
-
     const input = screen.getByPlaceholderText(/ticker symbol/i);
+
+    // Act: type into it.
     await user.type(input, "AAPL");
 
+    // Assert: the input reflects what was typed.
     expect(input).toHaveValue("AAPL");
   });
 
   it("calls onSearch with the trimmed ticker on submit", async () => {
+    // Arrange: render with a spy for onSearch.
     const user = userEvent.setup();
     const onSearch = vi.fn();
     render(<SearchBar onSearch={onSearch} />);
 
+    // Act: type a value with stray whitespace, then submit.
     await user.type(screen.getByPlaceholderText(/ticker symbol/i), "  AAPL  ");
     await user.click(screen.getByRole("button", { name: /search/i }));
 
+    // Assert: onSearch receives the trimmed value, not the raw input.
     expect(onSearch).toHaveBeenCalledWith("AAPL");
   });
 
   it("does not call onSearch when the input is empty", async () => {
+    // Arrange: render with a spy for onSearch.
     const user = userEvent.setup();
     const onSearch = vi.fn();
     render(<SearchBar onSearch={onSearch} />);
 
+    // Act: submit without typing anything.
     await user.click(screen.getByRole("button", { name: /search/i }));
 
+    // Assert: no search fires for empty input.
     expect(onSearch).not.toHaveBeenCalled();
   });
 
   it("does not call onSearch when the input is only whitespace", async () => {
+    // Arrange: render with a spy for onSearch.
     const user = userEvent.setup();
     const onSearch = vi.fn();
     render(<SearchBar onSearch={onSearch} />);
 
+    // Act: type only whitespace, then submit.
     await user.type(screen.getByPlaceholderText(/ticker symbol/i), "   ");
     await user.click(screen.getByRole("button", { name: /search/i }));
 
+    // Assert: no search fires for whitespace-only input.
     expect(onSearch).not.toHaveBeenCalled();
   });
 

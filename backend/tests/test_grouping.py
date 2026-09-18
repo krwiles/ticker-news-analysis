@@ -42,9 +42,11 @@ class _FakeMilvusClient:
     def search(
         self, collection_name: str, data: list[list[float]], filter: str, limit: int, **kwargs
     ) -> list[list[dict]]:
+        # Mirror real Milvus's own filter string -- scope candidates to this ticker/day only.
         ticker, day = _parse_ticker_day_filter(filter)
         query = data[0]
         candidates = [row for row in self.rows if row["ticker"] == ticker and row["day"] == day]
+        # Score every candidate by real cosine similarity, best match first.
         scored = sorted(
             (
                 {"story_id": row["story_id"], "distance": _cosine_similarity(query, row["embedding"]), "entity": {}}
@@ -121,20 +123,24 @@ NOW = datetime(2026, 9, 16, 15, 0, tzinfo=timezone.utc)
 
 @respx.mock
 async def test_matching_groups_same_event_different_wording(test_session_factory, openai_configured):
+    # Arrange: two real, already-persisted headlines about the same ticker/day.
     original = await _insert_new(
         test_session_factory, _headline("AAPL", "https://example.com/g1", "Original headline", NOW)
     )
     duplicate = await _insert_new(
         test_session_factory, _headline("AAPL", "https://example.com/g2", "Duplicate headline", NOW + timedelta(minutes=1))
     )
+    # Mock OpenAI to return two vectors close enough (cosine 0.8) to cross the 0.75 threshold.
     respx.post("https://api.openai.com/v1/embeddings").mock(
         return_value=httpx.Response(200, json=_openai_response([[1.0, 0.0], [0.8, 0.6]]))  # cosine 0.8 -- above 0.75
     )
 
+    # Act: run the real grouping logic against the fake Milvus client.
     fake = _FakeMilvusClient()
     async with httpx.AsyncClient() as client:
         status = await _assign_stories([original, duplicate], "AAPL", client, test_session_factory, milvus=fake)
 
+    # Assert: grouping succeeded and both headlines landed on the same Story.
     assert status == "ok"
     async with test_session_factory() as session:
         rows = (await session.execute(select(Headline).where(Headline.ticker == "AAPL"))).scalars().all()
@@ -144,18 +150,22 @@ async def test_matching_groups_same_event_different_wording(test_session_factory
 
 @respx.mock
 async def test_matching_keeps_genuinely_different_headlines_separate(test_session_factory, openai_configured):
+    # Arrange: two real, already-persisted headlines about the same ticker/day.
     first = await _insert_new(test_session_factory, _headline("MSFT", "https://example.com/g3", "First headline", NOW))
     second = await _insert_new(
         test_session_factory, _headline("MSFT", "https://example.com/g4", "Second headline", NOW + timedelta(minutes=1))
     )
+    # Mock OpenAI to return two orthogonal vectors (cosine 0), well below the 0.75 threshold.
     respx.post("https://api.openai.com/v1/embeddings").mock(
         return_value=httpx.Response(200, json=_openai_response([[1.0, 0.0], [0.0, 1.0]]))  # cosine 0 -- below 0.75
     )
 
+    # Act: run the real grouping logic against the fake Milvus client.
     fake = _FakeMilvusClient()
     async with httpx.AsyncClient() as client:
         await _assign_stories([first, second], "MSFT", client, test_session_factory, milvus=fake)
 
+    # Assert: each headline got its own, distinct Story.
     async with test_session_factory() as session:
         rows = (await session.execute(select(Headline).where(Headline.ticker == "MSFT"))).scalars().all()
     story_ids = {r.story_id for r in rows}
@@ -166,9 +176,11 @@ async def test_matching_keeps_genuinely_different_headlines_separate(test_sessio
 async def test_matching_never_spans_two_tickers(test_session_factory, openai_configured):
     """Identical vectors, different tickers -- grouping is scoped per-ticker
     (ADR 0006), same as search itself already is."""
+    # Arrange: identical-content headlines, deliberately on two different tickers.
     aapl = await _insert_new(test_session_factory, _headline("AAPL", "https://example.com/g5", "Headline", NOW))
     msft = await _insert_new(test_session_factory, _headline("MSFT", "https://example.com/g6", "Headline", NOW))
 
+    # Act: group each ticker separately, against the same fake Milvus store (identical vectors both times).
     fake = _FakeMilvusClient()
     respx.post("https://api.openai.com/v1/embeddings").mock(
         return_value=httpx.Response(200, json=_openai_response([[1.0, 0.0]]))
@@ -181,6 +193,7 @@ async def test_matching_never_spans_two_tickers(test_session_factory, openai_con
     async with httpx.AsyncClient() as client:
         await _assign_stories([msft], "MSFT", client, test_session_factory, milvus=fake)
 
+    # Assert: despite an identical vector, the two tickers never share a Story.
     async with test_session_factory() as session:
         aapl_row = (await session.execute(select(Headline).where(Headline.url == "https://example.com/g5"))).scalar_one()
         msft_row = (await session.execute(select(Headline).where(Headline.url == "https://example.com/g6"))).scalar_one()
@@ -193,11 +206,13 @@ async def test_matching_never_spans_two_days(test_session_factory, openai_config
     (ADR 0006) is what prevents recurring-report language from incorrectly
     merging across reporting periods (empirically confirmed in ADR 0011:
     the highest-scoring real pair measured was exactly this shape)."""
+    # Arrange: identical-content headlines, same ticker, one calendar day apart.
     today = await _insert_new(test_session_factory, _headline("TSLA", "https://example.com/g7", "Headline", NOW))
     tomorrow = await _insert_new(
         test_session_factory, _headline("TSLA", "https://example.com/g8", "Headline", NOW + timedelta(days=1))
     )
 
+    # Act: group each day separately, against the same fake Milvus store (identical vectors both times).
     fake = _FakeMilvusClient()
     respx.post("https://api.openai.com/v1/embeddings").mock(
         return_value=httpx.Response(200, json=_openai_response([[1.0, 0.0]]))
@@ -210,6 +225,7 @@ async def test_matching_never_spans_two_days(test_session_factory, openai_config
     async with httpx.AsyncClient() as client:
         await _assign_stories([tomorrow], "TSLA", client, test_session_factory, milvus=fake)
 
+    # Assert: despite an identical vector, the two days never share a Story.
     async with test_session_factory() as session:
         row1 = (await session.execute(select(Headline).where(Headline.url == "https://example.com/g7"))).scalar_one()
         row2 = (await session.execute(select(Headline).where(Headline.url == "https://example.com/g8"))).scalar_one()
@@ -220,6 +236,7 @@ async def test_filings_always_get_their_own_story(test_session_factory):
     """Filings never participate in grouping, even with each other, by
     construction (CONTEXT.md's Story entry) -- no OpenAI/Milvus call
     involved at all, so this needs no respx mock and no fake client."""
+    # Arrange: two filing-category headlines, same ticker/day.
     filing_a = await _insert_new(
         test_session_factory, _headline("AAPL", "https://example.com/f1", "8-K: filing A", NOW, category="filing")
     )
@@ -227,9 +244,11 @@ async def test_filings_always_get_their_own_story(test_session_factory):
         test_session_factory, _headline("AAPL", "https://example.com/f2", "8-K: filing B", NOW, category="filing")
     )
 
+    # Act: no fake Milvus client passed at all -- filings must never reach that code path.
     async with httpx.AsyncClient() as client:
         status = await _assign_stories([filing_a, filing_b], "AAPL", client, test_session_factory)
 
+    # Assert: each filing got its own real Story, never left ungrouped.
     assert status == "ok"
     async with test_session_factory() as session:
         rows = (
@@ -245,6 +264,7 @@ async def test_late_match_finds_story_many_iterations_later(test_session_factory
     """A headline should still match an existing Story many iterations
     later, not just on the very next search. See the module docstring for
     what this does and doesn't prove."""
+    # Arrange: an original headline, 10 unrelated fillers, then a late duplicate of the original.
     original = await _insert_new(test_session_factory, _headline("NFLX", "https://example.com/late-0", "Original", NOW))
     fillers = [
         await _insert_new(
@@ -263,16 +283,19 @@ async def test_late_match_finds_story_many_iterations_later(test_session_factory
         v[i] = 1.0
         return v
 
+    # Build the late duplicate's vector close enough to the original's to still cross the threshold.
     filler_vectors = [_one_hot(i) for i in range(1, 11)]
     duplicate_vector = _one_hot(0)
     duplicate_vector[1] = 0.1
     vectors = [_one_hot(0)] + filler_vectors + [duplicate_vector]
     respx.post("https://api.openai.com/v1/embeddings").mock(return_value=httpx.Response(200, json=_openai_response(vectors)))
 
+    # Act: group everything in one batch, in insertion order.
     fake = _FakeMilvusClient()
     async with httpx.AsyncClient() as client:
         await _assign_stories([original, *fillers, late_duplicate], "NFLX", client, test_session_factory, milvus=fake)
 
+    # Assert: fillers stayed distinct from each other, but the late duplicate still found the original.
     async with test_session_factory() as session:
         original_row = (await session.execute(select(Headline).where(Headline.url == "https://example.com/late-0"))).scalar_one()
         late_row = (await session.execute(select(Headline).where(Headline.url == "https://example.com/late-11"))).scalar_one()
@@ -289,6 +312,7 @@ async def test_permanence_second_run_never_reconsiders_known_headlines(test_sess
     """Re-searching doesn't reshuffle or duplicate Stories (spec 0002) --
     checked via respx's own call count, not just that the outcome matches,
     to prove the headline is never even handed to grouping a second time."""
+    # Arrange: mock every provider EDGAR/Finnhub/OpenAI call this run will make.
     with respx.mock:
         respx.get("https://www.sec.gov/files/company_tickers.json").mock(return_value=httpx.Response(200, json={}))
         respx.get(url__regex=r"https://data\.sec\.gov/.*").mock(return_value=httpx.Response(200, json={"filings": {"recent": {k: [] for k in ["form", "filingDate", "acceptanceDateTime", "accessionNumber", "primaryDocument", "primaryDocDescription"]}}}))
@@ -317,6 +341,7 @@ async def test_permanence_second_run_never_reconsiders_known_headlines(test_sess
         async def run():
             return await fetch_and_persist_headlines("GOOG", session_factory=test_session_factory, milvus=fake)
 
+        # Act: fetch the same ticker twice in a row.
         settings.openai_api_key = "test-key-not-real"
         try:
             first = await run()
@@ -324,6 +349,7 @@ async def test_permanence_second_run_never_reconsiders_known_headlines(test_sess
         finally:
             settings.openai_api_key = ""
 
+    # Assert: the second run found the same one headline again (dedup by URL) but never re-embedded it.
     assert first["headline_count"] == second["headline_count"] == 1
     assert embeddings_route.call_count == 1, "the second run must never re-embed an already-known headline"
 
@@ -333,12 +359,15 @@ async def test_permanence_second_run_never_reconsiders_known_headlines(test_sess
 
 
 async def test_grouping_skipped_when_openai_not_configured(test_session_factory):
+    # Arrange: a real headline, deliberately without the openai_configured fixture.
     headline = await _insert_new(test_session_factory, _headline("AAPL", "https://example.com/skip-1", "Headline", NOW))
     assert settings.openai_api_key == ""  # the real default in this test environment
 
+    # Act: attempt grouping with no key configured at all.
     async with httpx.AsyncClient() as client:
         status = await _assign_stories([headline], "AAPL", client, test_session_factory)
 
+    # Assert: reported as "skipped", and the headline is left ungrouped, not blocked from persisting.
     assert status == "skipped"
     async with test_session_factory() as session:
         row = (await session.execute(select(Headline).where(Headline.url == "https://example.com/skip-1"))).scalar_one()
@@ -351,12 +380,15 @@ async def test_grouping_error_when_openai_fails(test_session_factory, openai_con
     distinct from "skipped": the headline still persists, grouping is
     flagged as "error" rather than silently indistinguishable from "not
     configured", and the whole job does not crash."""
+    # Arrange: a real headline, and an OpenAI embeddings call mocked to fail.
     headline = await _insert_new(test_session_factory, _headline("AAPL", "https://example.com/err-1", "Headline", NOW))
     respx.post("https://api.openai.com/v1/embeddings").mock(return_value=httpx.Response(401, json={"error": "bad key"}))
 
+    # Act: attempt grouping against the failing dependency.
     async with httpx.AsyncClient() as client:
         status = await _assign_stories([headline], "AAPL", client, test_session_factory)
 
+    # Assert: reported as "error", distinct from "skipped".
     assert status == "error"
     async with test_session_factory() as session:
         row = (await session.execute(select(Headline).where(Headline.url == "https://example.com/err-1"))).scalar_one()
@@ -367,16 +399,20 @@ async def test_grouping_error_when_openai_fails(test_session_factory, openai_con
 async def test_grouping_error_when_milvus_fails(test_session_factory, openai_configured):
     from pymilvus import MilvusException
 
+    # A fake Milvus client whose search() always raises, simulating a real outage.
     class _BrokenMilvusClient(_FakeMilvusClient):
         def search(self, *args, **kwargs):
             raise MilvusException("simulated Milvus outage")
 
+    # Arrange: a real headline, OpenAI succeeding, Milvus about to fail.
     headline = await _insert_new(test_session_factory, _headline("AAPL", "https://example.com/err-2", "Headline", NOW))
     respx.post("https://api.openai.com/v1/embeddings").mock(
         return_value=httpx.Response(200, json=_openai_response([[1.0, 0.0]]))
     )
 
+    # Act: attempt grouping against the broken Milvus client.
     async with httpx.AsyncClient() as client:
         status = await _assign_stories([headline], "AAPL", client, test_session_factory, milvus=_BrokenMilvusClient())
 
+    # Assert: reported as "error", same as an OpenAI-side failure.
     assert status == "error"

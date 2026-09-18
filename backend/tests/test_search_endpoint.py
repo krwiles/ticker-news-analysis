@@ -27,10 +27,8 @@ class _FakeJob:
 
 
 class _FakeArqRedis:
-    # Stands in for a real ArqRedis pool -- enqueue_job() just hands back the
-    # pre-built fake job above, instead of actually talking to Redis. Records
-    # every job name enqueued (lesson 26) so a test can prove sentiment_job
-    # really does get fired alongside fetch_headlines_job, fire-and-forget.
+    # Stands in for a real ArqRedis pool -- enqueue_job() hands back the fake job above, and
+    # records every job name enqueued so a test can prove sentiment_job fires too.
     def __init__(self, job: _FakeJob):
         self._job = job
         self.enqueued_job_names: list[str] = []
@@ -82,6 +80,7 @@ async def test_search_success_returns_seeded_data(test_session_factory):
             }
         )
     )
+    # Act: hit the real endpoint, backed by the fakes above.
     try:
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://test") as client:
@@ -89,6 +88,7 @@ async def test_search_success_returns_seeded_data(test_session_factory):
     finally:
         app.dependency_overrides.clear()
 
+    # Assert: the real, already-seeded headline comes back in the response shape.
     assert response.status_code == 200
     body = response.json()
     assert body["status"] == "success"
@@ -138,6 +138,7 @@ async def test_search_returns_grouped_daily_view(test_session_factory):
         await session.commit()
         shared_story_id, filing_story_id = shared_story.id, filing_story.id
 
+    # Seed one grouped pair, one ungrouped headline, and one filing -- all same ticker/day.
     await _seed_headline(
         test_session_factory, "NFLX", "Grouped primary", "https://example.com/grp-1", story_id=shared_story_id
     )
@@ -154,6 +155,7 @@ async def test_search_returns_grouped_daily_view(test_session_factory):
     app.dependency_overrides[get_arq_redis] = lambda: _FakeArqRedis(
         _FakeJob(result={"status": "success", "providers": {"edgar": "ok", "finnhub": "ok"}, "headline_count": 4, "grouping": "ok"})
     )
+    # Act: hit the real endpoint.
     try:
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://test") as client:
@@ -161,6 +163,7 @@ async def test_search_returns_grouped_daily_view(test_session_factory):
     finally:
         app.dependency_overrides.clear()
 
+    # Assert: three distinct Story entries, correctly nested.
     body = response.json()
     today = next(d for d in body["days"] if d["is_today"])
     assert len(today["stories"]) == 3  # the grouped pair, the ungrouped headline, and the filing
@@ -200,6 +203,7 @@ def test_sentiment_status_processing_when_any_headline_still_pending(monkeypatch
     from ticker_backend.config import settings
 
     monkeypatch.setattr(settings, "openai_api_key", "test-key-not-real")
+    # One headline still unresolved (NULL status) is enough to keep the page "processing".
     assert _compute_sentiment_status([_headline_with_status("ok"), _headline_with_status(None)]) == "processing"
 
 
@@ -207,6 +211,7 @@ def test_sentiment_status_ok_when_everything_resolved(monkeypatch):
     from ticker_backend.config import settings
 
     monkeypatch.setattr(settings, "openai_api_key", "test-key-not-real")
+    # Every headline resolved to a real score -- nothing left pending or failed.
     assert _compute_sentiment_status([_headline_with_status("ok"), _headline_with_status("ok")]) == "ok"
 
 

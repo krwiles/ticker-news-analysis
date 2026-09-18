@@ -29,6 +29,7 @@ docs/specs/        Feature specs, written before implementation
 docs/adr/          Architecture decision records — what was decided, what was considered, and why
 docs/plans/         Per-feature/lesson implementation plans
 CONTEXT.md          The project's own glossary — canonical definitions for its domain terms
+CODING_STANDARDS.md How code here should be written — conventions not captured by an ADR or CONTEXT.md
 lessons/            A parallel, self-contained teaching curriculum built alongside the real feature work
 learning-records/    Notes on what's already been understood, so lessons build on real prior knowledge
 ```

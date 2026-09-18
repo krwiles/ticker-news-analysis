@@ -35,20 +35,12 @@ class Settings(BaseSettings):
 
 settings = Settings()
 
-# How far back a search looks -- a fixed business rule (spec 0001), not env-configurable, so a
-# bare constant rather than a Settings field. Lives here, not search.py or providers.py, so
-# either can import it without pulling the other's own import chain along (FastAPI vs. pymilvus)
-# into a container mode that doesn't otherwise need it -- see providers.py's own comment on the
-# pymilvus/dotenv landmine this avoids reintroducing.
+# How far back a search looks -- a fixed business rule (spec 0001). Lives here, not providers.py/
+# search.py, so either can import it without pulling in the other's own import chain.
 RECENT_HEADLINES_WINDOW = timedelta(days=7)
 
-# Empirically checked against 15 real headlines spanning clearly positive/negative/neutral
-# content (lesson 26) -- a light-touch pass, not the full similarity-threshold treatment (a
-# boundary here is a labeling nuance, not a correctness bug the way a wrongly-merged Story was).
-# Real scores clustered cleanly: negative 15-34, neutral 50-68, positive 75-90 -- these cutoffs
-# sit in the real gaps between those clusters. See docs/plans/0026-*.md for the full sample.
-# Lives here (not providers.py) for the same reason RECENT_HEADLINES_WINDOW does -- search.py
-# needs this too (lesson 28), and neither it nor providers.py should import from the other.
+# Empirically tuned score-to-enum cutoffs -- see docs/plans/0026-*.md. Lives here for the same
+# import-chain reason as RECENT_HEADLINES_WINDOW above.
 SENTIMENT_NEGATIVE_MAX = 40
 SENTIMENT_POSITIVE_MIN = 70
 
@@ -58,8 +50,11 @@ def derive_sentiment_enum(score: int | float) -> Literal["positive", "neutral", 
     (spec 0005/ADR 0014) -- guarantees the enum and score can never disagree.
     Takes a float too -- a Story's own aggregate (lesson 28) is an average
     of integer scores, not necessarily an integer itself."""
+    # Below the negative cutoff -- negative.
     if score <= SENTIMENT_NEGATIVE_MAX:
         return "negative"
+    # At or above the positive cutoff -- positive.
     if score >= SENTIMENT_POSITIVE_MIN:
         return "positive"
+    # Everything in between -- neutral.
     return "neutral"

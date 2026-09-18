@@ -32,6 +32,7 @@ def ensure_story_primaries_collection(client: MilvusClient | None = None) -> Non
     safe to call on every worker startup. `client` is injectable (ADR
     0012), defaulting to the real get_milvus_client()."""
     client = client or get_milvus_client()
+    # Already exists -- nothing to do, idempotent no-op.
     if client.has_collection(STORY_PRIMARIES_COLLECTION):
         return
 
@@ -46,6 +47,7 @@ def ensure_story_primaries_collection(client: MilvusClient | None = None) -> Non
     index_params = client.prepare_index_params()
     index_params.add_index(field_name="embedding", index_type="AUTOINDEX", metric_type="COSINE")
 
+    # Create the collection with the schema + index defined above.
     client.create_collection(
         collection_name=STORY_PRIMARIES_COLLECTION,
         schema=schema,

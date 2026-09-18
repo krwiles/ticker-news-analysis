@@ -48,6 +48,7 @@ async def test_edgar_date_filter_regression(test_session_factory):
     """Named regression test for the exact bug found live in lesson 7:
     EDGAR's feed returns filings of any age -- form-type filtering alone
     isn't enough. This must keep only the filing inside the 7-day window."""
+    # Arrange: mock EDGAR with filings of mixed age and type.
     respx.get("https://data.sec.gov/submissions/CIK0000320193.json").mock(
         return_value=httpx.Response(
             200,
@@ -60,10 +61,11 @@ async def test_edgar_date_filter_regression(test_session_factory):
             ),
         )
     )
-    # Fetch and filter to the news-worthy, in-window subset.
+    # Act: fetch and filter to the news-worthy, in-window subset.
     async with httpx.AsyncClient() as client:
         filings = await fetch_edgar_filings(client, cik="320193", ticker="AAPL")
 
+    # Assert: only the recent, news-worthy filing survives, correctly normalized.
     assert len(filings) == 1
     assert "0001recent8k" in filings[0]["url"]  # dashes stripped from the accession number, by design
     assert filings[0]["category"] == "filing"
@@ -92,9 +94,11 @@ async def test_finnhub_maps_source_and_summary(test_session_factory):
             ],
         )
     )
+    # Act: fetch and normalize.
     async with httpx.AsyncClient() as client:
         articles = await fetch_finnhub_news(client, ticker="AAPL")
 
+    # Assert: Finnhub's fields land on this project's own normalized shape.
     assert len(articles) == 1
     assert articles[0]["outlet"] == "Yahoo"
     assert articles[0]["summary"] == "A short summary blurb."
@@ -134,28 +138,34 @@ async def test_get_embeddings_places_vectors_by_index_not_array_order(test_sessi
             },
         )
     )
+    # Act: request embeddings for two texts.
     async with httpx.AsyncClient() as client:
         embeddings = await get_embeddings(["first headline", "second headline"], client)
 
+    # Assert: each vector landed at its own text's position, not response array order.
     assert embeddings == [[0.1, 0.1], [0.9, 0.9]]
 
 
 @respx.mock
 async def test_get_embeddings_raises_typed_error_on_failure(test_session_factory):
+    # Arrange: mock an auth failure.
     respx.post("https://api.openai.com/v1/embeddings").mock(
         return_value=httpx.Response(401, json={"error": {"message": "Incorrect API key provided."}})
     )
+    # Act & assert: a 401 should surface as our own typed error, not a raw httpx exception.
     async with httpx.AsyncClient() as client:
         with pytest.raises(ProviderFetchError):
             await get_embeddings(["A real headline"], client)
 
 
 async def test_get_embeddings_empty_list_skips_the_network_call(test_session_factory):
-    # No respx mock registered at all -- if get_embeddings tried a real HTTP
+    # Arrange: no respx mock registered at all -- if get_embeddings tried a real HTTP
     # call for an empty batch, this would raise a connection error.
+    # Act: request embeddings for an empty batch.
     async with httpx.AsyncClient() as client:
         embeddings = await get_embeddings([], client)
 
+    # Assert: skipped the network call entirely, returning an empty result.
     assert embeddings == []
 
 
@@ -189,15 +199,17 @@ async def test_partial_failure_when_one_provider_errors(test_session_factory):
     )
     respx.get("https://finnhub.io/api/v1/company-news").mock(return_value=httpx.Response(500))
 
+    # Act: fetch from both providers in one run.
     result = await fetch_and_persist_headlines("AAPL", session_factory=test_session_factory)
 
-    # One provider ok, one error -> overall status should reflect the mix.
+    # Assert: one provider ok, one error -> overall status should reflect the mix.
     assert result["status"] == "partial_failure"
     assert result["providers"] == {"edgar": "ok", "finnhub": "error"}
 
 
 @respx.mock
 async def test_dedup_by_url_on_second_fetch(test_session_factory):
+    # Arrange: mock both providers with the same one filing/no-news response.
     respx.get("https://www.sec.gov/files/company_tickers.json").mock(
         return_value=httpx.Response(200, json=TICKERS_JSON)
     )
@@ -206,11 +218,11 @@ async def test_dedup_by_url_on_second_fetch(test_session_factory):
     )
     respx.get("https://finnhub.io/api/v1/company-news").mock(return_value=httpx.Response(200, json=[]))
 
-    # Fetch the same ticker twice, same mocked responses both times.
+    # Act: fetch the same ticker twice, same mocked responses both times.
     await fetch_and_persist_headlines("AAPL", session_factory=test_session_factory)
     await fetch_and_persist_headlines("AAPL", session_factory=test_session_factory)
 
-    # The second fetch should update the existing row, not duplicate it.
+    # Assert: the second fetch should update the existing row, not duplicate it.
     async with test_session_factory() as session:
         rows = (await session.execute(select(Headline).where(Headline.ticker == "AAPL"))).scalars().all()
     assert len(rows) == 1
@@ -224,9 +236,10 @@ async def test_no_company_row_when_both_providers_empty(test_session_factory):
     )
     respx.get("https://finnhub.io/api/v1/company-news").mock(return_value=httpx.Response(200, json=[]))
 
+    # Act: fetch a ticker neither provider has anything for.
     result = await fetch_and_persist_headlines("ZZZQX", session_factory=test_session_factory)
 
-    # No real data from either provider -> no companies row should be created at all.
+    # Assert: no real data from either provider -> no companies row should be created at all.
     assert result["headline_count"] == 0
     async with test_session_factory() as session:
         company = await session.get(Company, "ZZZQX")
@@ -257,9 +270,10 @@ async def test_company_row_created_with_null_cik_when_only_finnhub_has_data(test
         )
     )
 
+    # Act: fetch a ticker EDGAR doesn't recognize but Finnhub has real news for.
     result = await fetch_and_persist_headlines("FOREIGNCO", session_factory=test_session_factory)
 
-    # A row should still be created, just with cik/company_name left null.
+    # Assert: a row should still be created, just with cik/company_name left null.
     assert result["status"] == "success"
     async with test_session_factory() as session:
         company = await session.get(Company, "FOREIGNCO")
@@ -286,15 +300,17 @@ async def test_category_check_constraint_rejects_invalid_value(test_session_fact
 
 
 async def test_get_company_uses_cache_not_a_second_lookup(test_session_factory):
+    # Arrange: pre-seed a real, already-resolved Company row.
     async with test_session_factory() as session:
         session.add(Company(ticker="AAPL", cik="320193", company_name="Apple Inc."))
         await session.commit()
 
-    # No respx mock registered at all -- if get_company tried a real HTTP
+    # Act: no respx mock registered at all -- if get_company tried a real HTTP
     # call instead of reading the cache, this would raise a connection error.
     async with httpx.AsyncClient() as client:
         info = await get_company("AAPL", client, test_session_factory)
 
+    # Assert: the cached row's own values came back, untouched.
     assert info.cik == "320193"
     assert info.company_name == "Apple Inc."
 
@@ -348,4 +364,5 @@ async def test_story_primary_is_derived_as_earliest_published_headline(test_sess
         )
         primary = rows.scalar_one()
 
+    # Assert: the earlier-published headline won, despite being inserted second.
     assert primary.title == "Earlier headline"

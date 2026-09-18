@@ -1,10 +1,7 @@
 import type { MilvusCheck } from "../health";
 
-// Bespoke type, not CheckStatus -- Milvus has a genuine third real state
-// (spec 0003), same reasoning GroupingStatus already used for "skipped".
-// Laid out like StatusTile though (name + dot + label + detail), not
-// GroupingStatus's inline text line -- the spec calls for a tile matching
-// the other services, just with its own label/color mapping.
+// Bespoke type, not CheckStatus -- Milvus has a genuine third state (not_initialized, spec 0003).
+// Laid out like StatusTile (name + dot + label + detail), matching the other service tiles.
 const DOT_COLOR: Record<MilvusCheck["status"], string> = {
   ok: "bg-emerald-500",
   not_initialized: "bg-slate-400",

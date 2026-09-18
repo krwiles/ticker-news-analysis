@@ -56,9 +56,8 @@ async def _seed_headline_for_sentiment(
 
 @pytest.fixture(autouse=True)
 def no_retry_delay(monkeypatch):
-    # Real value (SENTIMENT_RETRY_DELAY_SECONDS) is a deliberate pause between attempts -- fine in
-    # production, but would make every retry test slow for no real signal. Autouse: no sentiment
-    # test benefits from waiting for real, and non-sentiment tests never read this constant at all.
+    # The real delay is fine in production but would make every retry test slow for no signal --
+    # autouse since no sentiment test benefits from waiting for it.
     monkeypatch.setattr(sentiment_module, "SENTIMENT_RETRY_DELAY_SECONDS", 0)
 
 
@@ -86,9 +85,11 @@ async def test_get_sentiment_returns_structured_score_gloss_rationale(test_sessi
 
 @respx.mock
 async def test_get_sentiment_raises_typed_error_on_failure(test_session_factory):
+    # Arrange: mock an auth failure.
     respx.post("https://api.openai.com/v1/chat/completions").mock(
         return_value=httpx.Response(401, json={"error": {"message": "Incorrect API key provided."}})
     )
+    # Act & assert: a 401 should surface as our own typed error, not a raw httpx exception.
     async with httpx.AsyncClient() as client:
         with pytest.raises(ProviderFetchError):
             await get_sentiment("A real headline", client)
@@ -117,9 +118,8 @@ def test_extract_relevant_filing_section_finds_real_content_and_stops_at_next_he
 
 
 def test_extract_relevant_filing_section_falls_back_to_document_start_when_incorporated_by_reference():
-    # Mirrors the one real filer found live (Friedman Industries) whose actual MD&A isn't in
-    # this document at all -- the real content living at the document's own start must be
-    # used instead of the reference-only Item 7 section.
+    # Mirrors a real filer (Friedman Industries) whose actual MD&A isn't in the document at all --
+    # the document's own start must be used instead of the reference-only Item 7 section.
     text = (
         "FORM 10-K ANNUAL REPORT. REAL BUSINESS CONTENT describing the company at the very start. "
         "Item 1. Business. More business description. "
@@ -146,20 +146,25 @@ def test_extract_relevant_filing_section_caps_length():
 
 @respx.mock
 async def test_get_filing_content_extracts_and_returns_section(test_session_factory):
+    # Arrange: mock a real filing document's HTML.
     respx.get("https://example.com/filing.htm").mock(
         return_value=httpx.Response(
             200, text="<html><body><p>Item 7. Management's Discussion. Real content.</p></body></html>"
         )
     )
+    # Act: fetch and extract.
     async with httpx.AsyncClient() as client:
         content = await get_filing_content("https://example.com/filing.htm", client)
 
+    # Assert: the real MD&A content survived the HTML-stripping/extraction pipeline.
     assert "Real content" in content
 
 
 @respx.mock
 async def test_get_filing_content_raises_typed_error_on_failure(test_session_factory):
+    # Arrange: mock a fetch failure.
     respx.get("https://example.com/filing.htm").mock(return_value=httpx.Response(404))
+    # Act & assert: surfaces as our own typed error, not a raw httpx exception.
     async with httpx.AsyncClient() as client:
         with pytest.raises(ProviderFetchError):
             await get_filing_content("https://example.com/filing.htm", client)
@@ -167,8 +172,7 @@ async def test_get_filing_content_raises_typed_error_on_failure(test_session_fac
 
 @pytest.fixture
 def openai_configured(monkeypatch):
-    # Real test/CI environments never have a real key configured -- see
-    # test_compute_and_persist_sentiment_skipped_when_not_configured, which
+    # Real test/CI environments never have a real key -- the "skipped when not configured" test
     # deliberately does NOT use this fixture.
     monkeypatch.setattr(settings, "openai_api_key", "test-key-not-real")
 
@@ -183,13 +187,16 @@ def _sentiment_response(score: int, gloss: str, rationale: str) -> httpx.Respons
 
 @respx.mock
 async def test_compute_and_persist_sentiment_persists_real_score(test_session_factory, openai_configured):
+    # Arrange: one real, pending headline, OpenAI mocked to return a real score.
     await _seed_headline_for_sentiment(test_session_factory, "AAPL", "https://example.com/sent-1")
     respx.post("https://api.openai.com/v1/chat/completions").mock(
         return_value=_sentiment_response(90, "bullish", "Strong results.")
     )
 
+    # Act: run the job.
     result = await compute_and_persist_sentiment("AAPL", test_session_factory)
 
+    # Assert: the real score, gloss, and rationale are persisted.
     assert result == {"status": "ok"}
     async with test_session_factory() as session:
         headline = (await session.execute(select(Headline).where(Headline.url == "https://example.com/sent-1"))).scalar_one()
@@ -323,6 +330,7 @@ async def test_compute_and_persist_sentiment_processes_newest_headline_first(tes
 
 @respx.mock
 async def test_compute_and_persist_sentiment_retries_previously_errored_headline(test_session_factory, openai_configured):
+    # A headline already marked "error" from some earlier run -- a later request must retry it.
     await _seed_headline_for_sentiment(test_session_factory, "AAPL", "https://example.com/sent-retry", sentiment_status="error")
     respx.post("https://api.openai.com/v1/chat/completions").mock(
         return_value=_sentiment_response(85, "bullish", "Recovered on retry.")
@@ -353,9 +361,8 @@ async def test_compute_and_persist_sentiment_excludes_errored_member_from_story_
     )
 
     def _mixed_response(request: httpx.Request) -> httpx.Response:
-        # Keyed on request content, not call order -- the two headlines run concurrently (and the
-        # failing one now gets retried once too), so which physically arrives first isn't
-        # guaranteed the way a plain sequential side_effect list would assume.
+        # Keyed on request content, not call order -- the two headlines run concurrently, so which
+        # physically arrives first isn't guaranteed the way a fixed side_effect list would assume.
         if "Good headline" in request.content.decode():
             return _sentiment_response(75, "bullish", "Real score.")
         return httpx.Response(401)

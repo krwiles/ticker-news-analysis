@@ -33,6 +33,7 @@ export function StatusPage() {
 
     poll(); // fire once immediately, don't wait POLL_INTERVAL_MS for the first result
     const id = setInterval(poll, POLL_INTERVAL_MS);
+    // Cleanup on unmount: stop the timer and flag any still-in-flight poll's result as stale.
     return () => {
       cancelled = true;
       clearInterval(id);

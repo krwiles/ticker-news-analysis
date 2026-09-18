@@ -6,16 +6,15 @@ interface StoryProps {
   story: StoryType;
 }
 
-// One Story: its primary headline in full, plus (only when there are any)
-// an expandable list of other members behind a native disclosure -- no
-// local state needed, the browser already handles open/closed.
+// One Story: its primary headline in full, plus an expandable list of other members (when any)
+// behind a native disclosure -- no local state needed, the browser handles open/closed.
 export function Story({ story }: StoryProps) {
-  // A Story of one gets zero extra chrome -- gated on member count, not on
-  // whether sentiment_average happens to be present (it's returned, if
-  // trivially, even for a lone member -- see lesson 28/29 planning and
-  // CONTEXT.md's own "more than one member" definition of the aggregate).
+  // A Story of one gets zero extra chrome -- gated on member count, not on whether
+  // sentiment_average is present (backend returns it trivially even for a lone member) -- see CONTEXT.md.
   const isMultiMember = story.other_members.length > 0;
 
+  // Reused below whether or not this Story ends up wrapped -- the primary renders
+  // identically either way, no special treatment inside a multi-member Story.
   const primaryCard = <HeadlineCard headline={story.primary} />;
 
   if (!isMultiMember) {

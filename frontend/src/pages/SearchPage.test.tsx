@@ -6,9 +6,7 @@ import * as searchModule from "../search";
 import { SearchPage } from "./SearchPage";
 
 // Module-mocked one layer up from search.test.ts -- SearchPage just consumes fetchSearch/fetchSearchStatus.
-// hasPendingSentiment is a pure function, kept real (via importOriginal) rather than mocked -- it's
-// exactly the logic the polling tests below need to exercise for real, not stub out.
-// Frontend analogue of the backend's dependency_overrides (test_search_endpoint.py).
+// hasPendingSentiment is a pure function, kept real (importOriginal) since the polling tests need it.
 vi.mock("../search", async (importOriginal) => {
   const actual = await importOriginal<typeof searchModule>();
   return {
@@ -83,7 +81,10 @@ describe("SearchPage", () => {
   });
 
   it("renders no results, no status, and no Refresh button before any search happens", () => {
+    // Arrange/Act: render with no search performed yet.
     renderSearchPage();
+
+    // Assert: nothing from a completed search is showing.
     expect(screen.queryByRole("list")).not.toBeInTheDocument();
     expect(screen.queryByText(/searching/i)).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /refresh/i })).not.toBeInTheDocument();
@@ -98,9 +99,11 @@ describe("SearchPage", () => {
       }),
     );
 
+    // Act: kick off a search that won't resolve yet.
     renderSearchPage();
     await searchFor("AAPL");
 
+    // Assert: the loading state shows while the fetch is still pending.
     expect(screen.getByText(/searching/i)).toBeInTheDocument();
 
     // Now let the fetch actually complete.
@@ -117,6 +120,7 @@ describe("SearchPage", () => {
   });
 
   it("renders each day as its own section, never merged", async () => {
+    // Arrange: two days, each with one distinctly-named headline.
     fetchSearch.mockResolvedValue(
       response({
         days: [
@@ -143,9 +147,11 @@ describe("SearchPage", () => {
       }),
     );
 
+    // Act
     renderSearchPage();
     await searchFor("AAPL");
 
+    // Assert: each section holds only its own day's headline, not the other day's.
     const todaySection = (await screen.findByRole("heading", { name: "Today" })).closest("section")!;
     expect(within(todaySection).getByRole("link", { name: "Today's headline" })).toBeInTheDocument();
     expect(within(todaySection).queryByRole("link", { name: "Earlier headline" })).not.toBeInTheDocument();
@@ -156,6 +162,7 @@ describe("SearchPage", () => {
   });
 
   it("shows Today's own empty message when Today is empty but an earlier day has entries", async () => {
+    // Arrange: Today has no Stories, but an earlier day does.
     fetchSearch.mockResolvedValue(
       response({
         days: [
@@ -169,9 +176,11 @@ describe("SearchPage", () => {
       }),
     );
 
+    // Act
     renderSearchPage();
     await searchFor("AAPL");
 
+    // Assert: Today shows the empty message; the earlier day still shows its own headline.
     const todaySection = (await screen.findByRole("heading", { name: "Today" })).closest("section")!;
     expect(within(todaySection).getByText("No headlines today.")).toBeInTheDocument();
 
@@ -180,11 +189,14 @@ describe("SearchPage", () => {
   });
 
   it("shows the human-readable status message, not the raw status value", async () => {
+    // Arrange
     fetchSearch.mockResolvedValue(response({ status: "partial_failure", providers: { edgar: "ok", finnhub: "error" } }));
 
+    // Act
     renderSearchPage();
     await searchFor("AAPL");
 
+    // Assert: the friendly message shows, the raw enum value never does.
     await waitFor(() => {
       expect(screen.getByText(/some results may be missing/i)).toBeInTheDocument();
     });
@@ -192,19 +204,24 @@ describe("SearchPage", () => {
   });
 
   it("shows the grouping status underneath the response status", async () => {
+    // Arrange
     fetchSearch.mockResolvedValue(response({ grouping: "skipped" }));
 
+    // Act
     renderSearchPage();
     await searchFor("AAPL");
 
+    // Assert
     await waitFor(() => {
       expect(screen.getByText(/isn't configured/i)).toBeInTheDocument();
     });
   });
 
   it("shows a Refresh button once results exist, and clicking it re-fetches the same ticker", async () => {
+    // Arrange
     fetchSearch.mockResolvedValue(response());
 
+    // Act: run the initial search.
     renderSearchPage();
     await searchFor("AAPL");
 
@@ -215,21 +232,26 @@ describe("SearchPage", () => {
     const user = userEvent.setup();
     await user.click(refreshButton);
 
+    // Assert: Refresh re-fetches the same ticker.
     expect(fetchSearch).toHaveBeenCalledWith("AAPL");
   });
 
   it("shows an error message when fetchSearch rejects, not a crash", async () => {
+    // Arrange
     fetchSearch.mockRejectedValue(new Error("/api/search responded 500"));
 
+    // Act
     renderSearchPage();
     await searchFor("AAPL");
 
+    // Assert
     await waitFor(() => {
       expect(screen.getByText(/couldn't reach the api/i)).toBeInTheDocument();
     });
   });
 
   it("loads automatically when the URL already has a ticker param -- the data-loading pattern", async () => {
+    // Arrange
     fetchSearch.mockResolvedValue(
       response({
         days: [
@@ -242,10 +264,11 @@ describe("SearchPage", () => {
       }),
     );
 
-    // No searchFor() call -- nothing is typed or clicked. The URL alone
+    // Act: no searchFor() call -- nothing is typed or clicked. The URL alone
     // should be enough to trigger a fetch.
     renderSearchPage(["/search?ticker=AAPL"]);
 
+    // Assert
     await waitFor(() => {
       expect(fetchSearch).toHaveBeenCalledWith("AAPL");
     });
@@ -255,27 +278,26 @@ describe("SearchPage", () => {
   });
 
   it("still functions when the URL's ticker is lowercase -- case is not enforced on the read path", async () => {
+    // Arrange
     fetchSearch.mockResolvedValue(response());
 
+    // Act
     renderSearchPage(["/search?ticker=aapl"]);
 
-    // Passed straight through, unmodified -- the backend (search.py's
+    // Assert: passed straight through, unmodified -- the backend (search.py's
     // ticker.upper()) is what actually normalizes it, not this component.
     await waitFor(() => {
       expect(fetchSearch).toHaveBeenCalledWith("aapl");
     });
   });
 
-  // First frontend tests in this codebase exercising a timer-driven effect.
-  // shouldAdvanceTime keeps real-time-based utilities (RTL's own waitFor)
-  // working normally, while vi.advanceTimersByTime still lets the poll
-  // interval itself be fast-forwarded instantly instead of waiting 5 real
-  // seconds per tick.
   // A day/story wrapping a single headline, for building minimal `days` fixtures below.
   function dayWith(h: searchModule.Headline): searchModule.DayGroup[] {
     return [{ date: "2026-09-17", is_today: true, stories: [story({ primary: h })] }];
   }
 
+  // First frontend tests exercising a timer-driven effect -- shouldAdvanceTime keeps real-time
+  // utilities (RTL's waitFor) working while advanceTimersByTime fast-forwards the poll interval.
   describe("sentiment polling", () => {
     afterEach(() => {
       vi.useRealTimers();
@@ -367,10 +389,8 @@ describe("SearchPage", () => {
     });
 
     it("keeps polling even when the page-level status reads error, as long as another headline is still pending", async () => {
-      // Arrange: a real, deliberate mixed case -- one headline already permanently failed (masking the
-      // page-level status to "error", lesson 26's own priority order), but a second headline in the same
-      // batch hasn't been attempted yet. A poll driven off the coarse `sentiment` field alone would never
-      // start here, silently stranding that second headline's eventual result.
+      // Arrange: one headline already permanently failed (masking page-level status to "error"), but a
+      // second in the same batch hasn't been attempted yet -- polling off the coarse field alone would strand it.
       vi.useFakeTimers({ shouldAdvanceTime: true });
       fetchSearch.mockResolvedValue(
         response({
@@ -440,9 +460,8 @@ describe("SearchPage", () => {
       });
       expect(fetchSearchStatus).not.toHaveBeenCalled();
 
-      // Act: click Refresh -- the retried headline is now genuinely pending again (status reset to null
-      // server-side, same as _seed_headline_for_sentiment's own "error" -> retry path). fireEvent, not
-      // userEvent, to avoid userEvent's own real-timer-based internals fighting the fake timers here.
+      // Act: click Refresh -- the retried headline is pending again server-side. fireEvent, not userEvent,
+      // to avoid userEvent's own real-timer internals fighting the fake timers here.
       fetchSearch.mockResolvedValueOnce(response({ sentiment: "error", days: dayWith(headline()) }));
       await act(async () => {
         fireEvent.click(screen.getByRole("button", { name: /refresh/i }));

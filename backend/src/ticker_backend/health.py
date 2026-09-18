@@ -18,12 +18,8 @@ from ticker_backend.config import settings
 from ticker_backend.db import engine as default_engine
 from ticker_backend.milvus_client import STORY_PRIMARIES_COLLECTION
 
-# Must come after the ticker_backend imports above, not just alphabetized
-# with the other third-party imports -- pymilvus's own import unconditionally
-# calls load_dotenv() (pymilvus/settings.py), which can inject this repo's
-# root .env (meant for docker-compose/dbmate) into os.environ and corrupt
-# DATABASE_URL for Settings() if it hasn't been constructed yet. Verified
-# live: importing pymilvus first breaks create_async_engine's URL parsing.
+# Must come after the ticker_backend imports above -- pymilvus's own import unconditionally
+# loads this repo's root .env, which can corrupt DATABASE_URL if it happens first (verified live).
 from pymilvus import MilvusClient
 
 log = structlog.get_logger()
@@ -39,14 +35,9 @@ MILVUS_CHECK_TIMEOUT_SECONDS = 2.0
 
 
 async def check_db(engine: AsyncEngine | None = None) -> dict:
-    """A real query, not just "is the connection object truthy" -- SELECT 1
-    is the cheapest possible proof the database is actually answering.
-    Also reports a row count per app table (spec 0004) -- named explicitly
-    so dbmate's own schema_migrations table never appears here. A count
-    failure falls through to the same except below as a connection
-    failure -- no new status for it (spec 0004's own Goals). `engine` is
-    injectable for tests, same convention as check_milvus's `client` --
-    the real default_engine only resolves inside the docker network."""
+    """SELECT 1, the cheapest real proof the database is answering, plus a row count per app
+    table (spec 0004), named explicitly so dbmate's own schema_migrations table never appears.
+    `engine` is injectable for tests, same convention as check_milvus's `client`."""
     engine = engine or default_engine
     try:
         async with engine.connect() as conn:
@@ -61,9 +52,8 @@ async def check_db(engine: AsyncEngine | None = None) -> dict:
                     )
                 )
             ).one()
-        # One line per table (not one joined line -- wraps awkwardly at
-        # this width) -- StatusTile splits `detail` on "\n" to render each
-        # as its own line. Always plural, even at 1 (spec 0004).
+        # One line per table -- StatusTile splits `detail` on "\n" to render each on its own
+        # line. Always plural, even at 1 (spec 0004).
         detail = f"{counts.companies} companies\n{counts.headlines} headlines\n{counts.stories} stories"
         return {"status": "ok", "detail": detail}
     except Exception as exc:  # noqa: BLE001 - report any failure, don't crash the health check

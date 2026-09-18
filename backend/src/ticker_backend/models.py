@@ -112,6 +112,7 @@ class Story(Base):
             # First real member -- no prior average to update from.
             self.sentiment_average = float(score)
         else:
+            # Fold the new score into the running average without storing every past score.
             new_count = self.sentiment_score_count + 1
             self.sentiment_average += (score - self.sentiment_average) / new_count
         self.sentiment_score_count += 1

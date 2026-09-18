@@ -14,11 +14,8 @@ const COLOR: Record<SentimentEnum, string> = {
   negative: "bg-red-100 text-red-700",
 };
 
-// Shared by HeadlineCard and Story -- one visual language for "resolved" and
-// "not yet resolved" sentiment, used at both the per-headline and the
-// Story-aggregate level. Collapses skipped/error/still-pending into a single
-// grey "Pending" bucket -- the *why* is explained once, page-level, by
-// SentimentStatus, not repeated per item (lesson 29 planning, Q1).
+// Shared by HeadlineCard and Story -- one visual language for resolved vs. pending sentiment.
+// Collapses skipped/error/pending into one grey "Pending" bucket; the why lives in SentimentStatus, not here.
 export function SentimentPill({ enumValue, score, gloss }: SentimentPillProps) {
   if (enumValue === null || score === null) {
     return (

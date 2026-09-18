@@ -13,6 +13,7 @@ export function SearchBar({ onSearch, disabled, initialValue }: SearchBarProps) 
 
   function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault(); // stop the browser's own full-page-reload form submission
+    // Normalize so a purely-whitespace entry doesn't count as real input below.
     const trimmed = ticker.trim();
     // Silently ignores empty/whitespace input -- deliberate, no reason to fire a request that'd come back empty.
     if (trimmed) {

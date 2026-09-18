@@ -40,7 +40,7 @@ async def fetch_headlines_job(ctx: dict, ticker: str) -> dict:
 
 async def sentiment_job(ctx: dict, ticker: str) -> dict:
     """Thin ARQ wrapper, same shape as fetch_headlines_job -- the real logic
-    stays framework-agnostic in providers.py. Unlike fetch_headlines_job,
+    stays framework-agnostic in sentiment.py. Unlike fetch_headlines_job,
     /api/search enqueues this without awaiting its result (lesson 26/ADR
     0014) -- it's a separate, decoupled job, not a step inside the fetch."""
     return await compute_and_persist_sentiment(ticker)

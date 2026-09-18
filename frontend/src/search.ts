@@ -20,16 +20,14 @@ export interface Headline {
   sentiment_enum: SentimentEnum | null; // derived server-side from sentiment_score, never stored
 }
 
-// One real-world event's coverage -- primary renders in full, other_members
-// (if any) sit behind an expandable list. story_id is null when grouping
-// was skipped or failed (ADR 0012) -- still its own Story, never dropped.
+// One real-world event's coverage -- primary renders in full, other_members (if any) sit behind
+// an expandable list. story_id is null when grouping was skipped/failed (ADR 0012), never dropped.
 export interface Story {
   story_id: string | null;
   primary: Headline;
   other_members: Headline[];
-  // The average of this Story's own members' scores -- null until at least
-  // one member resolves (lesson 28). Present even for a Story of one, but
-  // the UI only surfaces it once other_members is non-empty (CONTEXT.md).
+  // Average of this Story's members' scores -- null until at least one resolves. Present even
+  // for a Story of one, but the UI only surfaces it once other_members is non-empty (CONTEXT.md).
   sentiment_average: number | null;
   sentiment_enum: SentimentEnum | null;
 }
@@ -42,10 +40,8 @@ export interface DayGroup {
   stories: Story[];
 }
 
-// Page-level status of the fire-and-forget sentiment job -- a distinct value
-// domain from Headline/Story's own sentiment_enum (CONTEXT.md, search.py).
-// "processing": a real, genuinely-in-progress state -- unlike grouping, which
-// always finishes within the same request that ran it.
+// Page-level status of the fire-and-forget sentiment job -- distinct from Headline/Story's own
+// sentiment_enum. "processing" is real here, unlike grouping (always finishes within the request).
 export type SentimentStatus = "ok" | "skipped" | "error" | "processing";
 
 export interface SearchResponse {
@@ -61,24 +57,15 @@ export interface SearchResponse {
   days: DayGroup[];
 }
 
-// The shape /api/search/status returns -- deliberately narrower than
-// SearchResponse (no ticker/status/providers/grouping, since this endpoint
-// never re-runs the fetch, only re-reads current sentiment state). A poller
-// must merge these two keys into existing results, never replace the whole
-// object (lesson 26/29).
+// Deliberately narrower than SearchResponse (no ticker/status/providers/grouping -- this endpoint
+// only re-reads sentiment state). A poller must merge these keys in, never replace the object.
 export interface SearchStatusResponse {
   sentiment: SentimentStatus;
   days: DayGroup[];
 }
 
-// True while at least one Headline in these days hasn't had a real sentiment
-// attempt yet (sentiment_status still null) -- the actual "is there more
-// still coming" signal a poller should watch, not the coarse page-level
-// `sentiment` status. That field reports "error" the moment any one Headline
-// permanently fails, even while others in the same batch are still
-// resolving (lesson 26's own deliberate priority order, so a real failure is
-// never masked) -- using it alone to decide whether to keep polling would
-// stop early and miss those still-pending updates.
+// True while any Headline still has sentiment_status === null -- the real "more coming" signal, not
+// the coarse `sentiment` status (which reports "error" on one failure while others still resolve).
 export function hasPendingSentiment(days: DayGroup[]): boolean {
   return days.some((day) =>
     day.stories.some(
@@ -102,6 +89,8 @@ export async function fetchSearch(ticker: string): Promise<SearchResponse> {
 // (search.py's search_status route structurally can't; see lesson 26).
 export async function fetchSearchStatus(ticker: string): Promise<SearchStatusResponse> {
   const res = await fetch(`${API_BASE_URL}/api/search/status?ticker=${encodeURIComponent(ticker)}`);
+  // Treat any non-2xx as a failure the caller can catch, rather than
+  // returning a body that doesn't match SearchStatusResponse's shape.
   if (!res.ok) {
     throw new Error(`/api/search/status responded ${res.status}`);
   }

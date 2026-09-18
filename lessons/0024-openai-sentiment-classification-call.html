@@ -82,7 +82,7 @@ Company Y schedules annual shareholder mtg. -> score: 50, gloss: "routine"</code
   <h2>A second real bug, found while trying to verify the first fix</h2>
   <div class="callout">
     <p>
-      A standalone script importing <code>get_sentiment</code> directly failed immediately, before ever
+      A standalone script exercising the new sentiment code failed immediately, before ever
       reaching OpenAI — the exact same <code>NoSuchModuleError</code> bug found and fixed in
       <code>health.py</code> during an earlier lesson. <code>providers.py</code> had the identical root cause:
       <code>pymilvus</code>'s own import unconditionally loads this repo's root <code>.env</code> (meant for

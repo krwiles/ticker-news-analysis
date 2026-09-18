@@ -98,7 +98,7 @@ for coro in asyncio.as_completed(tasks):
     nothing was reading it:
   </p>
   <pre><code>log.warning(
-    "providers.sentiment_failed",
+    "sentiment.sentiment_failed",
     error_type=type(error.__cause__ or error).__name__,
     error=str(error),
 )</code></pre>

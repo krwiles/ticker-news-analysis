@@ -22,14 +22,8 @@ from ticker_backend.db import async_session_factory
 from ticker_backend.milvus_client import STORY_PRIMARIES_COLLECTION, ensure_story_primaries_collection, get_milvus_client
 from ticker_backend.models import Company, Headline, Story
 
-# Must come after the ticker_backend imports above, not just alphabetized
-# with the other third-party imports -- pymilvus's own import unconditionally
-# calls load_dotenv() (pymilvus/settings.py), which can inject this repo's
-# root .env (meant for docker-compose/dbmate) into os.environ and corrupt
-# DATABASE_URL for Settings() if it hasn't been constructed yet. Same
-# landmine found and fixed in health.py during spec 0003 -- verified live
-# here too: a standalone script importing this module directly broke until
-# reordered the same way.
+# Must come after the ticker_backend imports above -- pymilvus's own import unconditionally
+# loads this repo's root .env, corrupting DATABASE_URL. Same landmine as health.py's, verified live.
 from pymilvus import MilvusException
 
 log = structlog.get_logger()

@@ -134,9 +134,8 @@ def build_daily_view(headlines: list[Headline], now: datetime, stories_by_id: di
     stories_by_id = stories_by_id or {}
     today_date = now.astimezone(EASTERN).date()
 
-    # Bucket raw headlines by their own Eastern day first -- a Story's members
-    # already share one day by construction (ADR 0006), so grouping within
-    # each day bucket below can't accidentally split or merge across days.
+    # Bucket raw headlines by their own Eastern day first -- a Story's members already share
+    # one day by construction (ADR 0006), so grouping within a bucket can't cross days.
     by_day: dict = {}
     for headline in headlines:
         day = headline.published_at.astimezone(EASTERN).date()
@@ -180,9 +179,8 @@ async def _load_search_results(ticker: str, session_factory) -> tuple[list[dict]
         )
         headlines = list(rows.scalars())
 
-        # Every Story these headlines reference (lesson 28) -- a plain second query, not an ORM
-        # relationship/join, matching this codebase's existing "no SQLAlchemy relationship()
-        # annotations" convention (real FKs live in the migration only).
+        # Every Story these headlines reference -- a plain second query, not an ORM relationship,
+        # matching this codebase's "no SQLAlchemy relationship() annotations" convention.
         story_ids = {h.story_id for h in headlines if h.story_id is not None}
         stories_by_id: dict = {}
         if story_ids:
@@ -224,11 +222,11 @@ async def search(
         log.warning("search.job_failed", ticker=ticker, error=f"{type(exc).__name__}: {exc}")
         status = "complete_failure"
 
-    # Fire-and-forget (lesson 26/ADR 0014) -- enqueuing is awaited (fast, just submits to the
-    # queue), but its *result* never is. Sentiment fills in after this response returns; the
-    # frontend polls /api/search/status, not this endpoint, to find out when.
+    # Fire-and-forget (ADR 0014) -- enqueuing is awaited but its *result* never is; the frontend
+    # polls /api/search/status, not this endpoint, to find out when sentiment fills in.
     await arq_redis.enqueue_job("sentiment_job", ticker)
 
+    # Now that fresh data is in Postgres, query it and build the response.
     days, sentiment_status = await _load_search_results(ticker, session_factory)
 
     return {
@@ -250,6 +248,7 @@ async def search_status(ticker: str, session_factory=Depends(get_session_factory
     for sentiment doesn't re-trigger a full EDGAR/Finnhub/embeddings/grouping pass on every tick.
     No status/providers/grouping in the response -- those only ever exist as the fetch job's own
     return value, never persisted, so there's nothing here to report them from."""
+    # Same case-normalization as search() above.
     ticker = ticker.upper()
     days, sentiment_status = await _load_search_results(ticker, session_factory)
     return {"sentiment": sentiment_status, "days": days}

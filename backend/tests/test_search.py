@@ -162,6 +162,7 @@ def test_story_dict_includes_aggregate_when_present():
     story_id = uuid4()
     first = _headline(datetime(2026, 9, 10, 10, 0, tzinfo=timezone.utc), title="first", story_id=story_id)
     second = _headline(datetime(2026, 9, 10, 12, 0, tzinfo=timezone.utc), title="second", story_id=story_id)
+    # An already-resolved aggregate -- this test is about pass-through, not computing it.
     stories_by_id = {story_id: _story(sentiment_average=64.0, sentiment_score_count=2)}
 
     day = _only_day(build_daily_view([first, second], now, stories_by_id))

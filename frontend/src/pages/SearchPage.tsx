@@ -7,9 +7,8 @@ import { SearchStatus } from "../components/SearchStatus";
 import { SentimentStatus } from "../components/SentimentStatus";
 import { fetchSearch, fetchSearchStatus, hasPendingSentiment, type SearchResponse } from "../search";
 
-// Same cadence as StatusPage's own health poll -- no evidence sentiment resolves
-// meaningfully faster or slower than a health check, so no reason to invent a
-// different number without one (lesson 29 planning).
+// Same cadence as StatusPage's own health poll -- no evidence sentiment resolves at a
+// meaningfully different pace, so no reason to invent a different number.
 const SENTIMENT_POLL_INTERVAL_MS = 5000;
 
 export function SearchPage() {
@@ -48,18 +47,10 @@ export function SearchPage() {
     }
   }, [urlTicker]);
 
-  // Polls /api/search/status (never re-enqueues the fetch job -- see search.py's
-  // search_status route) while any Headline still hasn't had a real sentiment
-  // attempt, and stops on its own once every one of them has. Deliberately keyed
-  // on the whole `results` object, not narrowed fields: any fresh fetch --
-  // the initial search, a poll tick, or a manual Refresh -- produces a new object,
-  // so the effect re-evaluates from scratch every time. That's what makes a
-  // Refresh reliably restart polling even when it lands back on the same overall
-  // status (e.g. "error" both before and after) -- a narrower dependency list
-  // wouldn't have noticed anything changed. No immediate first tick (unlike
-  // StatusPage): results here are always already fresh, so firing again at t=0
-  // would just re-fetch the same data.
+  // Polls /api/search/status while any Headline still lacks sentiment, stopping once all do.
+  // Keyed on the whole `results` object so a Refresh restarts polling even at the same status.
   useEffect(() => {
+    // Nothing to poll for yet, or everything already has a real sentiment -- skip.
     if (!results || !hasPendingSentiment(results.days)) {
       return;
     }
@@ -81,6 +72,7 @@ export function SearchPage() {
     }
 
     const id = setInterval(poll, SENTIMENT_POLL_INTERVAL_MS);
+    // Cleanup: stop the timer and flag any still-in-flight poll's result as stale.
     return () => {
       cancelled = true;
       clearInterval(id);

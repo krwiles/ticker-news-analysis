@@ -9,12 +9,8 @@ export interface Check {
   age_seconds?: number; // worker only -- how long ago its last heartbeat was written
 }
 
-// Milvus has a genuine third real state ("not_initialized" -- reachable,
-// but the collection hasn't been created yet, e.g. no OPENAI_API_KEY
-// configured) that isn't an error, so it gets its own type rather than
-// stretching CheckStatus (spec 0003) -- same reasoning as SearchResponse's
-// own "grouping" field. "unknown" is frontend-only, the pre-first-poll
-// fallback: the backend itself never emits it.
+// Milvus has a genuine third real state ("not_initialized" -- reachable, collection not created
+// yet) that isn't an error, so it gets its own type instead of stretching CheckStatus (spec 0003).
 export type MilvusCheck =
   | { status: "ok"; vector_count: number }
   | { status: "not_initialized" }

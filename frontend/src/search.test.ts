@@ -31,6 +31,7 @@ describe("fetchSearch", () => {
   });
 
   it("returns the parsed JSON body on a successful response", async () => {
+    // Stub a successful response.
     vi.stubGlobal(
       "fetch",
       vi.fn().mockResolvedValue({ ok: true, json: async () => okResponse }),
