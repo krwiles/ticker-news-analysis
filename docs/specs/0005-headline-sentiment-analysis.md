@@ -43,8 +43,11 @@ closely, without reading everything closely first.
   sit unchanged until the 200th finishes.
 - That catch-up is visually invisible except for the sentiment itself: nothing else on the page flashes,
   reflows, or reorders while it happens (see Outputs below for the exact visible shape).
-- Headlines are computed newest-published first. A user checking in on a search cares most about the most
-  recent news; resolving it first means the most relevant sentiment appears soonest, not last.
+- Headlines are submitted for computation newest-published first. A user checking in on a search cares most
+  about the most recent news; resolving it first means the most relevant sentiment appears soonest, not last.
+  Submission order, not a strict resolution-order guarantee: computation runs under bounded concurrency (see
+  Technical approach), so several headlines are in flight at once and the exact order they finish in can vary
+  with individual call latency — newest-first is a strong bias in practice, not an exact sequence.
 - A single failed attempt gets one automatic retry within the same job run before being marked `error` —
   real evidence (live worker logs) shows most failures are transient (a timeout under concurrent load, not
   a permanent rejection), so a lone failure isn't yet reason to give up. This is separate from, and in
@@ -108,7 +111,7 @@ as small text beneath it inside the same sub-card. `summary`, when present, stil
 below both columns.
 
 The sub-card itself is always present, even while pending — only its contents change once resolved. While
-pending, the pill inside it shows as an empty, greyed-out placeholder with no gloss or score yet, and no
+pending, the pill inside it shows as a greyed-out "Pending" placeholder with no gloss or score yet, and no
 rationale line is shown. Once computed, the pill updates in place to its real color, gloss, and score, and
 the rationale text appears beneath it inside the same sub-card — no other part of the page flashes,
 reflows, or reorders when this happens.

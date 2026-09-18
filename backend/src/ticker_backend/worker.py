@@ -14,7 +14,8 @@ from arq.connections import RedisSettings
 from ticker_backend.config import settings
 from ticker_backend.health import WORKER_HEARTBEAT_KEY
 from ticker_backend.logging import configure_logging
-from ticker_backend.providers import compute_and_persist_sentiment, fetch_and_persist_headlines
+from ticker_backend.providers import fetch_and_persist_headlines
+from ticker_backend.sentiment import compute_and_persist_sentiment
 
 configure_logging()
 log = structlog.get_logger()

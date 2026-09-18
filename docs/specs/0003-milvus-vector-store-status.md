@@ -56,8 +56,9 @@ The status page shows a new tile, positioned after the existing `Worker` tile: `
 
 - **Connected** — Milvus is reachable and `story_primaries` exists; detail line shows the current vector count
   (e.g. "142 stories indexed").
-- **Error** — Milvus is unreachable, or reachable but the collection doesn't exist yet; the detail line says
-  which.
+- **Not yet initialized** — Milvus is reachable, but `story_primaries` hasn't been created yet — a real,
+  expected state (e.g. grouping has never run, or `OPENAI_API_KEY` isn't configured), not an error.
+- **Error** — Milvus is unreachable; the detail line reports the real failure.
 - **Unknown** — the same fallback the other tiles already show before the first successful poll resolves.
 
 ## Success criteria
@@ -66,8 +67,8 @@ The status page shows a new tile, positioned after the existing `Worker` tile: `
   `story_primaries`'s real row count, verifiable by querying Milvus directly.
 - Stopping the Milvus container causes the tile to flip to Error within one polling interval, without the rest
   of the status page (or `/api/health`) breaking or hanging.
-- A fresh environment where the collection hasn't been created yet shows a distinct Error detail from "Milvus
-  unreachable" — an operator can tell the two failure modes apart.
+- A fresh environment where the collection hasn't been created yet shows the distinct Not yet initialized
+  state, not Error — an operator can tell "nothing has run yet" apart from a real failure.
 - The existing api/db/redis/worker tiles are unaffected — this is a strict addition, not a reshape of the
   existing health check.
 

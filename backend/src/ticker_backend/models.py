@@ -87,10 +87,10 @@ class Story(Base):
 
     `sentiment_average`/`sentiment_score_count` (spec 0005 / ADR 0014) are
     an incrementally-updated running average, not a live `AVG(...)` query --
-    a deliberate exception to this class's own no-redundant-state precedent,
-    chosen because it's the option requiring the least new code. Only
-    members that reach `sentiment_status = 'ok'` ever count -- `skipped`/
-    `error` members are excluded entirely, never treated as zero.
+    a deliberate exception to this class's own no-redundant-state precedent
+    (see ADR 0014). Only members that reach `sentiment_status = 'ok'` ever
+    count -- `skipped`/`error` members are excluded entirely, never treated
+    as zero.
     """
 
     __tablename__ = "stories"
@@ -104,3 +104,14 @@ class Story(Base):
 
     def __repr__(self) -> str:
         return f"Story(ticker={self.ticker!r})"
+
+    def record_sentiment(self, score: int) -> None:
+        """Folds one more real member's score into the running average (spec 0005 / ADR 0014)
+        -- only ever called for an `ok` member, so `skipped`/`error` scores never reach here."""
+        if self.sentiment_score_count == 0:
+            # First real member -- no prior average to update from.
+            self.sentiment_average = float(score)
+        else:
+            new_count = self.sentiment_score_count + 1
+            self.sentiment_average += (score - self.sentiment_average) / new_count
+        self.sentiment_score_count += 1

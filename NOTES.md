@@ -498,6 +498,21 @@ endpoint, endpoint before UI.
     with `min-w-0` on both columns plus `break-words` as a safety net. Spec 0005 rewritten at each step to
     track the real, current layout. Arc 5 complete.
 
+**Post-Arc-5 code review** (not a lesson): `code-review` skill run against everything since lesson 22,
+focused on the sentiment code. Standards axis flagged `compute_and_persist_sentiment` (providers.py) as a
+real Long Function/Divergent Change (four separable concerns in ~130 lines) and a minor Feature Envy in its
+inline Story-average update; Spec axis found the sentiment pill's "Pending" label and Milvus's
+`not_initialized` status were both deliberate, already-shipped decisions that specs 0005/0003's own text had
+never been updated to match, plus the newest-first processing guarantee being submission-order only, not a
+resolution-order guarantee, under bounded concurrency. All four addressed: sentiment code (the OpenAI call,
+filing-content extraction, and the job itself) extracted into a new flat `sentiment.py` module — consistent
+with the same "flat module, not a package" precedent that already split `search.py`/`worker.py` out of
+`providers.py`, per `docs/plans/0007-*.md` — with `compute_and_persist_sentiment` itself broken into smaller
+named helpers along the way; the Story running-average math moved to a new `Story.record_sentiment()` method;
+its docstring trimmed to point at ADR 0014 instead of re-arguing the design choice; specs 0005/0003 rewritten
+to describe the actual shipped behavior (same "spec tracks reality" discipline as the layout fixes above).
+78/78 backend tests pass unchanged (moved, not rewritten, except two updated imports).
+
 Not committed to this exact split or order — the real per-lesson plans (once each one actually gets planned)
 may reshape it, same as arcs 2 and 4's did.
 
