@@ -416,6 +416,22 @@ endpoint, endpoint before UI.
     and each Story's own aggregate (average + derived enum); the page-level `sentiment` status and the new
     `/api/search/status` endpoint already exist as of lesson 26 — this lesson is specifically about exposing
     the individual data, not the aggregate status. Mirrors lesson 21's shape.
+    ✅ built (plan: `docs/plans/0028-*.md`) — two decisions confirmed before any code: `derive_sentiment_enum`
+    moved from `providers.py` to `config.py` (same coupling risk `RECENT_HEADLINES_WINDOW` was moved to avoid
+    last lesson — `search.py` importing from `providers.py` would pull `pymilvus` into `api` mode's import
+    chain for the first time), and the new per-item field named `sentiment_enum`, not `sentiment` — the
+    response's own top-level `sentiment` key is already a status string (`ok`/`skipped`/`error`/`processing`),
+    a completely different value domain from the classification itself. The real gap found during
+    implementation: `_group_into_stories` never had a `Story` row in scope before, only `Headline`s — its own
+    aggregate lives on `stories`, not derivable from headlines alone. Fixed with a second plain query (not an
+    ORM relationship, matching this codebase's existing convention) building a `{story_id: Story}` dict,
+    threaded through `build_daily_view` as a new, optional parameter so existing non-sentiment-aware callers
+    don't need to change. Both new fields are always present and nullable, never conditionally omitted — the
+    frontend's own member-count check (already speced for lesson 29) decides what to render, not a missing
+    key here. 75/75 tests (6 new). Live-verified against the real stack: a real single-member Story showed a
+    real (if trivial) `sentiment_average` matching its lone member's own score exactly, and a real 3-member
+    Story's average (80.67) matched `(85 + 82 + 75) / 3` precisely — the lesson 26 math, read back correctly
+    through a completely independent code path.
 29. **Frontend: sentiment UI + polling** — `SearchPage` gains a poll loop (mirrors `StatusPage`'s existing
     pattern); `HeadlineCard` gains the sentiment pill (gloss + score together, colored by enum, greyed-out
     while pending, rationale as small text beneath); `Story` gains the nested outer card (its own "Story"

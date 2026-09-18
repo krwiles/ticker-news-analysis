@@ -41,7 +41,8 @@ class _FakeArqRedis:
 
 
 async def _seed_headline(
-    session_factory, ticker: str, title: str, url: str, category="news", story_id=None
+    session_factory, ticker: str, title: str, url: str, category="news", story_id=None,
+    sentiment_score=None, sentiment_status=None,
 ):
     async with session_factory() as session:
         # headlines.ticker is a real foreign key into companies(ticker) --
@@ -57,6 +58,10 @@ async def _seed_headline(
                 outlet="Yahoo",
                 published_at=datetime.now(timezone.utc),
                 story_id=story_id,
+                sentiment_score=sentiment_score,
+                sentiment_gloss="bullish" if sentiment_score is not None else None,
+                sentiment_rationale="Real rationale." if sentiment_score is not None else None,
+                sentiment_status=sentiment_status,
             )
         )
         await session.commit()
@@ -245,3 +250,43 @@ async def test_search_status_endpoint_never_touches_arq(test_session_factory):
     assert set(body.keys()) == {"sentiment", "days"}
     today = next(d for d in body["days"] if d["is_today"])
     assert today["stories"][0]["primary"]["title"] == "Polled headline"
+
+
+async def test_search_status_includes_per_headline_and_story_sentiment(test_session_factory):
+    """Real HTTP round trip (lesson 28): a resolved Headline's own fields,
+    and its Story's aggregate, both show up correctly in the response."""
+    async with test_session_factory() as session:
+        story = Story(ticker="GOOGL", sentiment_average=64.0, sentiment_score_count=2)
+        session.add(story)
+        await session.commit()
+        story_id = story.id
+
+    await _seed_headline(
+        test_session_factory, "GOOGL", "Resolved headline", "https://example.com/sent-int-1",
+        story_id=story_id, sentiment_score=82, sentiment_status="ok",
+    )
+    await _seed_headline(
+        test_session_factory, "GOOGL", "Second member", "https://example.com/sent-int-2",
+        story_id=story_id, sentiment_score=46, sentiment_status="ok",
+    )
+
+    app.dependency_overrides[get_session_factory] = lambda: test_session_factory
+    try:
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            response = await client.get("/api/search/status", params={"ticker": "GOOGL"})
+    finally:
+        app.dependency_overrides.clear()
+
+    body = response.json()
+    today = next(d for d in body["days"] if d["is_today"])
+    story_dict = today["stories"][0]
+
+    primary = story_dict["primary"]
+    assert primary["sentiment_score"] == 82
+    assert primary["sentiment_gloss"] == "bullish"
+    assert primary["sentiment_status"] == "ok"
+    assert primary["sentiment_enum"] == "positive"
+
+    assert story_dict["sentiment_average"] == 64.0
+    assert story_dict["sentiment_enum"] == "neutral"

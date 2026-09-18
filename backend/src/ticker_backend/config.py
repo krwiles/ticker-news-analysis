@@ -1,4 +1,5 @@
 from datetime import timedelta
+from typing import Literal
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -40,3 +41,25 @@ settings = Settings()
 # into a container mode that doesn't otherwise need it -- see providers.py's own comment on the
 # pymilvus/dotenv landmine this avoids reintroducing.
 RECENT_HEADLINES_WINDOW = timedelta(days=7)
+
+# Empirically checked against 15 real headlines spanning clearly positive/negative/neutral
+# content (lesson 26) -- a light-touch pass, not the full similarity-threshold treatment (a
+# boundary here is a labeling nuance, not a correctness bug the way a wrongly-merged Story was).
+# Real scores clustered cleanly: negative 15-34, neutral 50-68, positive 75-90 -- these cutoffs
+# sit in the real gaps between those clusters. See docs/plans/0026-*.md for the full sample.
+# Lives here (not providers.py) for the same reason RECENT_HEADLINES_WINDOW does -- search.py
+# needs this too (lesson 28), and neither it nor providers.py should import from the other.
+SENTIMENT_NEGATIVE_MAX = 40
+SENTIMENT_POSITIVE_MIN = 70
+
+
+def derive_sentiment_enum(score: int | float) -> Literal["positive", "neutral", "negative"]:
+    """Always derived from the score, never asked of the model independently
+    (spec 0005/ADR 0014) -- guarantees the enum and score can never disagree.
+    Takes a float too -- a Story's own aggregate (lesson 28) is an average
+    of integer scores, not necessarily an integer itself."""
+    if score <= SENTIMENT_NEGATIVE_MAX:
+        return "negative"
+    if score >= SENTIMENT_POSITIVE_MIN:
+        return "positive"
+    return "neutral"

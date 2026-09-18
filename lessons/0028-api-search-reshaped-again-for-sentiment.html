@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 28 — API Reshaped for Sentiment</title>
+<link rel="stylesheet" href="../assets/lesson.css">
+</head>
+<body>
+<div class="lesson">
+
+  <p class="eyebrow">Lesson 28 of 28 · ticker-news-analysis stack (sentiment arc — Arc 5)</p>
+  <h1><code>/api/search</code> reshaped again, for sentiment</h1>
+  <p class="subtitle">Two naming/coupling decisions settled before any code, then a genuinely new shape needed for the one thing <code>_group_into_stories</code> never had before: a real Story row, not just its Headlines.</p>
+
+  <div class="callout">
+    <p>
+      Lesson 26 already gave the page a <em>status</em> signal (is sentiment configured, still working, or
+      done). This lesson is about the actual <em>data</em> — a Headline's own score/gloss/rationale, and each
+      Story's aggregate — finally showing up in the response at all.
+    </p>
+  </div>
+
+  <h2>Same coupling risk, same fix, one lesson later</h2>
+  <p>
+    <code>derive_sentiment_enum</code> lived in <code>providers.py</code>. <code>search.py</code> needs it too
+    — but letting it import from <code>providers.py</code> would pull <code>pymilvus</code>'s whole import
+    chain into <code>api</code> mode for the first time, the exact risk <code>RECENT_HEADLINES_WINDOW</code>
+    was moved to <code>config.py</code> to avoid just last lesson. Same fix, same reasoning, this time for a
+    function instead of a constant:
+  </p>
+  <pre><code># config.py -- not providers.py, not search.py
+def derive_sentiment_enum(score: int | float) -> Literal["positive", "neutral", "negative"]:
+    ...</code></pre>
+
+  <h2>A naming collision that was easy to miss</h2>
+  <p>
+    The response already has a top-level <code>"sentiment"</code> key — added in lesson 26, a status string:
+    <code>ok</code>/<code>skipped</code>/<code>error</code>/<code>processing</code>. This lesson needs a
+    <em>different</em> kind of value per headline and per Story: the classification itself,
+    <code>positive</code>/<code>neutral</code>/<code>negative</code>. Reusing the bare name <code>sentiment</code>
+    at a nested level would mean the exact same key holds two totally unrelated value domains depending on how
+    deep you're reading into the JSON — precisely the kind of trap <code>CONTEXT.md</code>'s own collision
+    warnings exist to catch (it already flags "sentiment category" for colliding with <code>category</code>).
+    Settled on <code>sentiment_enum</code> instead, matching the <code>sentiment_score</code>/
+    <code>sentiment_gloss</code>/<code>sentiment_rationale</code>/<code>sentiment_status</code> naming
+    already in place.
+  </p>
+
+  <h2>The real gap: a Story dict never had a Story row to read from</h2>
+  <p>
+    <code>_group_into_stories</code> only ever received <code>Headline</code> objects — it builds a Story's
+    <em>shape</em> (primary + other members) purely by grouping headlines on their shared <code>story_id</code>.
+    It never needed the actual <code>stories</code> row itself, because nothing about primary/member
+    selection depends on it (ADR 0009: primary is derived from <code>published_at</code>, not stored). The
+    aggregate breaks that — <code>sentiment_average</code> lives on the real <code>Story</code> row, not
+    anywhere in its Headlines. A second, plain query (not an ORM relationship — this codebase's existing
+    convention) builds a lookup dict, threaded through as a new parameter:
+  </p>
+  <pre><code>def _group_into_stories(headlines: list[Headline], stories_by_id: dict) -> list[dict]:
+    ...
+    story = stories_by_id.get(primary.story_id)
+    has_aggregate = story is not None and story.sentiment_score_count > 0
+    ...
+    "sentiment_average": story.sentiment_average if has_aggregate else None,
+    "sentiment_enum": derive_sentiment_enum(story.sentiment_average) if has_aggregate else None,</code></pre>
+  <p>
+    Always present, always nullable — never conditionally left out of the dict. The frontend already has its
+    own reason to check member count (whether to show the "+N more sources" disclosure at all); it doesn't
+    need the backend to encode that same decision a second time by omitting keys.
+  </p>
+
+  <h2>Verified against real, live data — not just the mocked tests</h2>
+  <div class="callout">
+    <p>
+      A real single-member MSFT Story: <code>sentiment_average: 60.0</code>, matching its one member's own
+      score exactly — confirms a "Story of one" still gets a real aggregate at the data level, even though
+      the frontend (lesson 29) won't render it as one. A real 3-member Story:
+      <code>sentiment_average: 80.67</code>, matching <code>(85 + 82 + 75) / 3</code> exactly — the same
+      incremental-average math from lesson 26, now read back correctly through a completely independent code
+      path (the API response, not the job that wrote it).
+    </p>
+  </div>
+
+  <h2>Check your understanding</h2>
+
+  <div class="check">
+    <p class="q">Q1. Why not just call the new per-headline field "sentiment", matching <code>CONTEXT.md</code>'s own term for the concept?</p>
+    <details>
+      <summary>Reveal answer</summary>
+      <p class="answer">The response's top-level "sentiment" key already exists, and it's a different kind
+      of value entirely (a status: ok/skipped/error/processing). Reusing the name at a nested level would
+      mean the same key means two unrelated things depending on how deep you're reading -- exactly the
+      collision CONTEXT.md's own _Avoid_ notes exist to prevent. "sentiment_enum" keeps the concept clear
+      and matches the naming pattern the other four fields already use.</p>
+    </details>
+  </div>
+
+  <div class="check">
+    <p class="q">Q2. Why does a "Story of one" (no other_members) still get a non-null sentiment_average in the API response?</p>
+    <details>
+      <summary>Reveal answer</summary>
+      <p class="answer">The backend doesn't know or care about the "should the UI show an aggregate card"
+      decision -- that's the frontend's own job, based on member count, which it already needs to check for
+      the "+N more sources" disclosure. The backend's job is just to report the real, true state:
+      sentiment_score_count was incremented once, so there's a real (if single-member) average to report.
+      Hiding it here would just be re-deciding something the frontend is already equipped to decide.</p>
+    </details>
+  </div>
+
+  <div class="source">
+    <p class="label">Primary sources</p>
+    <p>
+      <a href="../docs/specs/0005-headline-sentiment-analysis.md">Spec 0005 — Headline Sentiment Analysis</a> ·
+      <a href="../docs/adr/0014-sentiment-analysis-technical-approach.md">ADR 0014 — sentiment technical approach</a>
+    </p>
+  </div>
+
+  <p class="ask">Anything unclear about why stories_by_id is a plain dict instead of an ORM relationship, or
+  want to see the full real API response for a ticker with mixed pending/resolved headlines? Ask your
+  teacher (this agent).</p>
+
+  <div class="nav">
+    <a href="0026-the-actual-sentiment-job.html">← Lesson 26: the actual sentiment job</a>
+    <span>Next → Lesson 29: frontend sentiment UI + polling (coming next)</span>
+  </div>
+
+</div>
+</body>
+</html>

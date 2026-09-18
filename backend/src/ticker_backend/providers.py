@@ -12,7 +12,6 @@ import re
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Literal
 from zoneinfo import ZoneInfo
 
 import httpx
@@ -385,24 +384,6 @@ async def get_filing_content(url: str, client: httpx.AsyncClient) -> str:
 # 55-135 tokens, so this is a safety net against a genuine anomaly (a malformed provider field),
 # not a limit that should ever actually trigger in the common case.
 NEWS_CONTENT_CAP_CHARS = 2_000
-
-# Empirically checked against 15 real headlines spanning clearly positive/negative/neutral
-# content (lesson 26) -- a light-touch pass, not the full similarity-threshold treatment (a
-# boundary here is a labeling nuance, not a correctness bug the way a wrongly-merged Story was).
-# Real scores clustered cleanly: negative 15-34, neutral 50-68, positive 75-90 -- these cutoffs
-# sit in the real gaps between those clusters. See docs/plans/0026-*.md for the full sample.
-SENTIMENT_NEGATIVE_MAX = 40
-SENTIMENT_POSITIVE_MIN = 70
-
-
-def _derive_sentiment_enum(score: int) -> Literal["positive", "neutral", "negative"]:
-    """Always derived from the score, never asked of the model independently
-    (spec 0005/ADR 0014) -- guarantees the enum and score can never disagree."""
-    if score <= SENTIMENT_NEGATIVE_MAX:
-        return "negative"
-    if score >= SENTIMENT_POSITIVE_MIN:
-        return "positive"
-    return "neutral"
 
 
 async def compute_and_persist_sentiment(ticker: str, session_factory=async_session_factory) -> dict:

@@ -16,9 +16,9 @@ from arq.connections import RedisSettings
 from fastapi import APIRouter, Depends, FastAPI, Request
 from sqlalchemy import select
 
-from ticker_backend.config import RECENT_HEADLINES_WINDOW, settings
+from ticker_backend.config import RECENT_HEADLINES_WINDOW, derive_sentiment_enum, settings
 from ticker_backend.db import async_session_factory
-from ticker_backend.models import Headline
+from ticker_backend.models import Headline, Story
 
 log = structlog.get_logger()
 router = APIRouter()
@@ -56,7 +56,15 @@ def get_session_factory():
 def _headline_to_dict(headline: Headline) -> dict:
     """The response shape for one headline -- deliberately not every column
     on the ORM model (no `id`, no `fetched_at`): this is what the frontend
-    actually needs, not a raw dump of the row."""
+    actually needs, not a raw dump of the row.
+
+    `sentiment_enum` is computed here, not stored anywhere (spec 0005/ADR
+    0014's "derive, don't store") -- `None` until a real score exists, same
+    as `sentiment_score` itself. Named `sentiment_enum`, not `sentiment` --
+    the response's own top-level `sentiment` key is a status
+    (ok/skipped/error/processing), a completely different value domain;
+    reusing the bare name here would mean the same key holds two unrelated
+    kinds of values depending on nesting depth (lesson 28)."""
     return {
         "title": headline.title,
         "url": headline.url,
@@ -65,14 +73,26 @@ def _headline_to_dict(headline: Headline) -> dict:
         "outlet": headline.outlet,
         "summary": headline.summary,
         "published_at": headline.published_at,
+        "sentiment_score": headline.sentiment_score,
+        "sentiment_gloss": headline.sentiment_gloss,
+        "sentiment_rationale": headline.sentiment_rationale,
+        "sentiment_status": headline.sentiment_status,
+        "sentiment_enum": derive_sentiment_enum(headline.sentiment_score) if headline.sentiment_score is not None else None,
     }
 
 
-def _group_into_stories(headlines: list[Headline]) -> list[dict]:
+def _group_into_stories(headlines: list[Headline], stories_by_id: dict) -> list[dict]:
     """Groups same-`story_id` headlines into one Story dict (primary +
     other_members). A `story_id=None` headline (grouping skipped/errored,
     ADR 0012) becomes its own singleton Story rather than merging with other
-    null-story headlines or disappearing."""
+    null-story headlines or disappearing.
+
+    `sentiment_average`/`sentiment_enum` come from the real `Story` row
+    (`stories_by_id`, keyed by id) -- the incrementally-updated aggregate
+    lesson 26 maintains, not recomputed here. Always present, nullable --
+    `None` until at least one member has a real score (spec 0005: "A Story
+    with only one member shows no such aggregate"; the frontend's own
+    member-count check, not a missing key here, is what actually hides it)."""
     # Bucket by story_id, falling back to the headline's own id when there's no Story yet.
     groups: dict[object, list[Headline]] = {}
     for headline in headlines:
@@ -84,17 +104,21 @@ def _group_into_stories(headlines: list[Headline]) -> list[dict]:
     for members in groups.values():
         members_oldest_first = sorted(members, key=lambda h: h.published_at)
         primary, *rest = members_oldest_first
+        story = stories_by_id.get(primary.story_id)
+        has_aggregate = story is not None and story.sentiment_score_count > 0
         stories.append(
             {
                 "story_id": str(primary.story_id) if primary.story_id is not None else None,
                 "primary": _headline_to_dict(primary),
                 "other_members": [_headline_to_dict(h) for h in reversed(rest)],
+                "sentiment_average": story.sentiment_average if has_aggregate else None,
+                "sentiment_enum": derive_sentiment_enum(story.sentiment_average) if has_aggregate else None,
             }
         )
     return stories
 
 
-def build_daily_view(headlines: list[Headline], now: datetime) -> list[dict]:
+def build_daily_view(headlines: list[Headline], now: datetime, stories_by_id: dict | None = None) -> list[dict]:
     """One entry per calendar day (Eastern), each holding that day's Stories
     (ADR 0013). Pure function — `now` is a parameter, not `datetime.now()`
     called internally, so DST/boundary behavior stays testable without
@@ -102,7 +126,12 @@ def build_daily_view(headlines: list[Headline], now: datetime) -> list[dict]:
 
     Today is always included, even with zero Stories; earlier days appear
     only when they have at least one (ADR 0013) -- no padding out to a
-    fixed 7-day scaffold."""
+    fixed 7-day scaffold.
+
+    `stories_by_id` (lesson 28) is where each Story's own sentiment
+    aggregate comes from -- optional, defaulting to empty, so existing
+    callers/tests that don't care about sentiment don't need to change."""
+    stories_by_id = stories_by_id or {}
     today_date = now.astimezone(EASTERN).date()
 
     # Bucket raw headlines by their own Eastern day first -- a Story's members
@@ -117,7 +146,7 @@ def build_daily_view(headlines: list[Headline], now: datetime) -> list[dict]:
     # Newest day first; each day's Stories newest-first by primary's published_at.
     days = []
     for day in sorted(by_day.keys(), reverse=True):
-        stories = _group_into_stories(by_day[day])
+        stories = _group_into_stories(by_day[day], stories_by_id)
         stories.sort(key=lambda story: story["primary"]["published_at"], reverse=True)
         days.append({"date": day.isoformat(), "is_today": day == today_date, "stories": stories})
     return days
@@ -151,8 +180,17 @@ async def _load_search_results(ticker: str, session_factory) -> tuple[list[dict]
         )
         headlines = list(rows.scalars())
 
+        # Every Story these headlines reference (lesson 28) -- a plain second query, not an ORM
+        # relationship/join, matching this codebase's existing "no SQLAlchemy relationship()
+        # annotations" convention (real FKs live in the migration only).
+        story_ids = {h.story_id for h in headlines if h.story_id is not None}
+        stories_by_id: dict = {}
+        if story_ids:
+            story_rows = await session.execute(select(Story).where(Story.id.in_(story_ids)))
+            stories_by_id = {story.id: story for story in story_rows.scalars()}
+
     # One entry per calendar day, each holding that day's Stories (ADR 0013).
-    days = build_daily_view(headlines, datetime.now(timezone.utc))
+    days = build_daily_view(headlines, datetime.now(timezone.utc), stories_by_id)
     sentiment_status = _compute_sentiment_status(headlines)
     return days, sentiment_status
 

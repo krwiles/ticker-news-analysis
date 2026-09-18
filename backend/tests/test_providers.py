@@ -9,12 +9,11 @@ import pytest
 import respx
 from sqlalchemy import select
 
-from ticker_backend.config import settings
+from ticker_backend.config import derive_sentiment_enum, settings
 from ticker_backend.models import Company, Headline, Story
 from ticker_backend.providers import (
     FILING_CONTENT_CAP_CHARS,
     ProviderFetchError,
-    _derive_sentiment_enum,
     _extract_relevant_filing_section,
     _strip_html_to_text,
     compute_and_persist_sentiment,
@@ -296,12 +295,12 @@ async def test_get_filing_content_raises_typed_error_on_failure(test_session_fac
 
 def test_derive_sentiment_enum_boundaries():
     # Real cutoffs from lesson 26's own empirical pass -- <=40 negative, >=70 positive, else neutral.
-    assert _derive_sentiment_enum(0) == "negative"
-    assert _derive_sentiment_enum(40) == "negative"
-    assert _derive_sentiment_enum(41) == "neutral"
-    assert _derive_sentiment_enum(69) == "neutral"
-    assert _derive_sentiment_enum(70) == "positive"
-    assert _derive_sentiment_enum(100) == "positive"
+    assert derive_sentiment_enum(0) == "negative"
+    assert derive_sentiment_enum(40) == "negative"
+    assert derive_sentiment_enum(41) == "neutral"
+    assert derive_sentiment_enum(69) == "neutral"
+    assert derive_sentiment_enum(70) == "positive"
+    assert derive_sentiment_enum(100) == "positive"
 
 
 @pytest.fixture
