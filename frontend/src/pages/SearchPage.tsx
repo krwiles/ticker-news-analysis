@@ -101,7 +101,7 @@ export function SearchPage() {
   }
 
   return (
-    <main className="mx-auto max-w-md px-6 py-16">
+    <main className="mx-auto max-w-2xl px-6 py-16">
       <h1 className="text-2xl font-semibold text-slate-900">Search</h1>
       <p className="mt-1 text-sm text-slate-500">News and filings from the past week, by ticker.</p>
 

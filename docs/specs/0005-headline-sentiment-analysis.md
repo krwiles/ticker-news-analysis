@@ -99,14 +99,19 @@ score, gloss, rationale, and Story-level aggregate; this spec doesn't redefine t
 
 ## Outputs / user-facing behavior
 
-Each Headline shows a sentiment pill beneath its existing category pill (News/Filing) in `HeadlineCard`,
+`HeadlineCard` splits into two even columns, each roughly half the card's width. The left column stacks the
+category pill (left-aligned, above the title — no longer beside the sentiment card), the title, and its
+outlet/date line. The right column is a single, visually distinct sentiment sub-card, holding the pill —
 colored by the sentiment enum value, showing the one-word gloss and the numeric score together (e.g.
-"bullish · 82" — not just the raw enum value, "positive"). The one-sentence rationale sits beneath the pill
-as small text.
+"bullish · 82" — not just the raw enum value, "positive") — and, once available, the one-sentence rationale
+as small text beneath it inside the same sub-card. `summary`, when present, still spans the full card width,
+below both columns.
 
-While pending, the pill shows as an empty, greyed-out placeholder with no gloss or score yet. Once computed,
-only that pill changes, in place, to its real color, gloss, and score, and the rationale text appears
-beneath it — no other part of the page flashes, reflows, or reorders when this happens.
+The sub-card itself is always present, even while pending — only its contents change once resolved. While
+pending, the pill inside it shows as an empty, greyed-out placeholder with no gloss or score yet, and no
+rationale line is shown. Once computed, the pill updates in place to its real color, gloss, and score, and
+the rationale text appears beneath it inside the same sub-card — no other part of the page flashes,
+reflows, or reorders when this happens.
 
 A page-level sentiment status sits alongside it, mirroring `GroupingStatus`'s existing dot+message shape —
 grouping and sentiment are independent dependencies that can succeed or fail on their own, so they get their

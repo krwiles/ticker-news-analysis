@@ -484,7 +484,19 @@ endpoint, endpoint before UI.
     refresh watched; worker logs now show `error_type: "ReadTimeout"` on the real remaining failure.
     **Follow-up**: a second real batch (`AVGO`, 113 headlines) resolved 107/113, all 6 permanent failures
     again `ReadTimeout` — two independent real samples, same consistent signature. `SENTIMENT_HTTP_TIMEOUT_SECONDS`
-    doubled 10s → 20s on that evidence, not yet re-measured against a fresh sample. Arc 5 complete.
+    doubled 10s → 20s on that evidence, not yet re-measured against a fresh sample.
+    **Follow-up 2**: checked the live UI against spec 0005 and found real drift — sentiment pill beside
+    (not beneath) the category pill, rationale at the very bottom instead of beneath the pill. Fixed in
+    several small, user-directed rounds (each rebuilt/reverified against the live stack): pill placement
+    corrected; redesigned into a visually distinct sentiment sub-card (pill + rationale together); split
+    into two columns (title+date left, category+sub-card right); page container widened `max-w-md` →
+    `max-w-2xl` (cards have no width of their own, they inherit `SearchPage`'s `<main>`); columns changed
+    to split 50/50 (`flex-1` both sides) instead of a fixed-width right column; category pill moved to
+    left-aligned above the title, right column now just the sub-card. A real bug found along the way: a
+    flex item's default `min-width` is its own content's intrinsic width, not zero — `shrink-0` alone
+    doesn't override that, so long text was forcing the row wider than the card instead of wrapping. Fixed
+    with `min-w-0` on both columns plus `break-words` as a safety net. Spec 0005 rewritten at each step to
+    track the real, current layout. Arc 5 complete.
 
 Not committed to this exact split or order — the real per-lesson plans (once each one actually gets planned)
 may reshape it, same as arcs 2 and 4's did.

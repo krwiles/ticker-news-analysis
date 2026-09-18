@@ -111,3 +111,34 @@ genuine timeouts, not rejections — `httpx.AsyncClient(timeout=...)` doubled fr
 (`SENTIMENT_HTTP_TIMEOUT_SECONDS`), giving a slow-but-otherwise-successful OpenAI response more room before
 being cut off. Not yet re-measured against a fresh failure sample the same way the retry delay still isn't
 — a reasonable next check once more real volume has gone through it.
+
+## Follow-up: HeadlineCard layout, checked against spec 0005 and found to have drifted
+
+A visual check of the real running UI (not a browser tool — no browser-automation MCP is connected in this
+session; verified by rebuilding the container and reading the rendered markup/spec side by side) found
+`HeadlineCard` had drifted from what spec 0005 actually described: the sentiment pill sat beside the
+category pill, not beneath it, and the rationale rendered at the very bottom of the card, after summary,
+not directly beneath the pill. Fixed through several rounds of direct user art-direction, each one small
+and immediately rebuilt/reverified against the live stack:
+
+1. Pill moved beneath the category pill; rationale moved to sit directly beneath the pill, ahead of the
+   metadata line — matching the spec as originally written.
+2. Redesigned, with the user's own steer, into a visually distinct sentiment sub-card (pill + rationale
+   together, bordered/shaded) rather than bare inline elements — spec 0005 rewritten to match.
+3. Moved to a two-column layout: title + date on the left, category pill + sub-card stacked on the right.
+4. **A real bug**: the right column had no width bound (`shrink-0` alone isn't a width), and the left
+   column's flex item had no `min-w-0` — a flex item's default `min-width` is its own content's intrinsic
+   width, so long text simply refuses to shrink below that, forcing the whole row wider than the card
+   instead of wrapping. Fixed with `min-w-0` on the growing column and a bounded width on the fixed one,
+   plus `break-words` as a safety net for any single long unbroken token.
+5. The page's own container (`SearchPage`'s `<main>`) widened from `max-w-md` (448px) to `max-w-2xl`
+   (672px) — headline/story cards have no width of their own, they just fill whatever `<main>` gives them,
+   so this one change is what any card on the page inherits.
+6. The two columns changed from a fixed-width right column to `flex-1` on both sides, splitting the row
+   evenly rather than the (now wider) left column absorbing all the new space on its own.
+7. Category pill moved out of the right column entirely, to left-aligned above the title in the left
+   column — the right column is now just the sentiment sub-card alone, still splitting the row 50/50.
+
+Spec 0005's Outputs section was rewritten at each step to track the real, current layout — the running
+theme across this whole session: catch drift between what a spec says and what the code actually renders,
+and fix the spec, not just note the difference and move on.

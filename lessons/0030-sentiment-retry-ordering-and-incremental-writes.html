@@ -174,6 +174,40 @@ for coro in asyncio.as_completed(tasks):
     </p>
   </div>
 
+  <h2>Follow-up: HeadlineCard's layout had drifted from what spec 0005 actually said</h2>
+  <p>
+    Checking the real running UI (rebuilding the container and reading rendered markup against the spec
+    side by side — no browser-automation tool is connected in this session, worth being explicit about)
+    found <code>HeadlineCard</code> didn't match spec 0005's own Outputs section: the sentiment pill sat
+    beside the category pill instead of beneath it, and the rationale rendered at the very bottom of the
+    card, after <code>summary</code>, instead of directly beneath the pill. Fixed in several small,
+    user-directed rounds, each one rebuilt and reverified against the live stack before moving to the next:
+    pill placement corrected to match the spec as written; redesigned into a visually distinct sentiment
+    sub-card holding pill + rationale together (spec rewritten to match); split into two columns (title+date
+    left, category+sub-card right); the page's own container widened, with the two columns changed to split
+    evenly instead of one absorbing all the new space; category pill finally moved to left-aligned above the
+    title, leaving the right column as just the sub-card.
+  </p>
+
+  <h2>The real bug hiding in step 4: a flex item's default min-width</h2>
+  <div class="callout">
+    <p>
+      Partway through, long text started forcing the row wider than the card instead of wrapping. The
+      cause: a flex item's <code>min-width</code> defaults to its own content's intrinsic width, not zero
+      — <code>shrink-0</code> or even just leaving it unset doesn't override that. A title or rationale
+      sentence with no natural break point will refuse to shrink below its own rendered width, pushing the
+      whole row past the card's edge rather than wrapping inside it.
+    </p>
+  </div>
+  <pre><code>&lt;div className="flex min-w-0 flex-1 flex-col ..."&gt;   {/* growing column: needs min-w-0 to actually shrink/wrap */}
+&lt;div className="min-w-0 flex-1 rounded-md ..."&gt;      {/* bounded column: min-w-0 + a real width, not shrink-0 alone */}</code></pre>
+  <p>
+    <code>min-w-0</code> on both sides is what actually lets the browser shrink each column down to fit
+    its own wrapped text, instead of sizing to the longest unbroken run of characters inside it.
+    <code>break-words</code> was added as a second layer underneath that, for the rare case of one single
+    token (a very long URL-like title, say) longer than the column itself.
+  </p>
+
   <h2>Check your understanding</h2>
 
   <div class="check">
@@ -197,6 +231,19 @@ for coro in asyncio.as_completed(tasks):
       though a brand-new retry had genuinely just been enqueued server-side. Depending on the whole object
       means any new fetch (the value happening to match the last one or not) still produces a new object
       reference, so the effect re-evaluates every time, with no risk of a same-value refresh going unnoticed.</p>
+    </details>
+  </div>
+
+  <div class="check">
+    <p class="q">Q3. Why does adding <code>shrink-0</code> to a flex column NOT stop it from forcing the row wider than its container, but <code>min-w-0</code> does?</p>
+    <details>
+      <summary>Reveal answer</summary>
+      <p class="answer">shrink-0 only controls whether flexbox is allowed to shrink an item below its own
+      "preferred" size -- it says nothing about what that preferred size's floor actually is. A flex item's
+      default min-width is auto, which resolves to its content's own intrinsic width (the longest unbroken
+      run of text/characters inside it), not zero. min-w-0 overrides that floor to zero, which is what
+      actually lets the browser shrink the column down to fit wrapped text instead of the text's own
+      unbroken width.</p>
     </details>
   </div>
 
