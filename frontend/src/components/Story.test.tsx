@@ -13,6 +13,11 @@ function headline(overrides: Partial<Headline> = {}): Headline {
     outlet: null,
     summary: null,
     published_at: "2026-09-11T12:00:00Z",
+    sentiment_score: null,
+    sentiment_gloss: null,
+    sentiment_rationale: null,
+    sentiment_status: null,
+    sentiment_enum: null,
     ...overrides,
   };
 }
@@ -22,6 +27,8 @@ function story(overrides: Partial<StoryType> = {}): StoryType {
     story_id: "11111111-1111-1111-1111-111111111111",
     primary: headline(),
     other_members: [],
+    sentiment_average: null,
+    sentiment_enum: null,
     ...overrides,
   };
 }
@@ -89,5 +96,53 @@ describe("Story", () => {
     );
     // Assert: the count label is pluralized.
     expect(screen.getByText("+2 more sources")).toBeInTheDocument();
+  });
+
+  it("shows no Story-level chrome for a Story of one, even if sentiment_average happens to be set", () => {
+    // Arrange + act: a lone member, but a real (if trivial) aggregate already present -- see lesson 28/29 planning.
+    render(<Story story={story({ other_members: [], sentiment_average: 60, sentiment_enum: "positive" })} />);
+    // Assert: no "Story" label pill -- member count, not aggregate presence, gates the wrapper.
+    expect(screen.queryByText("Story")).not.toBeInTheDocument();
+  });
+
+  it("shows the Story label and a Pending aggregate pill for a multi-member Story with no resolved members yet", () => {
+    // Arrange + act: a multi-member Story whose primary already resolved, but whose aggregate hasn't yet
+    // (a real, genuine window -- the aggregate only updates once a member actually lands).
+    render(
+      <Story
+        story={story({
+          primary: headline({ sentiment_score: 85, sentiment_gloss: "bullish", sentiment_status: "ok", sentiment_enum: "positive" }),
+          other_members: [
+            headline({
+              url: "https://example.com/b",
+              sentiment_score: 40,
+              sentiment_gloss: "concerning",
+              sentiment_status: "ok",
+              sentiment_enum: "negative",
+            }),
+          ],
+          sentiment_average: null,
+          sentiment_enum: null,
+        })}
+      />,
+    );
+    // Assert: the Story wrapper appears, and its aggregate pill (the only Pending one -- both members already resolved) is Pending.
+    expect(screen.getByText("Story")).toBeInTheDocument();
+    expect(screen.getByText("Pending")).toBeInTheDocument();
+  });
+
+  it("shows the resolved aggregate score for a multi-member Story", () => {
+    // Arrange + act: a real multi-member Story with a resolved aggregate.
+    render(
+      <Story
+        story={story({
+          other_members: [headline({ url: "https://example.com/b" })],
+          sentiment_average: 80.67,
+          sentiment_enum: "positive",
+        })}
+      />,
+    );
+    // Assert: the aggregate pill shows enum + rounded score -- no gloss exists at the Story level.
+    expect(screen.getByText("positive · 81")).toBeInTheDocument();
   });
 });

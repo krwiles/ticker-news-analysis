@@ -385,6 +385,20 @@ async def get_filing_content(url: str, client: httpx.AsyncClient) -> str:
 # not a limit that should ever actually trigger in the common case.
 NEWS_CONTENT_CAP_CHARS = 2_000
 
+# A short pause before the one automatic retry -- gives whatever transient condition caused the
+# first failure (real-world evidence: OpenAI timing out under concurrent load, not a hard reject --
+# see providers.sentiment_failed's own error_type logging) a moment to clear, rather than
+# resubmitting straight back into the same conditions. A first guess, not yet tuned against real
+# evidence the way the similarity/sentiment thresholds were -- module-level so tests can monkeypatch
+# it to 0.
+SENTIMENT_RETRY_DELAY_SECONDS = 2.0
+
+# Doubled from the original 10s (lesson 30 live evidence: every observed sentiment failure was a
+# ReadTimeout, not a real rejection -- consistent with OpenAI being slow, not down, under this
+# account's real load). A guess in the same direction as the evidence, not yet re-measured against
+# a fresh failure sample the way the retry delay above still needs to be.
+SENTIMENT_HTTP_TIMEOUT_SECONDS = 20.0
+
 
 async def compute_and_persist_sentiment(ticker: str, session_factory=async_session_factory) -> dict:
     """Computes and persists sentiment for whatever Headlines in this ticker's recent window
@@ -395,14 +409,20 @@ async def compute_and_persist_sentiment(ticker: str, session_factory=async_sessi
     ticker = ticker.upper()
     cutoff = datetime.now(timezone.utc) - RECENT_HEADLINES_WINDOW
 
-    # Only a real score (`ok`) is permanent -- `skipped`/`error` both stay eligible for retry.
+    # Only a real score (`ok`) is permanent, and never re-queried once set -- this WHERE clause is
+    # the entire enforcement of that rule (spec 0005): a headline already at `ok` simply never
+    # appears in `pending_headlines` again, for any later request. `skipped`/`error` both stay
+    # eligible for retry. Newest first (spec 0005) -- the most recently published headlines are
+    # what a user actually came back to check, so they're worth resolving before older ones.
     async with session_factory() as session:
         rows = await session.execute(
-            select(Headline).where(
+            select(Headline)
+            .where(
                 Headline.ticker == ticker,
                 Headline.published_at >= cutoff,
                 (Headline.sentiment_status.is_(None)) | (Headline.sentiment_status.in_(["skipped", "error"])),
             )
+            .order_by(Headline.published_at.desc())
         )
         pending_headlines = list(rows.scalars())
 
@@ -423,39 +443,64 @@ async def compute_and_persist_sentiment(ticker: str, session_factory=async_sessi
     # unbounded, found live: 239 real MSFT headlines all timed out together, because httpx's
     # default 100-connection pool plus real rate limiting under that much simultaneous load
     # cascades into everything backing up past the per-request timeout, not a clean 100-succeed/
-    # 139-queue split. A semaphore caps how many _get_one calls are truly in flight at once,
-    # regardless of how many total headlines are in the batch.
+    # 139-queue split. A semaphore caps how many attempts are truly in flight at once, regardless
+    # of how many total headlines are in the batch.
     semaphore = asyncio.Semaphore(20)
 
-    async def _get_one(headline: Headline):
-        # News uses title+summary (already free); filings need a real fetch+extraction (lesson
-        # 25). Each headline's own failure is caught here, not left to cancel the whole batch.
-        async with semaphore:
+    async def _fetch_one(headline: Headline):
+        # News uses title+summary (already free); filings need a real fetch+extraction (lesson 25).
+        if headline.category == "filing":
+            text = await get_filing_content(headline.url, client)
+        else:
+            text = embedding_input_text(headline.title, headline.summary)[:NEWS_CONTENT_CAP_CHARS]
+        return await get_sentiment(text, client)
+
+    async def _fetch_with_retry(headline: Headline):
+        """One automatic retry per headline (real-world evidence: OpenAI timing out under
+        concurrent load produces a transient, not a permanent, failure -- see
+        providers.sentiment_failed's error_type). The delay happens *outside* the semaphore, so a
+        retrying headline gives up its concurrency slot for another one to use while it waits,
+        rather than idling with it held. Each headline's own failure is caught here, not left to
+        cancel the whole batch."""
+        last_error: ProviderFetchError | None = None
+        for attempt in range(2):
+            if attempt > 0:
+                await asyncio.sleep(SENTIMENT_RETRY_DELAY_SECONDS)
             try:
-                if headline.category == "filing":
-                    text = await get_filing_content(headline.url, client)
-                else:
-                    text = embedding_input_text(headline.title, headline.summary)[:NEWS_CONTENT_CAP_CHARS]
-                result = await get_sentiment(text, client)
+                async with semaphore:
+                    result = await _fetch_one(headline)
                 return headline, result, None
             except ProviderFetchError as exc:
-                return headline, None, exc
-
-    async with httpx.AsyncClient(timeout=10.0) as client:
-        results = await asyncio.gather(*(_get_one(h) for h in pending_headlines))
+                last_error = exc
+        return headline, None, last_error
 
     # Sequential writes, not concurrent -- avoids a lost update if two headlines in this same
-    # batch happen to belong to the same Story (see compute_and_persist_sentiment's own docstring
-    # and ADR 0014's Story-aggregate section).
+    # batch happen to belong to the same Story (see this function's own docstring and ADR 0014's
+    # Story-aggregate section). asyncio.as_completed (not gather) is what makes this incremental:
+    # each headline is written and committed as soon as its own attempt resolves, not batched
+    # behind whichever headline in the batch happens to finish last -- the frontend's poll loop
+    # (lesson 29) picks up each commit on its next tick, rather than waiting for the whole batch.
     any_error = False
-    async with session_factory() as session:
-        for headline, result, error in results:
+    async with httpx.AsyncClient(timeout=SENTIMENT_HTTP_TIMEOUT_SECONDS) as client, session_factory() as session:
+        tasks = [asyncio.ensure_future(_fetch_with_retry(h)) for h in pending_headlines]
+        for coro in asyncio.as_completed(tasks):
+            headline, result, error = await coro
+
             if error is not None:
                 any_error = True
-                log.warning("providers.sentiment_failed", headline_id=str(headline.id), error=str(error))
+                # error.__cause__ is the real underlying exception (ProviderFetchError wraps it
+                # with "from exc") -- a bare httpx timeout's own str() is empty, so without the
+                # type name here a timeout and a real HTTP error are indistinguishable in the logs.
+                log.warning(
+                    "providers.sentiment_failed",
+                    headline_id=str(headline.id),
+                    error_type=type(error.__cause__ or error).__name__,
+                    error=str(error),
+                )
                 await session.execute(
                     update(Headline).where(Headline.id == headline.id).values(sentiment_status="error")
                 )
+                await session.commit()
                 continue
 
             score = result["score"]
@@ -482,7 +527,7 @@ async def compute_and_persist_sentiment(ticker: str, session_factory=async_sessi
                     story.sentiment_average += (score - story.sentiment_average) / new_count
                 story.sentiment_score_count += 1
 
-        await session.commit()
+            await session.commit()
 
     return {"status": "error" if any_error else "ok"}
 

@@ -12,6 +12,11 @@ function headline(overrides: Partial<Headline> = {}): Headline {
     outlet: null,
     summary: null,
     published_at: "2026-09-11T12:00:00Z",
+    sentiment_score: null,
+    sentiment_gloss: null,
+    sentiment_rationale: null,
+    sentiment_status: null,
+    sentiment_enum: null,
     ...overrides,
   };
 }
@@ -55,8 +60,20 @@ describe("DaySection", () => {
       <DaySection
         day={day({
           stories: [
-            { story_id: "s1", primary: headline({ title: "First", url: "https://example.com/1" }), other_members: [] },
-            { story_id: "s2", primary: headline({ title: "Second", url: "https://example.com/2" }), other_members: [] },
+            {
+              story_id: "s1",
+              primary: headline({ title: "First", url: "https://example.com/1" }),
+              other_members: [],
+              sentiment_average: null,
+              sentiment_enum: null,
+            },
+            {
+              story_id: "s2",
+              primary: headline({ title: "Second", url: "https://example.com/2" }),
+              other_members: [],
+              sentiment_average: null,
+              sentiment_enum: null,
+            },
           ],
         })}
       />,

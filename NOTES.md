@@ -437,6 +437,54 @@ endpoint, endpoint before UI.
     while pending, rationale as small text beneath); `Story` gains the nested outer card (its own "Story"
     pill + aggregate pill) for multi-member Stories only — the primary Headline inside it gets zero special
     treatment. Capstone of this arc, same role lesson 22 played for arc 4.
+    ✅ built (plan: `docs/plans/0029-*.md`) — the poll effect is keyed on `[results?.ticker,
+    results?.sentiment]`, not `[]` like `StatusPage`'s: re-running whenever sentiment changes tears the old
+    interval down via cleanup and only creates a new one while still `"processing"`, so polling stops itself
+    the moment sentiment resolves, no manual stop flag needed. Every poll tick merges only `sentiment`/`days`
+    into existing state (`/api/search/status` doesn't return `ticker`/`status`/`providers`/`grouping`) —
+    exactly the consequence ADR 0014 flagged during lesson 26's own planning. New `SentimentPill` (shared by
+    `HeadlineCard` and `Story`'s aggregate) collapses not-yet-attempted/skipped/error into one grey "Pending"
+    bucket — the *why* lives once, page-level, in the new `SentimentStatus` component (mirrors
+    `GroupingStatus`). `Story`'s outer wrapper gates on `other_members.length`, not on whether
+    `sentiment_average` is non-null — a single-member Story never gets the wrapper even though the backend
+    returns a real (if trivial) aggregate for it (lesson 28's own finding). 81/81 tests (22 new) — first in
+    this codebase to exercise a timer-driven effect, via `vi.useFakeTimers({ shouldAdvanceTime: true })` +
+    `vi.advanceTimersByTimeAsync()`. One test-writing snag caught by the tests themselves: an early version
+    of the "Pending aggregate pill" test left both Story members unresolved, so `getByText("Pending")`
+    correctly failed on two matches instead of one — fixed by resolving both members' own sentiment first.
+    `tsc --noEmit` and `npm run build` both clean. No actual browser click-through was done (no
+    browser-automation tool available this session) — verified instead via clean build/types/tests plus live
+    data pulled from the real running stack: a real MSFT search transitioned `sentiment: "processing"` →
+    `"ok"` across two calls seconds apart, and a real 3-member Story's `80.666...` average rendered correctly
+    as `"positive · 81"`.
+30. **Sentiment retry, ordering, and incremental writes** — not a planned lesson: a live bug-fix session
+    after real usage of the rebuilt Arc 5 UI surfaced three reports (Refresh not redoing a failed analysis,
+    the page only updating all-at-once instead of gradually, sentiment "failing often").
+    ✅ built (plan: `docs/plans/0030-*.md`) — diagnosed from real worker logs: 54/54 recent failures carried
+    the exact same empty error message, the fingerprint of a bare `httpx` timeout, not a real OpenAI
+    rejection (the code was logging `str(exc)`, empty for a bare timeout, never the exception type). Two
+    more bugs found by reading the actual code: `compute_and_persist_sentiment` gathered every concurrent
+    call via `asyncio.gather` and wrote everything in one `session.commit()` at the very end (nothing
+    visible to a poll until the whole 60-100+s batch finished); the frontend's poll guard only polled on
+    `sentiment === "processing"`, so the instant any one headline permanently failed (masking to `"error"`
+    by lesson 26's own deliberate priority order), polling for the *rest* of a still-resolving batch
+    silently stopped. Fixed: `asyncio.as_completed` + a commit per headline (not `gather` + one commit);
+    one automatic same-run retry per headline (delay outside the semaphore, so a waiting retry frees its
+    concurrency slot); newest-published-first processing order; `error_type=type(error.__cause__ or
+    error).__name__` in the failure log (recovers the real exception `ProviderFetchError`'s own `from exc`
+    already attached, just never read); a new `hasPendingSentiment(days)` frontend helper checking real
+    per-headline pending state instead of the coarse status field, with the poll effect keyed on the whole
+    `results` object (not narrowed fields) so a same-status Refresh still restarts polling. Confirmed
+    already-true and preserved through the rewrite: `ok` is never re-queried, no code or spec change needed
+    there. 78/78 backend tests (3 new — one existing test's own fixed-call-order assumption broke once two
+    headlines genuinely started racing, fixed by keying the mock on request content instead), 83/83 frontend
+    (2 new). Live-verified against a real `SPCX` search with genuine prior failures: pending count dropped
+    13→12→8→4→0 across successive polls (real incremental progress); two fresh refreshes recovered 2 of 3
+    lingering errors (298→300 `ok`), with the `ok` count only ever growing, never dropping, across every
+    refresh watched; worker logs now show `error_type: "ReadTimeout"` on the real remaining failure.
+    **Follow-up**: a second real batch (`AVGO`, 113 headlines) resolved 107/113, all 6 permanent failures
+    again `ReadTimeout` — two independent real samples, same consistent signature. `SENTIMENT_HTTP_TIMEOUT_SECONDS`
+    doubled 10s → 20s on that evidence, not yet re-measured against a fresh sample. Arc 5 complete.
 
 Not committed to this exact split or order — the real per-lesson plans (once each one actually gets planned)
 may reshape it, same as arcs 2 and 4's did.

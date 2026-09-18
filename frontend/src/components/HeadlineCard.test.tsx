@@ -12,6 +12,11 @@ function headline(overrides: Partial<Headline> = {}): Headline {
     outlet: null,
     summary: null,
     published_at: "2026-09-11T12:00:00Z",
+    sentiment_score: null,
+    sentiment_gloss: null,
+    sentiment_rationale: null,
+    sentiment_status: null,
+    sentiment_enum: null,
     ...overrides,
   };
 }
@@ -58,5 +63,37 @@ describe("HeadlineCard", () => {
     render(<HeadlineCard headline={headline({ category: "filing" })} />);
     // Assert: the badge's title-cased label is shown.
     expect(screen.getByText("Filing")).toBeInTheDocument();
+  });
+
+  it("shows a Pending sentiment pill before the job resolves this headline", () => {
+    // Arrange + act: render a headline with no sentiment data yet.
+    render(<HeadlineCard headline={headline()} />);
+    // Assert: the pill shows Pending, not a crash or blank space.
+    expect(screen.getByText("Pending")).toBeInTheDocument();
+  });
+
+  it("shows the gloss and score once sentiment resolves", () => {
+    // Arrange + act: render a headline with resolved sentiment.
+    render(
+      <HeadlineCard
+        headline={headline({ sentiment_score: 82, sentiment_gloss: "bullish", sentiment_status: "ok", sentiment_enum: "positive" })}
+      />,
+    );
+    // Assert: gloss and score are shown together.
+    expect(screen.getByText("bullish · 82")).toBeInTheDocument();
+  });
+
+  it("shows the rationale when present", () => {
+    // Arrange + act: render a headline with a rationale set.
+    render(<HeadlineCard headline={headline({ sentiment_rationale: "Earnings beat expectations." })} />);
+    // Assert: the rationale text is shown.
+    expect(screen.getByText("Earnings beat expectations.")).toBeInTheDocument();
+  });
+
+  it("omits rationale text when null", () => {
+    // Arrange + act: render a headline with no rationale (the default from the helper).
+    const { container } = render(<HeadlineCard headline={headline()} />);
+    // Assert: no rationale <p> exists -- only the metadata line.
+    expect(container.querySelectorAll("p")).toHaveLength(1);
   });
 });

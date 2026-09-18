@@ -4,7 +4,13 @@ import { DaySection } from "../components/DaySection";
 import { GroupingStatus } from "../components/GroupingStatus";
 import { SearchBar } from "../components/SearchBar";
 import { SearchStatus } from "../components/SearchStatus";
-import { fetchSearch, type SearchResponse } from "../search";
+import { SentimentStatus } from "../components/SentimentStatus";
+import { fetchSearch, fetchSearchStatus, hasPendingSentiment, type SearchResponse } from "../search";
+
+// Same cadence as StatusPage's own health poll -- no evidence sentiment resolves
+// meaningfully faster or slower than a health check, so no reason to invent a
+// different number without one (lesson 29 planning).
+const SENTIMENT_POLL_INTERVAL_MS = 5000;
 
 export function SearchPage() {
   const [searchParams, setSearchParams] = useSearchParams();
@@ -41,6 +47,45 @@ export function SearchPage() {
       runSearch(urlTicker);
     }
   }, [urlTicker]);
+
+  // Polls /api/search/status (never re-enqueues the fetch job -- see search.py's
+  // search_status route) while any Headline still hasn't had a real sentiment
+  // attempt, and stops on its own once every one of them has. Deliberately keyed
+  // on the whole `results` object, not narrowed fields: any fresh fetch --
+  // the initial search, a poll tick, or a manual Refresh -- produces a new object,
+  // so the effect re-evaluates from scratch every time. That's what makes a
+  // Refresh reliably restart polling even when it lands back on the same overall
+  // status (e.g. "error" both before and after) -- a narrower dependency list
+  // wouldn't have noticed anything changed. No immediate first tick (unlike
+  // StatusPage): results here are always already fresh, so firing again at t=0
+  // would just re-fetch the same data.
+  useEffect(() => {
+    if (!results || !hasPendingSentiment(results.days)) {
+      return;
+    }
+
+    let cancelled = false;
+    const ticker = results.ticker;
+
+    async function poll() {
+      try {
+        const status = await fetchSearchStatus(ticker);
+        // Merge only sentiment + days -- /api/search/status doesn't return
+        // ticker/status/providers/grouping, so a full replace would drop them.
+        if (!cancelled) {
+          setResults((prev) => (prev ? { ...prev, sentiment: status.sentiment, days: status.days } : prev));
+        }
+      } catch {
+        // A transient poll failure shouldn't blow away results already on screen -- just try again next tick.
+      }
+    }
+
+    const id = setInterval(poll, SENTIMENT_POLL_INTERVAL_MS);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+  }, [results]);
 
   // Writes the URL; the effect above reacts to that change and does the actual fetch.
   function handleSearch(ticker: string) {
@@ -93,8 +138,11 @@ export function SearchPage() {
               Refresh
             </button>
           </div>
-          <div className="mb-4">
+          <div className="mb-1">
             <GroupingStatus grouping={results.grouping} />
+          </div>
+          <div className="mb-4">
+            <SentimentStatus sentiment={results.sentiment} />
           </div>
 
           {results.days.map((day) => (

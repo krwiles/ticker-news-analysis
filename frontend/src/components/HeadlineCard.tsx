@@ -1,5 +1,6 @@
 import type { Headline } from "../search";
 import { CategoryBadge } from "./CategoryBadge";
+import { SentimentPill } from "./SentimentPill";
 
 interface HeadlineCardProps {
   headline: Headline;
@@ -19,7 +20,11 @@ export function HeadlineCard({ headline }: HeadlineCardProps) {
         >
           {headline.title}
         </a>
-        <CategoryBadge category={headline.category} />
+        <div className="flex shrink-0 items-center gap-1.5">
+          {/* Pending until the fire-and-forget sentiment job resolves this headline -- see SentimentPill. */}
+          <SentimentPill enumValue={headline.sentiment_enum} score={headline.sentiment_score} gloss={headline.sentiment_gloss} />
+          <CategoryBadge category={headline.category} />
+        </div>
       </div>
       <p className="mt-1 text-xs text-slate-500">
         {/* outlet is the original publisher (e.g. "Yahoo"), reported by
@@ -33,6 +38,8 @@ export function HeadlineCard({ headline }: HeadlineCardProps) {
           never fetched separately, and just absent when a provider
           doesn't give one (e.g. EDGAR). */}
       {headline.summary && <p className="mt-1 text-sm text-slate-600">{headline.summary}</p>}
+      {/* rationale is the LLM's own explanation for the score -- distinct from summary, only shown once resolved. */}
+      {headline.sentiment_rationale && <p className="mt-1 text-xs text-slate-400">{headline.sentiment_rationale}</p>}
     </div>
   );
 }

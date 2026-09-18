@@ -1,0 +1,221 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 30 — Sentiment Retry, Ordering, and Incremental Writes</title>
+<link rel="stylesheet" href="../assets/lesson.css">
+</head>
+<body>
+<div class="lesson">
+
+  <p class="eyebrow">Lesson 30 of 30 · ticker-news-analysis stack (sentiment arc — Arc 5 — live bug-fix)</p>
+  <h1>Sentiment retry, ordering, and incremental writes</h1>
+  <p class="subtitle">Three user-reported bugs, one shared root cause underneath two of them — and a test that broke for the right reason once the fix actually worked.</p>
+
+  <div class="callout">
+    <p>
+      Not a planned lesson — after rebuilding Arc 5's UI, real usage surfaced three problems: Refresh didn't
+      seem to redo failed sentiment, the page only ever updated all-at-once instead of gradually, and
+      sentiment "fails quite often." All three trace to real, log-backed causes, not vague hunches.
+    </p>
+  </div>
+
+  <h2>Reading the actual logs before guessing</h2>
+  <p>
+    Every sentiment failure in the prior 6 hours — 54 of 54 — carried the exact same message:
+    <code>"OpenAI sentiment fetch failed: "</code>. Empty. That's not a coincidence, it's a fingerprint:
+    a bare <code>httpx</code> timeout exception's own <code>str()</code> is empty when it's raised with no
+    arguments, while a real HTTP error response (a 429, a 500) always carries real text. Failures clustered
+    in ~200ms windows right at the 10-second client timeout, even at concurrency well under the
+    <code>Semaphore(20)</code> cap lesson 26 already added — a different shape from that lesson's own
+    239-headline pool-exhaustion cascade. The honest conclusion: this looks like real load or rate limiting
+    on OpenAI's side, and the code had no way to say more than that, because it only ever logged the
+    (empty) message, never the exception's actual type.
+  </p>
+
+  <h2>Two bugs sharing one root cause — but found by reading different files</h2>
+  <p>
+    "Fails often" had one diagnosis. The other two reports — Refresh not redoing a retry, and the page not
+    updating gradually — turned out to share a root cause, but a different one, only visible by reading
+    <code>compute_and_persist_sentiment</code> itself:
+  </p>
+  <pre><code>async with httpx.AsyncClient(timeout=10.0) as client:
+    results = await asyncio.gather(*(_get_one(h) for h in pending_headlines))
+
+async with session_factory() as session:
+    for headline, result, error in results:
+        ...
+    await session.commit()  # <- once, at the very end</code></pre>
+  <p>
+    Every concurrent call had to finish — including any that were queued behind the semaphore — before a
+    single row got written, and everything wrote inside one uncommitted transaction until the very last
+    line. A real batch could take 60-100+ seconds end to end. The frontend's poll loop was working exactly
+    as designed; there was just nothing new in the database for it to find until the whole thing was over.
+  </p>
+
+  <h2>The fix: asyncio.as_completed, not asyncio.gather</h2>
+  <p>
+    <code>gather</code> waits for everything, then hands back one list, in submission order.
+    <code>as_completed</code> hands back each result the moment it's ready, in <em>completion</em> order —
+    exactly the shape needed to write (and commit) incrementally:
+  </p>
+  <pre><code>tasks = [asyncio.ensure_future(_fetch_with_retry(h)) for h in pending_headlines]
+for coro in asyncio.as_completed(tasks):
+    headline, result, error = await coro
+    ...  # write this one headline's row
+    await session.commit()  # <- once per headline, not once for the whole batch</code></pre>
+  <p>
+    Writes stay sequential either way (one at a time, inside the loop) — the concurrency lives entirely in
+    the fetching (bounded by the same semaphore as before), never in the writing. That's what keeps the
+    Story-aggregate running-average math safe from a lost update, exactly as before.
+  </p>
+
+  <h2>One automatic retry, and why the delay lives outside the semaphore</h2>
+  <p>
+    Given most failures look transient, a single same-run retry is worth it before giving up:
+  </p>
+  <pre><code>async def _fetch_with_retry(headline):
+    for attempt in range(2):
+        if attempt > 0:
+            await asyncio.sleep(SENTIMENT_RETRY_DELAY_SECONDS)
+        try:
+            async with semaphore:
+                return headline, await _fetch_one(headline), None
+        except ProviderFetchError as exc:
+            last_error = exc
+    return headline, None, last_error</code></pre>
+  <p>
+    The <code>sleep</code> happens <em>outside</em> <code>async with semaphore</code> on purpose. Holding a
+    concurrency slot while doing nothing but waiting would block some other, unrelated headline from ever
+    getting a turn — releasing it during the pause means a retry doesn't cost the rest of the batch anything.
+  </p>
+
+  <h2>error.__cause__: recovering the exception the log was throwing away</h2>
+  <p>
+    <code>ProviderFetchError(f"...: {exc}") from exc</code> — that trailing <code>from exc</code> sets
+    Python's own <code>__cause__</code> attribute to the real underlying exception. It was always there;
+    nothing was reading it:
+  </p>
+  <pre><code>log.warning(
+    "providers.sentiment_failed",
+    error_type=type(error.__cause__ or error).__name__,
+    error=str(error),
+)</code></pre>
+  <p>
+    Verified live immediately after deploying this: the next real failure logged
+    <code>error_type: "ReadTimeout"</code> — confirming the diagnosis directly, not just supporting it.
+  </p>
+
+  <h2>The frontend bug hiding behind a deliberate design choice from lesson 26</h2>
+  <p>
+    Lesson 26 made <code>_compute_sentiment_status</code> check <code>error</code> before
+    <code>processing</code>, on purpose — so one real failure is never silently hidden by other headlines
+    still pending. That was the right call. But <code>SearchPage</code>'s poll guard only started polling
+    on <code>"processing"</code> — so the instant <em>any</em> headline failed, the page stopped watching
+    for the <em>rest</em> of a batch that might still be actively resolving. The fix reads the real,
+    per-headline signal instead of the coarse page-level one:
+  </p>
+  <pre><code>export function hasPendingSentiment(days: DayGroup[]): boolean {
+  return days.some((day) =>
+    day.stories.some(
+      (story) => story.primary.sentiment_status === null
+        || story.other_members.some((h) => h.sentiment_status === null),
+    ),
+  );
+}</code></pre>
+
+  <h2>A second bug, fixed by the same change: Refresh landing on an unchanged status</h2>
+  <p>
+    The poll effect used to depend on <code>[results?.ticker, results?.sentiment]</code> — specific
+    <em>values</em>. If a manual Refresh started and ended on the same overall status (<code>"error"</code>
+    both times), those values never changed, so the effect never re-ran, even though a brand-new retry had
+    genuinely just been kicked off server-side. Depending on the whole <code>results</code> object instead
+    fixes this for free: <code>setResults</code> always produces a new object, on every fetch, whether or
+    not any field's value happens to match the last one — so the effect re-evaluates from scratch every
+    single time, with no separate "did anything really change" tracking needed.
+  </p>
+
+  <h2>A test that broke for the right reason</h2>
+  <div class="callout">
+    <p>
+      One existing test assumed two headlines' OpenAI calls would arrive in a fixed order —
+      <code>side_effect=[success, failure]</code>, matching insertion order. Once those two calls started
+      genuinely racing (concurrent, and the failing one now retried, consuming a response the old fixed
+      list didn't have), the test broke with a <code>StopIteration</code>. Not a sign the retry logic was
+      wrong — the opposite: the test's own unstated assumption (deterministic call order) was never actually
+      true, and the retry logic finally exercised the crack. Fixed by keying the mock's response off each
+      request's own content instead of call order, so the test no longer depends on something it never
+      should have.
+    </p>
+  </div>
+
+  <h2>Live verification, not just green tests</h2>
+  <p>
+    Watched a real <code>SPCX</code> search with genuine prior failures resolve, polling
+    <code>/api/search/status</code> repeatedly: the pending-headline count dropped
+    <strong>13 → 12 → 8 → 4 → 0</strong> across successive ticks — real, gradual progress. Two fresh
+    <code>/api/search</code> calls on a ticker with 3 lingering errors recovered 2 of them
+    (<strong>298 → 300</strong> <code>ok</code>); the <code>ok</code> count only ever grew across every
+    refresh watched, confirming "once real, never touched again" held under genuine concurrent retry
+    activity — not just what the unit tests already proved in isolation.
+  </p>
+
+  <h2>Follow-up: a second real failure sample, and one more tuning move</h2>
+  <div class="callout">
+    <p>
+      A later real run (<code>AVGO</code>, 113 pending headlines) resolved 107/113 first-pass-plus-retry —
+      6 permanent failures, every one <code>error_type: "ReadTimeout"</code> again, this time scattered
+      across ~9 seconds of the batch rather than one simultaneous wave (the semaphore fix still holding;
+      this is a smaller, different-shaped symptom). Two independent real batches, same consistent signature
+      — genuinely timeouts, not rejections. <code>SENTIMENT_HTTP_TIMEOUT_SECONDS</code> doubled from 10s to
+      20s, giving a slow-but-otherwise-successful response more room before getting cut off. Not yet
+      re-measured against a fresh sample — a reasonable next check once more real volume runs through it.
+    </p>
+  </div>
+
+  <h2>Check your understanding</h2>
+
+  <div class="check">
+    <p class="q">Q1. Why does switching from <code>asyncio.gather</code> to <code>asyncio.as_completed</code> fix the "page only updates all at once" bug, when both still run the same concurrent fetches?</p>
+    <details>
+      <summary>Reveal answer</summary>
+      <p class="answer">The concurrency was never the problem -- both use the same semaphore-bounded fetches.
+      The problem was when writes happened: gather forces the code to wait for literally every result before
+      touching the database at all, then the old code wrote everything in one final commit. as_completed
+      instead hands back each result the moment it's ready, letting the write (and commit) for that one
+      headline happen immediately, independent of how long the slowest remaining headline takes.</p>
+    </details>
+  </div>
+
+  <div class="check">
+    <p class="q">Q2. The poll effect now depends on the whole <code>results</code> object instead of <code>[results?.ticker, results?.sentiment]</code>. What real bug did narrowing to those two fields cause?</p>
+    <details>
+      <summary>Reveal answer</summary>
+      <p class="answer">A manual Refresh that started and ended on the same overall sentiment status (e.g.
+      "error" -> still "error") never changed either dependency value, so the effect never re-ran -- even
+      though a brand-new retry had genuinely just been enqueued server-side. Depending on the whole object
+      means any new fetch (the value happening to match the last one or not) still produces a new object
+      reference, so the effect re-evaluates every time, with no risk of a same-value refresh going unnoticed.</p>
+    </details>
+  </div>
+
+  <div class="source">
+    <p class="label">Primary sources</p>
+    <p>
+      <a href="../docs/plans/0030-sentiment-retry-ordering-and-incremental-writes.md">Lesson 30's plan doc</a> ·
+      <a href="../docs/specs/0005-headline-sentiment-analysis.md">Spec 0005 — Headline Sentiment Analysis (revised)</a> ·
+      <a href="https://docs.python.org/3/library/asyncio-task.html#asyncio.as_completed">Python docs — asyncio.as_completed</a>
+    </p>
+  </div>
+
+  <p class="ask">Anything unclear about why the retry delay sits outside the semaphore, or want to see the
+  real worker logs from the SPCX run this lesson verified against? Ask your teacher (this agent).</p>
+
+  <div class="nav">
+    <a href="0029-frontend-sentiment-ui-and-polling.html">← Lesson 29: frontend sentiment UI + polling</a>
+  </div>
+
+</div>
+</body>
+</html>

@@ -37,9 +37,18 @@ closely, without reading everything closely first.
   (spec 0002/ADR 0012) — `NOTES.md` already flags this as a signal to reuse, not re-derive.
 - A search's results aren't blocked waiting on sentiment — headlines can appear before their sentiment is
   ready, and the page automatically catches up once it's computed, without the user having to take any
-  action (no manual refresh needed, though one still works).
+  action (no manual refresh needed, though one still works). Catch-up is incremental, not all-or-nothing:
+  each Headline's sentiment appears as soon as it's individually computed, not held back until every
+  Headline in the batch has one — a page with 200 pending Headlines should visibly fill in throughout, not
+  sit unchanged until the 200th finishes.
 - That catch-up is visually invisible except for the sentiment itself: nothing else on the page flashes,
   reflows, or reorders while it happens (see Outputs below for the exact visible shape).
+- Headlines are computed newest-published first. A user checking in on a search cares most about the most
+  recent news; resolving it first means the most relevant sentiment appears soonest, not last.
+- A single failed attempt gets one automatic retry within the same job run before being marked `error` —
+  real evidence (live worker logs) shows most failures are transient (a timeout under concurrent load, not
+  a permanent rejection), so a lone failure isn't yet reason to give up. This is separate from, and in
+  addition to, the existing retry-on-a-later-request behavior below.
 - Once a Headline actually receives a real score, it's permanent — never re-evaluated later, mirroring
   Story's own once-set-never-touched rule. A skipped or errored attempt is different: it isn't a dead end —
   a later request that happens to touch the same Headline again is allowed to retry it. Only a real score,

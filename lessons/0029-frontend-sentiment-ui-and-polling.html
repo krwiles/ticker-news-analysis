@@ -1,0 +1,187 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 29 — Frontend Sentiment UI + Polling</title>
+<link rel="stylesheet" href="../assets/lesson.css">
+</head>
+<body>
+<div class="lesson">
+
+  <p class="eyebrow">Lesson 29 of 30 · ticker-news-analysis stack (sentiment arc — Arc 5 — capstone)</p>
+  <h1>Frontend: sentiment UI + polling</h1>
+  <p class="subtitle">A poll loop that stops itself, one shared pill component instead of four visual states, and a Story wrapper gated on member count, not on whether the data happens to be there.</p>
+
+  <div class="callout">
+    <p>
+      Capstone of this arc, same role lesson 22 played for arc 4: spec 0005 is fully built after this, not
+      just modeled. Pure frontend — no backend or API changes, everything consumed here already shipped in
+      lessons 26 and 28.
+    </p>
+  </div>
+
+  <h2>A poll loop that mirrors StatusPage's shape, but not its lifetime</h2>
+  <p>
+    <code>StatusPage</code> polls forever, from mount, with an immediate first tick — there's always fresh
+    data to show and no reason to ever stop. Sentiment is different: it's a fire-and-forget job with a real
+    endpoint (a genuine window where a poll is worth making), and a real end (once it resolves, polling
+    forever afterward would just be waste). The fix uses React's own effect-cleanup mechanics instead of a
+    manual "stop polling" flag:
+  </p>
+  <pre><code>useEffect(() => {
+  if (!results || results.sentiment !== "processing") {
+    return;
+  }
+  let cancelled = false;
+  const id = setInterval(poll, SENTIMENT_POLL_INTERVAL_MS);
+  return () => {
+    cancelled = true;
+    clearInterval(id);
+  };
+}, [results?.ticker, results?.sentiment]);</code></pre>
+  <p>
+    Keying the effect on <code>results.sentiment</code> itself is the trick: every time sentiment changes
+    (including the very change a poll tick just caused), the effect re-runs — cleanup tears down the old
+    interval, and the guard decides fresh whether a new one is worth creating. Once sentiment is no longer
+    <code>"processing"</code>, that guard returns early and nothing gets scheduled. No stop flag, no manual
+    bookkeeping — the interval's existence <em>is</em> the "am I still polling" state.
+  </p>
+
+  <h2>Merge, not replace — the consequence ADR 0014 flagged two lessons ago</h2>
+  <p>
+    <code>/api/search/status</code> deliberately returns a narrower shape than <code>/api/search</code> —
+    just <code>{sentiment, days}</code>, no <code>ticker</code>/<code>status</code>/<code>providers</code>/
+    <code>grouping</code> (it never re-runs the fetch, so it has nothing new to say about them). A poll tick
+    that called <code>setResults(status)</code> directly would silently wipe those other fields from the
+    screen the moment sentiment finished resolving:
+  </p>
+  <pre><code>setResults((prev) => (prev ? { ...prev, sentiment: status.sentiment, days: status.days } : prev));</code></pre>
+  <p>
+    Spreading the previous state and overwriting only the two keys this endpoint actually knows about is
+    what keeps the rest of the page stable across every poll tick.
+  </p>
+
+  <h2>One shared pill, two visual buckets — not four</h2>
+  <p>
+    A headline's sentiment can be unresolved for three different reasons — not yet attempted, skipped (no
+    API key), or a real error — plus one resolved state with a real enum. That's a real four-way distinction,
+    but it doesn't belong on every single headline's own pill. The new page-level <code>SentimentStatus</code>
+    component (mirroring <code>GroupingStatus</code> exactly) explains the <em>why</em> once, for the whole
+    page. The per-item <code>SentimentPill</code> only needs two buckets:
+  </p>
+  <pre><code>if (enumValue === null || score === null) {
+  return &lt;span className="... text-slate-400"&gt;Pending&lt;/span&gt;;
+}
+return (
+  &lt;span className={`... ${COLOR[enumValue]}`}&gt;
+    {gloss ? `${gloss} · ${score}` : `${enumValue} · ${Math.round(score)}`}
+  &lt;/span&gt;
+);</code></pre>
+  <p>
+    That same component is shared by <code>HeadlineCard</code> (which always has a <code>gloss</code>) and
+    <code>Story</code>'s own aggregate pill (which never does — a Story average is just a number, no LLM
+    gloss attached to it), so the two call sites can't quietly drift into different visual languages for the
+    same underlying idea.
+  </p>
+
+  <h2>The Story wrapper is gated on member count, not on whether the data exists</h2>
+  <p>
+    Lesson 28's own live verification already showed something easy to miss here: the backend returns a
+    real, if trivial, <code>sentiment_average</code> even for a Story of exactly one member — it's just that
+    member's own score, reflected back. <code>CONTEXT.md</code> is explicit that the aggregate concept only
+    applies once there's more than one member to average, so the frontend gate has to match that definition,
+    not the raw presence of the field:
+  </p>
+  <pre><code>const isMultiMember = story.other_members.length > 0;
+if (!isMultiMember) {
+  return &lt;div&gt;{primaryCard}&lt;/div&gt;;
+}
+// ...outer card, "Story" pill, aggregate SentimentPill...</code></pre>
+  <p>
+    Checking <code>sentiment_average !== null</code> instead would have been wrong in a subtle way: a real
+    single-member Story would occasionally show a pointless "Story" wrapper around its one and only headline,
+    the moment that headline's own sentiment happened to resolve.
+  </p>
+
+  <h2>A test bug caught by the tests themselves, not by inspection</h2>
+  <div class="callout">
+    <p>
+      The first version of the "multi-member Story shows a Pending aggregate pill" test left both Story
+      members with their default, unresolved sentiment. <code>getByText("Pending")</code> failed —
+      correctly — because there were <em>two</em> Pending pills on the page: the aggregate's, and the still-
+      unresolved member's own headline-level pill (rendered inside the closed <code>&lt;details&gt;</code>,
+      present in the DOM even while collapsed). Fixed by giving both members a real resolved score in that
+      test, so the only remaining "Pending" text is unambiguously the aggregate's. A real, if small,
+      reminder that a shared component means a test has to think about every place it renders, not just the
+      one under test.
+    </p>
+  </div>
+
+  <h2>Verification, and an honest gap</h2>
+  <p>
+    81/81 frontend tests passing (22 new — the first in this codebase to exercise a timer-driven effect, via
+    <code>vi.useFakeTimers({ shouldAdvanceTime: true })</code> combined with
+    <code>vi.advanceTimersByTimeAsync()</code>), <code>tsc --noEmit</code> clean, <code>npm run build</code>
+    clean. Checked against the real running stack: a live MSFT search returned
+    <code>sentiment: "processing"</code> immediately, then <code>"ok"</code> on a follow-up
+    <code>/api/search/status</code> call seconds later — the exact transition the poll effect's stop
+    condition exists to catch — and a real 3-member Story's <code>80.666...</code> average confirmed
+    rendering correctly as <code>SentimentPill</code>'s <code>"positive · 81"</code>.
+  </p>
+  <p>
+    What's <em>not</em> been done, same honest gap lesson 22 named: an actual browser click-through — no
+    browser-automation tool was available this session. Green tests, clean types, and a clean build prove
+    logic and shape, not that a human looking at the rendered page sees what's intended. Worth a manual pass
+    before calling this fully done.
+  </p>
+
+  <h2>Check your understanding</h2>
+
+  <div class="check">
+    <p class="q">Q1. Why is the poll <code>useEffect</code> keyed on <code>[results?.ticker,
+    results?.sentiment]</code> instead of <code>[]</code> like <code>StatusPage</code>'s?</p>
+    <details>
+      <summary>Reveal answer</summary>
+      <p class="answer">StatusPage polls forever, so it only ever needs to subscribe once, at mount.
+      Sentiment polling needs to stop once resolved -- keying the effect on sentiment itself means every
+      status change re-runs the effect, tearing down the old interval via cleanup and only creating a new
+      one if the guard (still "processing") is still true. The interval's own existence becomes the "still
+      polling" state, with no separate flag to keep in sync.</p>
+    </details>
+  </div>
+
+  <div class="check">
+    <p class="q">Q2. Why does a Story of exactly one member never show the outer "Story" wrapper, even though
+    the backend gives it a real <code>sentiment_average</code>?</p>
+    <details>
+      <summary>Reveal answer</summary>
+      <p class="answer">The aggregate concept (CONTEXT.md) only means something once there's more than one
+      member to average -- a lone member's "average" is just its own score reflected back, not a new fact.
+      The frontend gates on other_members.length, not on whether sentiment_average happens to be non-null,
+      so a single-member Story never gets a pointless wrapper around its one headline just because that
+      headline's sentiment resolved.</p>
+    </details>
+  </div>
+
+  <div class="source">
+    <p class="label">Primary sources</p>
+    <p>
+      <a href="../docs/plans/0029-frontend-sentiment-ui-and-polling.md">Lesson 29's plan doc</a> ·
+      <a href="../docs/specs/0005-headline-sentiment-analysis.md">Spec 0005 — Headline Sentiment Analysis</a> ·
+      <a href="../docs/adr/0014-sentiment-analysis-technical-approach.md">ADR 0014 — sentiment technical approach (revised)</a>
+    </p>
+  </div>
+
+  <p class="ask">Anything unclear about why shouldAdvanceTime + advanceTimersByTimeAsync were both needed
+  together, or want to actually open this in a browser and watch a poll cycle happen live? Ask your teacher
+  (this agent).</p>
+
+  <div class="nav">
+    <a href="0028-api-search-reshaped-again-for-sentiment.html">← Lesson 28: /api/search reshaped again for sentiment</a>
+    <a href="0030-sentiment-retry-ordering-and-incremental-writes.html">Next → Lesson 30: sentiment retry, ordering, and incremental writes</a>
+  </div>
+
+</div>
+</body>
+</html>
