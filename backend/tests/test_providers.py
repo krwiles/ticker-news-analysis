@@ -9,12 +9,15 @@ import pytest
 import respx
 from sqlalchemy import select
 
+from ticker_backend.config import settings
 from ticker_backend.models import Company, Headline, Story
 from ticker_backend.providers import (
     FILING_CONTENT_CAP_CHARS,
     ProviderFetchError,
+    _derive_sentiment_enum,
     _extract_relevant_filing_section,
     _strip_html_to_text,
+    compute_and_persist_sentiment,
     embedding_input_text,
     fetch_and_persist_headlines,
     fetch_edgar_filings,
@@ -26,6 +29,31 @@ from ticker_backend.providers import (
 )
 
 TICKERS_JSON = {"0": {"cik_str": 320193, "ticker": "AAPL", "title": "Apple Inc."}}
+
+
+async def _seed_headline_for_sentiment(
+    session_factory, ticker: str, url: str, story_id=None, sentiment_status=None, category="news"
+):
+    """A news Headline ready for compute_and_persist_sentiment -- real
+    Company row first (headlines.ticker's own FK, same as providers.py's
+    real insert path), published just now so it falls inside the recent
+    window every test implicitly relies on."""
+    async with session_factory() as session:
+        await session.merge(Company(ticker=ticker))
+        session.add(
+            Headline(
+                ticker=ticker,
+                title="A real headline",
+                url=url,
+                category=category,
+                provider="finnhub",
+                summary="A short blurb.",
+                published_at=datetime.now(timezone.utc),
+                story_id=story_id,
+                sentiment_status=sentiment_status,
+            )
+        )
+        await session.commit()
 
 
 def _edgar_filing(form: str, days_ago: int, accession: str):
@@ -264,6 +292,146 @@ async def test_get_filing_content_raises_typed_error_on_failure(test_session_fac
     async with httpx.AsyncClient() as client:
         with pytest.raises(ProviderFetchError):
             await get_filing_content("https://example.com/filing.htm", client)
+
+
+def test_derive_sentiment_enum_boundaries():
+    # Real cutoffs from lesson 26's own empirical pass -- <=40 negative, >=70 positive, else neutral.
+    assert _derive_sentiment_enum(0) == "negative"
+    assert _derive_sentiment_enum(40) == "negative"
+    assert _derive_sentiment_enum(41) == "neutral"
+    assert _derive_sentiment_enum(69) == "neutral"
+    assert _derive_sentiment_enum(70) == "positive"
+    assert _derive_sentiment_enum(100) == "positive"
+
+
+@pytest.fixture
+def openai_configured(monkeypatch):
+    # Real test/CI environments never have a real key configured -- see
+    # test_compute_and_persist_sentiment_skipped_when_not_configured, which
+    # deliberately does NOT use this fixture.
+    monkeypatch.setattr(settings, "openai_api_key", "test-key-not-real")
+
+
+def _sentiment_response(score: int, gloss: str, rationale: str) -> httpx.Response:
+    import json as _json
+
+    return httpx.Response(
+        200, json={"choices": [{"message": {"content": _json.dumps({"score": score, "gloss": gloss, "rationale": rationale})}}]}
+    )
+
+
+@respx.mock
+async def test_compute_and_persist_sentiment_persists_real_score(test_session_factory, openai_configured):
+    await _seed_headline_for_sentiment(test_session_factory, "AAPL", "https://example.com/sent-1")
+    respx.post("https://api.openai.com/v1/chat/completions").mock(
+        return_value=_sentiment_response(90, "bullish", "Strong results.")
+    )
+
+    result = await compute_and_persist_sentiment("AAPL", test_session_factory)
+
+    assert result == {"status": "ok"}
+    async with test_session_factory() as session:
+        headline = (await session.execute(select(Headline).where(Headline.url == "https://example.com/sent-1"))).scalar_one()
+    assert headline.sentiment_score == 90
+    assert headline.sentiment_gloss == "bullish"
+    assert headline.sentiment_rationale == "Strong results."
+    assert headline.sentiment_status == "ok"
+
+
+@respx.mock
+async def test_compute_and_persist_sentiment_updates_story_aggregate(test_session_factory, openai_configured):
+    async with test_session_factory() as session:
+        story = Story(ticker="AAPL")
+        session.add(story)
+        await session.commit()
+        story_id = story.id
+
+    await _seed_headline_for_sentiment(test_session_factory, "AAPL", "https://example.com/sent-agg-1", story_id=story_id)
+    await _seed_headline_for_sentiment(test_session_factory, "AAPL", "https://example.com/sent-agg-2", story_id=story_id)
+    respx.post("https://api.openai.com/v1/chat/completions").mock(
+        side_effect=[
+            _sentiment_response(80, "bullish", "First."),
+            _sentiment_response(60, "routine", "Second."),
+        ]
+    )
+
+    await compute_and_persist_sentiment("AAPL", test_session_factory)
+
+    async with test_session_factory() as session:
+        story = await session.get(Story, story_id)
+    # First member: average = 80, count = 1. Second: 80 + (60-80)/2 = 70, count = 2.
+    assert story.sentiment_score_count == 2
+    assert story.sentiment_average == pytest.approx(70.0)
+
+
+async def test_compute_and_persist_sentiment_skipped_when_not_configured(test_session_factory):
+    # No respx mock registered at all -- a real HTTP attempt would raise a connection error.
+    monkeypatch_value = settings.openai_api_key
+    settings.openai_api_key = ""
+    try:
+        await _seed_headline_for_sentiment(test_session_factory, "AAPL", "https://example.com/sent-skip")
+        result = await compute_and_persist_sentiment("AAPL", test_session_factory)
+    finally:
+        settings.openai_api_key = monkeypatch_value
+
+    assert result == {"status": "skipped"}
+    async with test_session_factory() as session:
+        headline = (await session.execute(select(Headline).where(Headline.url == "https://example.com/sent-skip"))).scalar_one()
+    assert headline.sentiment_status == "skipped"
+    assert headline.sentiment_score is None
+
+
+@respx.mock
+async def test_compute_and_persist_sentiment_writes_error_status_on_failure(test_session_factory, openai_configured):
+    await _seed_headline_for_sentiment(test_session_factory, "AAPL", "https://example.com/sent-err")
+    respx.post("https://api.openai.com/v1/chat/completions").mock(return_value=httpx.Response(401))
+
+    result = await compute_and_persist_sentiment("AAPL", test_session_factory)
+
+    assert result == {"status": "error"}
+    async with test_session_factory() as session:
+        headline = (await session.execute(select(Headline).where(Headline.url == "https://example.com/sent-err"))).scalar_one()
+    assert headline.sentiment_status == "error"
+    assert headline.sentiment_score is None
+
+
+@respx.mock
+async def test_compute_and_persist_sentiment_retries_previously_errored_headline(test_session_factory, openai_configured):
+    await _seed_headline_for_sentiment(test_session_factory, "AAPL", "https://example.com/sent-retry", sentiment_status="error")
+    respx.post("https://api.openai.com/v1/chat/completions").mock(
+        return_value=_sentiment_response(85, "bullish", "Recovered on retry.")
+    )
+
+    result = await compute_and_persist_sentiment("AAPL", test_session_factory)
+
+    assert result == {"status": "ok"}
+    async with test_session_factory() as session:
+        headline = (await session.execute(select(Headline).where(Headline.url == "https://example.com/sent-retry"))).scalar_one()
+    assert headline.sentiment_status == "ok"
+    assert headline.sentiment_score == 85
+
+
+@respx.mock
+async def test_compute_and_persist_sentiment_excludes_errored_member_from_story_aggregate(test_session_factory, openai_configured):
+    async with test_session_factory() as session:
+        story = Story(ticker="AAPL")
+        session.add(story)
+        await session.commit()
+        story_id = story.id
+
+    await _seed_headline_for_sentiment(test_session_factory, "AAPL", "https://example.com/sent-mix-1", story_id=story_id)
+    await _seed_headline_for_sentiment(test_session_factory, "AAPL", "https://example.com/sent-mix-2", story_id=story_id)
+    respx.post("https://api.openai.com/v1/chat/completions").mock(
+        side_effect=[_sentiment_response(75, "bullish", "Real score."), httpx.Response(401)]
+    )
+
+    await compute_and_persist_sentiment("AAPL", test_session_factory)
+
+    async with test_session_factory() as session:
+        story = await session.get(Story, story_id)
+    # The errored member never counted -- average is exactly the one real score, not skewed.
+    assert story.sentiment_score_count == 1
+    assert story.sentiment_average == pytest.approx(75.0)
 
 
 def test_embedding_input_text_uses_title_only_when_no_summary():

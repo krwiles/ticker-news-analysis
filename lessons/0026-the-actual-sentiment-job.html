@@ -1,0 +1,141 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 26 — The Actual Sentiment Job</title>
+<link rel="stylesheet" href="../assets/lesson.css">
+</head>
+<body>
+<div class="lesson">
+
+  <p class="eyebrow">Lesson 26 of 26 · ticker-news-analysis stack (sentiment arc — Arc 5)</p>
+  <h1>The actual sentiment job</h1>
+  <p class="subtitle">Two real architectural gaps found before any code was written, and a third found only once this ran against a real 239-headline batch — capstone of Arc 5, same role lesson 19 played for Arc 4.</p>
+
+  <div class="callout">
+    <p>
+      Everything from lessons 23-25 gets wired together here: the columns, the classification call,
+      the filing extraction. Two design gaps surfaced during planning, before a line of code existed.
+      A third only showed up once this ran against real production volume, not a small sample.
+    </p>
+  </div>
+
+  <h2>Gap 1: "poll the same endpoint" quietly meant "re-fetch everything, every few seconds"</h2>
+  <p>
+    ADR 0014's original job-architecture decision said the frontend should poll the existing full
+    <code>/api/search</code>-shaped response. Taken literally, that's wrong: <code>/api/search</code>
+    unconditionally enqueues <em>and awaits</em> <code>fetch_headlines_job</code> on every call — polling it
+    would re-trigger a full EDGAR/Finnhub/embeddings/grouping pass on every tick, not just re-check sentiment.
+  </p>
+  <p>
+    Fixed with a new, read-only <code>GET /api/search/status</code> — no job enqueue at all, just current
+    Postgres state, sharing its query logic with <code>/api/search</code> so the two never drift apart:
+  </p>
+  <pre><code>@router.get("/api/search/status")
+async def search_status(ticker: str, session_factory=Depends(get_session_factory)) -> dict:
+    ticker = ticker.upper()
+    days, sentiment_status = await _load_search_results(ticker, session_factory)
+    return {"sentiment": sentiment_status, "days": days}</code></pre>
+
+  <h2>Gap 2: a real fourth status grouping never needed</h2>
+  <p>
+    <code>grouping</code>'s status is computed and returned within the same request that ran it — there's no
+    "still working on it" state to represent, because it's always already finished by the time anything reads
+    it. Sentiment is different: the job is fire-and-forget, so there's a genuine window where work is
+    actually still in progress. Derived fresh from already-queried rows, checked in this priority order:
+  </p>
+  <pre><code>def _compute_sentiment_status(headlines: list[Headline]) -> str:
+    if not settings.openai_api_key:
+        return "skipped"
+    if any(h.sentiment_status == "error" for h in headlines):
+        return "error"
+    if any(h.sentiment_status is None for h in headlines):
+        return "processing"
+    return "ok"</code></pre>
+  <p>
+    Order matters here on purpose: an error surfaces even while other headlines are still pending, rather
+    than being silently masked by "processing."
+  </p>
+
+  <h2>Gap 3: a small sample validates the pattern, not the scale</h2>
+  <div class="callout">
+    <p>
+      ADR 0014's own research verified 20 concurrent <code>get_sentiment</code> calls complete cleanly in
+      6.64s. That number made it into this lesson's plan unquestioned — until a real search for MSFT turned
+      up <strong>239 headlines</strong> in its 7-day window, an order of magnitude more. Firing all 239
+      through one unbounded <code>asyncio.gather</code> made every single one time out <em>together</em>, not
+      a clean "first 100 succeed, the rest queue." httpx's default client caps at 100 connections; that much
+      real simultaneous load against OpenAI's own rate limiting backed the pool up faster than requests could
+      drain, pushing the queued remainder past the 10-second timeout as a group.
+    </p>
+  </div>
+  <pre><code>semaphore = asyncio.Semaphore(20)
+
+async def _get_one(headline: Headline):
+    async with semaphore:
+        ...</code></pre>
+  <p>
+    Re-verified against the same real batch after the fix: <strong>238/239 succeeded</strong> on the first
+    pass, one genuine transient failure. The page-level status correctly showed <code>error</code> for that
+    one real failure — masking nothing, exactly as designed — and the retry path (a second
+    <code>/api/search</code> call, the same mechanism that makes a previously-skipped headline eventually
+    resolve once a key gets configured) picked it up: <strong>239/239</strong> on the next attempt.
+  </p>
+
+  <h2>The math, checked against real data, not just the mocked tests</h2>
+  <p>
+    One real MSFT Story — three headlines about the same dividend increase, each independently scored:
+  </p>
+  <pre><code>82  bullish     "Microsoft raises its dividend 8%..."
+75  reassuring  "How Microsoft's Dividend Boost Ties to AI Spending"
+35  concerning  "Microsoft (MSFT) Could Be 18% Overvalued..."</code></pre>
+  <p>
+    <code>(82 + 75 + 35) / 3 = 64.0</code> — exactly what the Story's own <code>sentiment_average</code>
+    column held after the incremental-update formula ran on real, live data. The synthetic tests already
+    proved the formula was correct in isolation; this is what proves it held up once real, independently
+    generated scores ran through it for real.
+  </p>
+
+  <h2>Check your understanding</h2>
+
+  <div class="check">
+    <p class="q">Q1. Why does <code>/api/search/status</code> not accept an <code>arq_redis</code> dependency at all?</p>
+    <details>
+      <summary>Reveal answer</summary>
+      <p class="answer">It's not just a convention -- it's a structural guarantee. Without that dependency
+      injected, there's no object in scope this endpoint could even call enqueue_job on. It's provably
+      incapable of triggering a job, not just written to avoid doing so.</p>
+    </details>
+  </div>
+
+  <div class="check">
+    <p class="q">Q2. 238 of 239 headlines succeeded, but the page still showed "error", not "processing" or "ok". Is that a bug?</p>
+    <details>
+      <summary>Reveal answer</summary>
+      <p class="answer">No -- that's the priority order working exactly as designed. "error" is checked
+      before "processing", specifically so a real failure is never hidden just because most of the batch is
+      still fine or still pending. One genuine error is enough to report error, on purpose.</p>
+    </details>
+  </div>
+
+  <div class="source">
+    <p class="label">Primary sources</p>
+    <p>
+      <a href="../docs/specs/0005-headline-sentiment-analysis.md">Spec 0005 — Headline Sentiment Analysis</a> ·
+      <a href="../docs/adr/0014-sentiment-analysis-technical-approach.md">ADR 0014 — sentiment technical approach (revised)</a>
+    </p>
+  </div>
+
+  <p class="ask">Anything unclear about why the semaphore fixes the cascade but a bigger httpx connection
+  pool alone wouldn't have, or want to see the real worker logs from the 239-headline run? Ask your teacher
+  (this agent).</p>
+
+  <div class="nav">
+    <a href="0025-filing-content-extraction.html">← Lesson 25: filing content extraction</a>
+    <span>Arc 5 complete — spec 0005's backend fully built. Frontend (lessons 27-29) still ahead.</span>
+  </div>
+
+</div>
+</body>
+</html>

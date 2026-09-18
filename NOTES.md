@@ -386,14 +386,36 @@ endpoint, endpoint before UI.
     score-to-enum threshold cutoffs get empirically tuned** (moved here from lesson 24 during that lesson's
     own planning) — real data to tune against only exists once this lesson's real pipeline is wired, the
     same reason lesson 19 is where `story_similarity_threshold` was tuned, not lesson 18.
-27. **Backend tests for the sentiment job** — mirrors lesson 20's dedicated testing lesson. Mocking OpenAI at
-    its boundary; the three-tier extraction fallback tested against fixtures modeling the three real cases
-    ADR 0014 found live (anchor present, anchor present but label-mismatched, no anchor and content
-    incorporated by reference elsewhere); the incremental average update including the first-member edge
-    case; all three `sentiment_status` outcomes (`ok`/`skipped`/`error`).
-28. **`/api/search` reshaped again** — response gains per-Headline sentiment fields and each Story's
-    aggregate; must stay pollable as the *same* shape (per ADR 0014's chosen "poll the full response" design,
-    not a new lightweight status endpoint) — mirrors lesson 21's shape.
+    ✅ built (plan: `docs/plans/0026-*.md`) — **two real architectural gaps found and resolved during
+    planning, before any code**: ADR 0014's "poll the existing `/api/search`-shaped response" turned out to
+    mean re-triggering the full fetch job on every poll tick (`/api/search` unconditionally enqueues *and
+    awaits* `fetch_headlines_job`) — fixed with a new, read-only `GET /api/search/status` endpoint, no job
+    enqueue at all, sharing its query logic with `/api/search`. And since the sentiment job is fire-and-
+    forget, there was no clean source for a page-level status — resolved with a real fourth state,
+    `processing` (alongside `ok`/`skipped`/`error`), derived fresh from already-queried headline rows on
+    every request, checked in that priority order so a real error is never masked by other headlines still
+    pending. Both folded into spec 0005 and ADR 0014 before implementation. Threshold cutoffs (≤40 negative,
+    ≥70 positive) came from 15 real headlines scoring cleanly into three separated clusters (15-34 / 50-68 /
+    75-90), the light pass agreed on. `RECENT_HEADLINES_WINDOW` extracted as a shared `config.py` constant
+    (not `search.py` or `providers.py` directly — either cross-import direction would've pulled a heavy,
+    unrelated dependency chain into a container mode that doesn't need it). **A third gap, found only once
+    this ran against real production volume, not a small sample**: a real MSFT search's 7-day window held
+    239 headlines — firing all of them through one unbounded `asyncio.gather` made every single one time out
+    together (httpx's default 100-connection cap plus real OpenAI rate limiting under that much simultaneous
+    load cascaded past the 10s timeout as a group), a completely different shape from ADR 0014's own
+    verified-safe 20-concurrent-call sample. Fixed with `asyncio.Semaphore(20)`; re-verified against the
+    same real batch — 238/239 succeeded first pass, the one genuine failure resolved via the already-
+    designed retry path on a second `/api/search` call. Spot-checked the Story aggregate against real,
+    independently-computed data: one real 3-member MSFT dividend Story's stored average (64) matched its
+    members' actual scores (82, 75, 35) exactly. 69/69 tests (13 new), zero regressions.
+27. ~~**Backend tests for the sentiment job**~~ — superseded: lessons 25 and 26 above both wrote their own
+    tests inline (the extraction fallback scenarios in 25, the job/retry/aggregate scenarios in 26) rather
+    than as a separate follow-up lesson, the same "arcs get reshaped once real per-lesson work happens"
+    precedent as lesson 23's own supersession in arc 4.
+28. **`/api/search` reshaped again** — response gains per-Headline sentiment fields (score/gloss/rationale)
+    and each Story's own aggregate (average + derived enum); the page-level `sentiment` status and the new
+    `/api/search/status` endpoint already exist as of lesson 26 — this lesson is specifically about exposing
+    the individual data, not the aggregate status. Mirrors lesson 21's shape.
 29. **Frontend: sentiment UI + polling** — `SearchPage` gains a poll loop (mirrors `StatusPage`'s existing
     pattern); `HeadlineCard` gains the sentiment pill (gloss + score together, colored by enum, greyed-out
     while pending, rationale as small text beneath); `Story` gains the nested outer card (its own "Story"

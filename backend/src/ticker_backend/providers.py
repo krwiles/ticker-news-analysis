@@ -12,14 +12,15 @@ import re
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from typing import Literal
 from zoneinfo import ZoneInfo
 
 import httpx
 import structlog
-from sqlalchemy import func, literal_column, update
+from sqlalchemy import func, literal_column, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
-from ticker_backend.config import settings
+from ticker_backend.config import RECENT_HEADLINES_WINDOW, settings
 from ticker_backend.db import async_session_factory
 from ticker_backend.milvus_client import STORY_PRIMARIES_COLLECTION, ensure_story_primaries_collection, get_milvus_client
 from ticker_backend.models import Company, Headline, Story
@@ -378,6 +379,131 @@ async def get_filing_content(url: str, client: httpx.AsyncClient) -> str:
     if len(section) >= FILING_CONTENT_CAP_CHARS:
         log.warning("providers.filing_content_capped", url=url, real_chars=len(text))
     return section
+
+
+# ~500 tokens (ADR 0014), approximated as chars/4 -- real headline+summary content runs roughly
+# 55-135 tokens, so this is a safety net against a genuine anomaly (a malformed provider field),
+# not a limit that should ever actually trigger in the common case.
+NEWS_CONTENT_CAP_CHARS = 2_000
+
+# Empirically checked against 15 real headlines spanning clearly positive/negative/neutral
+# content (lesson 26) -- a light-touch pass, not the full similarity-threshold treatment (a
+# boundary here is a labeling nuance, not a correctness bug the way a wrongly-merged Story was).
+# Real scores clustered cleanly: negative 15-34, neutral 50-68, positive 75-90 -- these cutoffs
+# sit in the real gaps between those clusters. See docs/plans/0026-*.md for the full sample.
+SENTIMENT_NEGATIVE_MAX = 40
+SENTIMENT_POSITIVE_MIN = 70
+
+
+def _derive_sentiment_enum(score: int) -> Literal["positive", "neutral", "negative"]:
+    """Always derived from the score, never asked of the model independently
+    (spec 0005/ADR 0014) -- guarantees the enum and score can never disagree."""
+    if score <= SENTIMENT_NEGATIVE_MAX:
+        return "negative"
+    if score >= SENTIMENT_POSITIVE_MIN:
+        return "positive"
+    return "neutral"
+
+
+async def compute_and_persist_sentiment(ticker: str, session_factory=async_session_factory) -> dict:
+    """Computes and persists sentiment for whatever Headlines in this ticker's recent window
+    don't have a real score yet -- including previously skipped/errored ones, which is what
+    makes retry work (spec 0005/ADR 0014's own Non-goal: no dedicated backfill, only whatever a
+    later request's own scope happens to include again). Framework-agnostic, like
+    fetch_and_persist_headlines -- worker.py wraps this as sentiment_job."""
+    ticker = ticker.upper()
+    cutoff = datetime.now(timezone.utc) - RECENT_HEADLINES_WINDOW
+
+    # Only a real score (`ok`) is permanent -- `skipped`/`error` both stay eligible for retry.
+    async with session_factory() as session:
+        rows = await session.execute(
+            select(Headline).where(
+                Headline.ticker == ticker,
+                Headline.published_at >= cutoff,
+                (Headline.sentiment_status.is_(None)) | (Headline.sentiment_status.in_(["skipped", "error"])),
+            )
+        )
+        pending_headlines = list(rows.scalars())
+
+    if not pending_headlines:
+        return {"status": "ok"}
+
+    # Not configured -- write `skipped` explicitly rather than leaving these ambiguously NULL,
+    # same "explicit over ambiguous" discipline this schema already uses elsewhere.
+    if not settings.openai_api_key:
+        async with session_factory() as session:
+            ids = [h.id for h in pending_headlines]
+            await session.execute(update(Headline).where(Headline.id.in_(ids)).values(sentiment_status="skipped"))
+            await session.commit()
+        return {"status": "skipped"}
+
+    # Bounds true concurrency to what's actually been verified safe (ADR 0014: 20 concurrent
+    # calls, 6.64s wall-clock) -- firing every headline in a real batch at once blew past this
+    # unbounded, found live: 239 real MSFT headlines all timed out together, because httpx's
+    # default 100-connection pool plus real rate limiting under that much simultaneous load
+    # cascades into everything backing up past the per-request timeout, not a clean 100-succeed/
+    # 139-queue split. A semaphore caps how many _get_one calls are truly in flight at once,
+    # regardless of how many total headlines are in the batch.
+    semaphore = asyncio.Semaphore(20)
+
+    async def _get_one(headline: Headline):
+        # News uses title+summary (already free); filings need a real fetch+extraction (lesson
+        # 25). Each headline's own failure is caught here, not left to cancel the whole batch.
+        async with semaphore:
+            try:
+                if headline.category == "filing":
+                    text = await get_filing_content(headline.url, client)
+                else:
+                    text = embedding_input_text(headline.title, headline.summary)[:NEWS_CONTENT_CAP_CHARS]
+                result = await get_sentiment(text, client)
+                return headline, result, None
+            except ProviderFetchError as exc:
+                return headline, None, exc
+
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        results = await asyncio.gather(*(_get_one(h) for h in pending_headlines))
+
+    # Sequential writes, not concurrent -- avoids a lost update if two headlines in this same
+    # batch happen to belong to the same Story (see compute_and_persist_sentiment's own docstring
+    # and ADR 0014's Story-aggregate section).
+    any_error = False
+    async with session_factory() as session:
+        for headline, result, error in results:
+            if error is not None:
+                any_error = True
+                log.warning("providers.sentiment_failed", headline_id=str(headline.id), error=str(error))
+                await session.execute(
+                    update(Headline).where(Headline.id == headline.id).values(sentiment_status="error")
+                )
+                continue
+
+            score = result["score"]
+            await session.execute(
+                update(Headline)
+                .where(Headline.id == headline.id)
+                .values(
+                    sentiment_score=score,
+                    sentiment_gloss=result["gloss"],
+                    sentiment_rationale=result["rationale"],
+                    sentiment_status="ok",
+                )
+            )
+
+            # Only an `ok` member ever folds into the running average -- `skipped`/`error`
+            # members are excluded entirely, never treated as zero (spec 0005's own Non-goal).
+            if headline.story_id is not None:
+                story = await session.get(Story, headline.story_id)
+                if story.sentiment_score_count == 0:
+                    # First real member -- no prior average to update from.
+                    story.sentiment_average = float(score)
+                else:
+                    new_count = story.sentiment_score_count + 1
+                    story.sentiment_average += (score - story.sentiment_average) / new_count
+                story.sentiment_score_count += 1
+
+        await session.commit()
+
+    return {"status": "error" if any_error else "ok"}
 
 
 async def _run_milvus(func_, *args, **kwargs):

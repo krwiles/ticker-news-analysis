@@ -99,9 +99,14 @@ While pending, the pill shows as an empty, greyed-out placeholder with no gloss 
 only that pill changes, in place, to its real color, gloss, and score, and the rationale text appears
 beneath it — no other part of the page flashes, reflows, or reorders when this happens.
 
-A page-level sentiment status, mirroring `GroupingStatus`'s existing dot+message shape (`ok`/`skipped`/
-`error`/`unknown`), sits alongside it — grouping and sentiment are independent dependencies that can succeed
-or fail on their own, so they get their own separate status lines rather than one merged signal.
+A page-level sentiment status sits alongside it, mirroring `GroupingStatus`'s existing dot+message shape —
+grouping and sentiment are independent dependencies that can succeed or fail on their own, so they get their
+own separate status lines rather than one merged signal. Sentiment's own status has one more real state than
+grouping's: `skipped` (the dependency isn't configured, nothing will ever run), `error` (something has
+failed), `processing` (still actively computing — at least one Headline is still pending), or `ok` (every
+Headline currently in view has a real score, nothing left pending). `processing` reflects the fact that
+sentiment, unlike grouping, doesn't finish within the same request that triggered it — there's a real,
+observable "still working on it" state grouping never has.
 
 **A Story with more than one member** — the same condition that already shows the "+N more sources"
 disclosure (spec 0002) — nests its existing display (the primary Headline's card, plus that disclosure,
@@ -127,6 +132,9 @@ for the primary's own pill.
   based only on its filing type.
 - If the sentiment dependency isn't configured, or is configured but failing, headlines still display
   normally with sentiment absent/unknown — never a broken page.
+- The page-level sentiment status accurately reflects reality at all times: `processing` while any Headline
+  is still pending, `ok` once none are, `error` if any Headline has actually failed (even while others are
+  still pending), `skipped` if the dependency was never configured at all.
 - While sentiment is pending and the page is automatically catching up, nothing already on screen flashes,
   shifts position, or disappears — the only visible change, for any given headline, is its own greyed-out
   placeholder becoming its real sentiment.

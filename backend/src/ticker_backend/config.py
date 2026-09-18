@@ -1,3 +1,5 @@
+from datetime import timedelta
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -31,3 +33,10 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
+
+# How far back a search looks -- a fixed business rule (spec 0001), not env-configurable, so a
+# bare constant rather than a Settings field. Lives here, not search.py or providers.py, so
+# either can import it without pulling the other's own import chain along (FastAPI vs. pymilvus)
+# into a container mode that doesn't otherwise need it -- see providers.py's own comment on the
+# pymilvus/dotenv landmine this avoids reintroducing.
+RECENT_HEADLINES_WINDOW = timedelta(days=7)

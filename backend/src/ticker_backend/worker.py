@@ -14,7 +14,7 @@ from arq.connections import RedisSettings
 from ticker_backend.config import settings
 from ticker_backend.health import WORKER_HEARTBEAT_KEY
 from ticker_backend.logging import configure_logging
-from ticker_backend.providers import fetch_and_persist_headlines
+from ticker_backend.providers import compute_and_persist_sentiment, fetch_and_persist_headlines
 
 configure_logging()
 log = structlog.get_logger()
@@ -37,6 +37,14 @@ async def fetch_headlines_job(ctx: dict, ticker: str) -> dict:
     return await fetch_and_persist_headlines(ticker)
 
 
+async def sentiment_job(ctx: dict, ticker: str) -> dict:
+    """Thin ARQ wrapper, same shape as fetch_headlines_job -- the real logic
+    stays framework-agnostic in providers.py. Unlike fetch_headlines_job,
+    /api/search enqueues this without awaiting its result (lesson 26/ADR
+    0014) -- it's a separate, decoupled job, not a step inside the fetch."""
+    return await compute_and_persist_sentiment(ticker)
+
+
 class WorkerSettings:
     """ARQ discovers this class by name (`arq ticker_backend.worker.WorkerSettings`,
     see docker-compose.yml's worker command) -- not imported and called
@@ -44,7 +52,7 @@ class WorkerSettings:
 
     # Enqueue-able job functions -- what /api/search's `enqueue_job(...)`
     # is actually dispatching to (ADR 0004).
-    functions = [fetch_headlines_job]
+    functions = [fetch_headlines_job, sentiment_job]
     # Runs on its own, every 5 seconds, no external trigger -- the other
     # ARQ pattern this project deliberately exercises alongside `functions`.
     cron_jobs = [cron(heartbeat, second=set(range(0, 60, 5)))]

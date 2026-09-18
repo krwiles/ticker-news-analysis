@@ -7,7 +7,7 @@ result is just a status summary — it never hands back headline data.
 
 import asyncio
 from contextlib import asynccontextmanager
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
 import structlog
@@ -16,7 +16,7 @@ from arq.connections import RedisSettings
 from fastapi import APIRouter, Depends, FastAPI, Request
 from sqlalchemy import select
 
-from ticker_backend.config import settings
+from ticker_backend.config import RECENT_HEADLINES_WINDOW, settings
 from ticker_backend.db import async_session_factory
 from ticker_backend.models import Headline
 
@@ -123,6 +123,40 @@ def build_daily_view(headlines: list[Headline], now: datetime) -> list[dict]:
     return days
 
 
+def _compute_sentiment_status(headlines: list[Headline]) -> str:
+    """The page-level sentiment status -- ok/skipped/error/processing, derived fresh from
+    already-queried headline rows, never stored anywhere (spec 0005/ADR 0014). Checked in this
+    priority order deliberately: an error surfaces even while other headlines are still pending,
+    rather than being masked by "processing"."""
+    if not settings.openai_api_key:
+        return "skipped"
+    if any(h.sentiment_status == "error" for h in headlines):
+        return "error"
+    if any(h.sentiment_status is None for h in headlines):
+        return "processing"
+    return "ok"
+
+
+async def _load_search_results(ticker: str, session_factory) -> tuple[list[dict], str]:
+    """Queries Postgres for this ticker's recent headlines and builds both the day view and the
+    page-level sentiment status from the same rows -- shared by /api/search and
+    /api/search/status (lesson 26) so the two never drift out of sync with each other."""
+    cutoff = datetime.now(timezone.utc) - RECENT_HEADLINES_WINDOW
+
+    # Query Postgres directly for this ticker's recent headlines -- neither
+    # job hands back headline data itself, per the module docstring.
+    async with session_factory() as session:
+        rows = await session.execute(
+            select(Headline).where(Headline.ticker == ticker, Headline.published_at >= cutoff)
+        )
+        headlines = list(rows.scalars())
+
+    # One entry per calendar day, each holding that day's Stories (ADR 0013).
+    days = build_daily_view(headlines, datetime.now(timezone.utc))
+    sentiment_status = _compute_sentiment_status(headlines)
+    return days, sentiment_status
+
+
 @router.get("/api/search")
 async def search(
     ticker: str,
@@ -152,19 +186,12 @@ async def search(
         log.warning("search.job_failed", ticker=ticker, error=f"{type(exc).__name__}: {exc}")
         status = "complete_failure"
 
-    # Trailing 7-day window in plain UTC -- precision only matters for the Today/Recent split below.
-    cutoff = datetime.now(timezone.utc) - timedelta(days=7)
+    # Fire-and-forget (lesson 26/ADR 0014) -- enqueuing is awaited (fast, just submits to the
+    # queue), but its *result* never is. Sentiment fills in after this response returns; the
+    # frontend polls /api/search/status, not this endpoint, to find out when.
+    await arq_redis.enqueue_job("sentiment_job", ticker)
 
-    # Query Postgres directly for this ticker's recent headlines -- the job
-    # itself never hands back headline data, per the module docstring.
-    async with session_factory() as session:
-        rows = await session.execute(
-            select(Headline).where(Headline.ticker == ticker, Headline.published_at >= cutoff)
-        )
-        headlines = list(rows.scalars())
-
-    # One entry per calendar day, each holding that day's Stories (ADR 0013).
-    days = build_daily_view(headlines, datetime.now(timezone.utc))
+    days, sentiment_status = await _load_search_results(ticker, session_factory)
 
     return {
         "ticker": ticker,
@@ -173,5 +200,18 @@ async def search(
         # Independent of `status` above -- a grouping problem is a distinct,
         # orthogonal concern from "did EDGAR/Finnhub respond" (ADR 0012).
         "grouping": grouping_status,
+        "sentiment": sentiment_status,
         "days": days,
     }
+
+
+@router.get("/api/search/status")
+async def search_status(ticker: str, session_factory=Depends(get_session_factory)) -> dict:
+    """Read-only -- no fetch_headlines_job or sentiment_job enqueue, just current Postgres state
+    (lesson 26/ADR 0014). The frontend's poll loop calls this, not /api/search itself, so polling
+    for sentiment doesn't re-trigger a full EDGAR/Finnhub/embeddings/grouping pass on every tick.
+    No status/providers/grouping in the response -- those only ever exist as the fetch job's own
+    return value, never persisted, so there's nothing here to report them from."""
+    ticker = ticker.upper()
+    days, sentiment_status = await _load_search_results(ticker, session_factory)
+    return {"sentiment": sentiment_status, "days": days}

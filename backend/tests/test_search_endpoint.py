@@ -10,7 +10,7 @@ from httpx import ASGITransport, AsyncClient
 
 from ticker_backend.main import app
 from ticker_backend.models import Company, Headline, Story
-from ticker_backend.search import get_arq_redis, get_session_factory
+from ticker_backend.search import _compute_sentiment_status, get_arq_redis, get_session_factory
 
 
 class _FakeJob:
@@ -28,11 +28,15 @@ class _FakeJob:
 
 class _FakeArqRedis:
     # Stands in for a real ArqRedis pool -- enqueue_job() just hands back the
-    # pre-built fake job above, instead of actually talking to Redis.
+    # pre-built fake job above, instead of actually talking to Redis. Records
+    # every job name enqueued (lesson 26) so a test can prove sentiment_job
+    # really does get fired alongside fetch_headlines_job, fire-and-forget.
     def __init__(self, job: _FakeJob):
         self._job = job
+        self.enqueued_job_names: list[str] = []
 
     async def enqueue_job(self, name, *args, **kwargs):
+        self.enqueued_job_names.append(name)
         return self._job
 
 
@@ -163,3 +167,81 @@ async def test_search_returns_grouped_daily_view(test_session_factory):
     ungrouped = next(s for s in today["stories"] if s["primary"]["title"] == "Ungrouped headline")
     assert ungrouped["story_id"] is None
     assert ungrouped["other_members"] == []
+
+
+def _headline_with_status(status):
+    # Bare, unpersisted Headline -- _compute_sentiment_status only ever reads sentiment_status.
+    return Headline(sentiment_status=status)
+
+
+def test_sentiment_status_skipped_when_not_configured(monkeypatch):
+    from ticker_backend.config import settings
+
+    monkeypatch.setattr(settings, "openai_api_key", "")
+    # Even a headline with a real score doesn't override "skipped" -- the
+    # config check runs first, before any headline row is even considered.
+    assert _compute_sentiment_status([_headline_with_status("ok")]) == "skipped"
+
+
+def test_sentiment_status_error_even_while_others_are_still_pending(monkeypatch):
+    from ticker_backend.config import settings
+
+    monkeypatch.setattr(settings, "openai_api_key", "test-key-not-real")
+    # Error takes priority over "processing" -- it must surface, not be masked by a pending headline.
+    assert _compute_sentiment_status([_headline_with_status("error"), _headline_with_status(None)]) == "error"
+
+
+def test_sentiment_status_processing_when_any_headline_still_pending(monkeypatch):
+    from ticker_backend.config import settings
+
+    monkeypatch.setattr(settings, "openai_api_key", "test-key-not-real")
+    assert _compute_sentiment_status([_headline_with_status("ok"), _headline_with_status(None)]) == "processing"
+
+
+def test_sentiment_status_ok_when_everything_resolved(monkeypatch):
+    from ticker_backend.config import settings
+
+    monkeypatch.setattr(settings, "openai_api_key", "test-key-not-real")
+    assert _compute_sentiment_status([_headline_with_status("ok"), _headline_with_status("ok")]) == "ok"
+
+
+async def test_search_enqueues_sentiment_job_fire_and_forget(test_session_factory):
+    """/api/search must enqueue sentiment_job alongside fetch_headlines_job
+    (lesson 26/ADR 0014) -- fire-and-forget, so the endpoint never calls
+    .result() on it (only _FakeJob's constructor result matters here, since
+    a hang on the second job's result would make this test hang too)."""
+    app.dependency_overrides[get_session_factory] = lambda: test_session_factory
+    fake_redis = _FakeArqRedis(
+        _FakeJob(result={"status": "success", "providers": {"edgar": "ok", "finnhub": "ok"}, "headline_count": 0, "grouping": "skipped"})
+    )
+    app.dependency_overrides[get_arq_redis] = lambda: fake_redis
+    try:
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            response = await client.get("/api/search", params={"ticker": "AAPL"})
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    assert fake_redis.enqueued_job_names == ["fetch_headlines_job", "sentiment_job"]
+
+
+async def test_search_status_endpoint_never_touches_arq(test_session_factory):
+    """The polling endpoint takes no arq_redis dependency at all -- it
+    structurally cannot enqueue a job, proven here by never overriding
+    get_arq_redis and still getting a clean 200 (lesson 26/ADR 0014)."""
+    await _seed_headline(test_session_factory, "TSLA", "Polled headline", "https://example.com/poll-1")
+
+    app.dependency_overrides[get_session_factory] = lambda: test_session_factory
+    try:
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            response = await client.get("/api/search/status", params={"ticker": "TSLA"})
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    body = response.json()
+    assert set(body.keys()) == {"sentiment", "days"}
+    today = next(d for d in body["days"] if d["is_today"])
+    assert today["stories"][0]["primary"]["title"] == "Polled headline"

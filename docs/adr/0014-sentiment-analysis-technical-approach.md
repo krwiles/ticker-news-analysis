@@ -47,6 +47,23 @@ minute. Verified live against the real OpenAI API: a single call took 1.8-3.4s; 
 in **6.64s wall-clock**, not 20x a single call's time. Given cost is already negligible without the Batch
 discount, there's no reason to trade away a latency guarantee for a savings that doesn't matter here.
 
+### Revised during lesson 26's own live verification: unbounded concurrency isn't the same as 20 concurrent calls
+
+The 20-concurrent-call test above was a small, deliberately safe sample — it was never actually the same
+shape as real production volume, and that gap surfaced for real once lesson 26 ran against a real ticker.
+A real MSFT search's 7-day window held **239 headlines**. Firing all 239 through one unbounded
+`asyncio.gather` (no concurrency limit at all) made every single one time out together — not a clean
+"first 100 succeed, the rest queue," a genuine cascade: httpx's default client caps at 100 connections, and
+that much real simultaneous load against OpenAI's own rate limiting backed up the connection pool faster
+than requests could drain, pushing the queued remainder past the 10s per-request timeout as a group.
+
+**Fixed with `asyncio.Semaphore(20)`**, bounding true concurrency to the exact figure already verified safe,
+regardless of total batch size. Re-verified against the same real 239-headline batch: 238/239 succeeded on
+the first pass, 1 genuine transient failure — and the already-designed retry path (a second `/api/search`
+call) resolved it, 239/239 on the next attempt. The lesson here isn't "concurrency doesn't work" — it's that
+a small-scale test validates the *pattern*, not the *scale*, and real volume needs to be checked directly,
+not assumed to extrapolate linearly from a sample an order of magnitude smaller.
+
 ## Job architecture: a separate background job, full-response polling — not WebSockets, not a status-then-fetch split
 
 Sentiment runs as its own job, decoupled from the synchronous fetch/grouping job — a search's results render
@@ -69,6 +86,44 @@ immediately, sentiment fills in after. Three ways the frontend could learn senti
   and is already tested (the same thing the manual Refresh button already calls). Every poll is one
   consistent, complete snapshot; the frontend renders per-headline conditionally and stops polling once
   nothing's pending (or a max-time cutoff, so a silently-failed job doesn't poll forever).
+
+### Revised during lesson 26's own planning: polling needs its own endpoint, not literally the same one
+
+"Poll the existing full `/api/search`-shaped response" turned out to gloss over something real: `/api/search`
+unconditionally enqueues *and awaits* `fetch_headlines_job` on every call, with no way to skip it. Taken
+literally, polling the same endpoint would re-trigger a full EDGAR/Finnhub/embeddings/grouping pass on every
+poll tick — not just re-check sentiment. Found only once lesson 26 had to actually implement the trigger, not
+during the original design discussion.
+
+**Decision: `GET /api/search/status?ticker=X`, a new, read-only endpoint** — no `fetch_headlines_job`
+enqueue at all, just current Postgres state. Shares the query + `build_daily_view` logic `/api/search` already
+has via an extracted helper, not a duplicated implementation.
+
+A second real consequence, also found at the same time: `/api/search`'s `status`/`providers`/`grouping`
+fields all come from the fetch job's own return value — never persisted anywhere, only returned once per job
+run. The new endpoint has nothing to report for those three fields, so its response is a genuinely smaller
+shape: `{"sentiment": ..., "days": [...]}`. The frontend's poll loop therefore has to **merge** — update
+`sentiment` and `days` from each poll response, leave `status`/`providers`/`grouping` exactly as they were
+from the last real `/api/search` call (the initial load or a manual Refresh) — not replace its whole state
+with each poll. This is a real behavior difference from "poll the same response shape," worth carrying into
+lesson 29's own frontend planning, not assumed to be a drop-in.
+
+### The page-level sentiment status has a real fourth state: `processing`
+
+`grouping`'s status is `ok`/`skipped`/`error` (plus frontend-only `unknown`) because it's computed and
+returned within the same request that ran it — there's no "still working on it" state to represent, it's
+always already finished by the time anything reads it. Sentiment is different: since the job is fire-and-
+forget from `/api/search`'s perspective, there's a real, observable window where work is genuinely still in
+progress. Derived fresh on every request (both `/api/search` and the new status endpoint) from the same
+headline rows already being queried for the response body — no new persisted state:
+
+1. **`skipped`** — `not settings.openai_api_key` (nothing will ever run).
+2. **`error`** — else, if any Headline in this response currently has `sentiment_status == "error"`.
+3. **`processing`** — else, if any Headline currently has `sentiment_status IS NULL` (still pending).
+4. **`ok`** — else (every Headline has resolved to a real score).
+
+Checked in this priority order — an error surfaces even while other Headlines are still pending, rather than
+being masked by `processing`.
 
 ## Storage: nullable columns on `headlines`, not a new table
 
