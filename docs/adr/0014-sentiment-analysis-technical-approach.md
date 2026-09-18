@@ -115,60 +115,105 @@ same ticker) — which is also exactly why the Story aggregate has to exclude no
 treat them as zero: a phantom value would need "correcting" later when a retry succeeds, which is exactly
 the kind of redundant, drift-prone state this project avoids elsewhere (ADR 0009).
 
-## Filing content extraction: a three-tier strategy, evidence-backed across three real filers
+## Filing content extraction: revised in place — a two-tier strategy, not three (lesson 25)
 
-The original plan (blind head-truncation with a size cap) was reconsidered after checking whether SEC filing
-HTML has enough real structure to extract just the relevant section (Item 7, Management's Discussion and
-Analysis — the most genuinely sentiment-bearing part of a 10-K/10-Q, as opposed to Item 1A's largely
+**This section originally proposed a three-tier strategy, including structural (anchor-based) extraction as
+tier 1. That tier was dropped during lesson 25's own planning, before ever being built, once a broader
+sample showed it unreliable. This section is revised in place — same precedent as ADR 0009/0011's own
+revisions — rather than left describing a design that was never actually shipped.**
+
+### What the original three-filer sample found, and why it wasn't enough
+
+The original plan (blind head-truncation with a size cap) was first reconsidered after checking whether SEC
+filing HTML has enough real structure to extract just the relevant section (Item 7, Management's Discussion
+and Analysis — the most genuinely sentiment-bearing part of a 10-K/10-Q, as opposed to Item 1A's largely
 boilerplate Risk Factors). Checked live against three real, distinct filers:
 
 | filer | anchor-based TOC? | Item 7 (MD&A) extractable via anchor? | real size |
 |---|---|---|---|
-| Apple (10-K) | Yes | Yes | ~4,500 tokens |
-| Microsoft (10-K) | Yes (initially missed — see below) | Yes | ~12,000 tokens |
+| Apple (10-K) | Yes, opaque anchor ids | Yes, by matching the TOC's visible label text | ~4,500 tokens |
+| Microsoft (10-K) | Yes, human-readable anchor ids | Yes, by matching a substring of the anchor id | ~12,000 tokens |
 | Friedman Industries (10-K, small-cap) | No anchors at all | No — MD&A is "incorporated by reference" from a separate exhibit, not present in this document | whole document only ~7,750 tokens |
 
-**A real methodology bug, corrected mid-investigation and worth recording**: the first Microsoft check
-concluded "no anchor structure" by matching the TOC link's exact visible label text (`"Item 7."`). That
-matched Apple's TOC (which uses the short label as link text) but missed Microsoft's (whose TOC link text is
-the full section title, "Management's Discussion and Analysis..."). The anchor `id` itself
-(`item_7_managements_discussion_analysis_f`) reliably encoded which item it was even when the visible label
-didn't match a fixed string. **Any real implementation must match on the anchor id, not the visible label
-text.**
+The conclusion drawn at the time — "match on the anchor id, not the visible label text" — was a real
+methodology bug in its own right, caught too late: it was generalized from fixing *only* the Microsoft case,
+without rechecking it against Apple. Apple's anchor ids are opaque (`i719388195b384d85a4e238ad88eba90a_94`,
+no "item_7" substring anywhere) — an id-only matching strategy would have silently broken the very first
+filer this whole investigation started with. **Neither heuristic alone is universal; Apple needs label-text
+matching, Microsoft needs id-substring matching.**
 
-**Friedman Industries revealed a third real failure mode** beyond "has anchors" / "no anchors": a filing can
-have the `Item 7.` heading present in plain text, with the actual content **not in the document at all** —
-smaller reporting companies commonly file a short 10-K wrapper that legally incorporates their real annual
-report by reference from a separate exhibit in the same submission. Neither anchor-following nor a
-heading-based text search would find real content here. The graceful part: because that primary document is
-short precisely because the real content lives elsewhere, a blind-truncation fallback still produces a
-reasonable (if less substantive) result rather than an error.
+### The broader sample that killed tier 1
 
-Decision: a three-tier fallback, each tier attempted only if the previous one fails to find anything:
-1. **Structural extraction** — find the Item 7 anchor by matching the anchor `id` (not the link's visible
-   label text), extract through the next item's anchor.
-2. **Plain-text heading search** — if no matching anchor exists, search for the "Item 7"/"Item 7." heading
-   directly and take content following it, up to the content cap.
-3. **Blind head-truncation** — if neither finds real content (Friedman's case), truncate the whole document
-   from the start, up to the content cap.
+Combining both heuristics and testing against five more real filers (spanning micro-cap to mega-cap:
+Western Digital, Richardson Electronics, George Risk Industries, Standex International, Applied Industrial
+Technologies) found a *third*, more serious failure mode: **Western Digital's TOC links wrap only the page
+number** ("4", "10", "24"), not the item label at all — the label and the link aren't co-located in the
+markup, at any level a regex can reasonably reach. This isn't a matching-heuristic gap, it's a structural
+one; fixing it would need a real DOM-aware parser (`lxml`/`BeautifulSoup`) walking parent/sibling table
+relationships — a genuine new dependency, not a small tweak.
 
-## Content-size limits — two different numbers, both working values pending broader validation
+Only 2 of the 5 broader-sample filers matched via either combined heuristic. **Decision: drop structural
+(anchor-based) extraction entirely.** Not reliable enough to build on, and the DOM-parser fix is out of
+scope for what this lesson needs.
+
+### What replaced it: plain-text heading search, validated across 12 real filers
+
+A pure text-search approach — no anchors, no TOC navigation at all — turned out to work far better once the
+matching pattern was made specific enough. The first attempt (a bare `"Item 7."` heading search, taking the
+*last* match) produced garbage on two filers (Microsoft, Richardson Electronics) — both came back as ~24
+tokens, because the pattern matched a stray, unrelated mention of "Item 7" rather than the real heading. Same
+root cause the anchor-label matching had: not specific enough. Fixed by requiring the heading's real title to
+follow ("Item 7." must be followed by "Management"), which is effectively standardized by the SEC's own form
+requirements across every filer.
+
+**A second instance of the identical bug, caught during actual implementation (lesson 25), not planning**:
+the same problem recurred one level over. The *next*-heading search (used to find where the MD&A section
+ends) used a bare `"Item 7A"` / `"Item 8"` pattern — and Apple's own real MD&A opening sentence contains an
+inline cross-reference ("...accompanying notes included in Part II, **Item 8** of this Form 10-K...") that
+matched as if it were the real section boundary, cutting the extracted section to 236 characters instead of
+~18,000. Fixed the same way: require Item 7A's/8's own real, SEC-standardized titles ("Quantitative"/
+"Financial") to follow, not just the bare item number.
+
+Final design, validated end-to-end against 12 real, diverse filers (the original 3, plus Western Digital,
+Richardson Electronics, George Risk Industries, Standex International, Applied Industrial Technologies,
+Chase General, US Global Investors, and Biomerica) — a two-step process, no special-casing needed per filing
+type:
+
+1. **Heading search** — find `Item\s*7\.?\s*(?:Management|MANAGEMENT)` (period optional; George Risk
+   Industries omits it). Take the *last* match, skipping the table of contents' own earlier listing. Extract
+   through the next real heading (`Item\s*7A\.?\s*Quantitative` or `Item\s*8\.?\s*Financial`), or to the
+   content cap if no next heading is found.
+2. **Reference-check, then blind truncation** — if the extracted section's first ~400 characters contain
+   `incorporated (herein )?by reference` (Friedman Industries' real case), or if no Item 7 heading was found
+   at all (the common case for 8-K/S-1/DEF 14A, which don't use this numbering scheme), fall back to
+   truncating the whole document from the start, up to the content cap.
+
+Validated in both directions, not just on the case it was built for: of the 12 real filers, only Friedman
+Industries triggers the reference-check (a true positive), and it correctly stays silent on the other 11,
+all of whom have real, substantive MD&A content directly in the document (a check that only gets tested
+against its target case, never against real negatives, hasn't actually been shown safe to rely on).
+
+## Content-size limits — character-based, not a real tokenizer
 
 A single uniform cap doesn't fit both content types: news headline+summary content is normally tens to ~100
-tokens, so a cap sized for filings would never actually trigger for news at all. Two separate limits:
+tokens, so a cap sized for filings would never actually trigger for news at all. Two separate limits,
+expressed as **character counts** (chars/4 ≈ tokens, the same rough approximation used throughout this
+document's own token estimates) rather than pulling in a real tokenizer library just for an approximate
+safety net:
 
-- **Filings: ~20,000 tokens** — comfortably above every real MD&A section measured (Apple ~4,500, Microsoft
-  ~12,000), so tier 1's typical output is never at risk of hitting it; still meaningfully bounds tier 2/3's
-  worst case far below a full 100k-token 10-K.
-- **News: ~500 tokens** — real headline+summary content runs roughly 55-135 tokens; 500 is generous enough to
-  never clip anything real, while still functioning as an actual safety net (not a decoration) against a
-  genuine anomaly like a malformed provider field.
+- **Filings: `FILING_CONTENT_CAP_CHARS = 80,000`** (≈20,000 tokens) — comfortably above every real MD&A
+  section measured across 12 real filers (~4,500-12,000 tokens), so the common case is never at risk of
+  hitting it; still meaningfully bounds the fallback-truncation worst case far below a full 100k-token 10-K.
+- **News: ≈2,000 characters** (≈500 tokens) — real headline+summary content runs roughly 55-135 tokens; this
+  is generous enough to never clip anything real, while still functioning as an actual safety net (not a
+  decoration) against a genuine anomaly like a malformed provider field. Not yet implemented anywhere
+  (lesson 25 only builds the filing-content path) — lesson 26's job wiring is where this gets applied to
+  news input.
 
-Whatever content is selected (regardless of tier) is subject to its category's cap. Truncation, and any input
-notably larger than typical even short of the cap, gets logged — evidence for recalibrating these numbers
-later, the same empirical-recalibration discipline ADR 0011's similarity threshold already established. Both
-numbers here are explicitly working values from a small real sample (one filing size distribution, one
-headline/summary estimate) — re-confirm against a larger sample before treating either as final.
+Whatever content is selected is subject to its category's cap; truncation gets logged (`get_filing_content`,
+lesson 25) — evidence for recalibrating these numbers later, the same empirical-recalibration discipline ADR
+0011's similarity threshold already established. Both numbers are explicitly working values — re-confirm
+against a larger sample before treating either as final.
 
 ## Score → enum derivation, and the Story aggregate
 

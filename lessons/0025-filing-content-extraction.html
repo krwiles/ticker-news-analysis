@@ -1,0 +1,139 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 25 — Filing Content Extraction</title>
+<link rel="stylesheet" href="../assets/lesson.css">
+</head>
+<body>
+<div class="lesson">
+
+  <p class="eyebrow">Lesson 25 of 25 · ticker-news-analysis stack (sentiment arc — Arc 5)</p>
+  <h1>Filing content extraction</h1>
+  <p class="subtitle">A three-tier plan, shrunk to two before any code was written — and the same specificity bug found twice, once in planning and once for real, on the exact next piece of logic it hadn't been fixed for yet.</p>
+
+  <div class="callout">
+    <p>
+      The plan going into this lesson had a "tier 1": follow a filing's table-of-contents anchors straight to
+      its real MD&amp;A section. It never got built. Here's the real evidence that killed it, and what
+      replaced it instead.
+    </p>
+  </div>
+
+  <h2>Tier 1's death: one heuristic that worked on the case that found it, and broke the case it was meant to fix alongside</h2>
+  <p>
+    Earlier research (ADR 0014) found Apple's and Microsoft's table-of-contents links both use real anchor
+    <code>id</code>s — but structured differently. Apple's ids are opaque
+    (<code>i719388195b384d85a4e238ad88eba90a_94</code>); Microsoft's are human-readable
+    (<code>item_7_managements_discussion_analysis_f</code>). The fix that made Microsoft work — "match on the
+    anchor id, not the visible label" — was never rechecked against Apple, the filer it was <em>originally</em>
+    verified against. An id-only strategy would have broken Apple silently the moment it fixed Microsoft.
+  </p>
+  <p>
+    Combining both heuristics and testing against five more real filers — spanning micro-cap to mega-cap —
+    found something worse than a matching gap:
+  </p>
+  <pre><code>Richardson Electronics  -> matched (id-substring)
+Applied Industrial Tech -> matched (label-text)
+Western Digital         -> NO MATCH -- link and label aren't co-located in the markup at all
+George Risk Industries  -> NO MATCH
+Standex International   -> NO MATCH</code></pre>
+  <p>
+    Western Digital's table of contents links wrap only the <em>page number</em> ("4", "10", "24") — the
+    actual "Item 7." text sits in a separate table cell. That's not a matching-heuristic problem a smarter
+    regex can fix; it needs a real DOM parser walking table structure, which is a genuine new dependency, not
+    a tweak. **2 real successes out of 5.** Not reliable enough to build on. Tier 1 was dropped before a
+    single line of it was ever written.
+  </p>
+
+  <h2>What replaced it: no anchors at all, just text — validated across twelve real filers</h2>
+  <p>
+    A pure text search for the heading itself, once made specific enough, worked far better than any
+    anchor-chasing did:
+  </p>
+  <pre><code>_ITEM_7_HEADING_RE = re.compile(r"Item\s*7\.?\s*(?:Management|MANAGEMENT)", re.IGNORECASE)
+_NEXT_ITEM_HEADING_RE = re.compile(
+    r"Item\s*7A\.?\s*(?:Quantitative|QUANTITATIVE)|Item\s*8\.?\s*(?:Financial|FINANCIAL)",
+    re.IGNORECASE,
+)</code></pre>
+  <p>
+    Two things had to be true for this to actually work: take the <strong>last</strong> match of the heading
+    (the first is always the table of contents' own listing, not the real section), and require the real
+    title text to follow the item number — a bare number alone isn't specific enough, confirmed live when it
+    matched a stray citation and produced 24 tokens of garbage for two different filers before this fix.
+  </p>
+
+  <h2>The exact same bug, found a second time — this time in the code, not the plan</h2>
+  <div class="callout">
+    <p>
+      Live verification against Apple returned <strong>236 characters</strong> instead of the ~18,000 already
+      measured during planning. The cause: Apple's own real MD&amp;A opening sentence contains an inline
+      cross-reference — <em>"...accompanying notes included in Part II, Item 8 of this Form 10-K..."</em> —
+      and the original next-heading pattern (a bare <code>Item 8</code>) matched that sentence as if it were
+      the real section boundary, cutting the extraction off after one line.
+    </p>
+    <p>
+      This is the identical specificity mistake the <code>Item 7</code> heading pattern was already fixed
+      for, just one step further down the pipeline, not yet carried over. Fixed the same way: require the
+      real, SEC-standardized titles ("Quantitative", "Financial") to follow the item number, not just the
+      bare number. A synthetic test fixture, built from realistic-but-simplified text, never would have
+      caught this — only a real document happened to contain the exact kind of inline reference that broke
+      it.
+    </p>
+  </div>
+
+  <h2>The fallback that covers everything else, with no special-casing per filing type</h2>
+  <p>
+    If the heading isn't found at all — true for every 8-K, S-1, and DEF 14A, none of which use "Item 7"
+    numbering — or if it's found but the section starts with <em>"incorporated ... by reference"</em> (a real
+    case: Friedman Industries' actual MD&amp;A lives in a separate exhibit, not in this document), the whole
+    document gets truncated from its own start instead. Validated in both directions across the full 12-filer
+    sample: the reference-check fires on the one filer that needs it, and stays silent on the other 11, whose
+    real MD&amp;A content sits directly in the document.
+  </p>
+
+  <h2>Check your understanding</h2>
+
+  <div class="check">
+    <p class="q">Q1. Why does the heading search take the <em>last</em> match of "Item 7", not the first?</p>
+    <details>
+      <summary>Reveal answer</summary>
+      <p class="answer">The first mention is always the table of contents' own listing, not the real
+      section. Taking the last match is what actually lands on the real heading -- the same "don't trust the
+      first occurrence" instinct that also motivated requiring the real title text to follow, since a bare
+      number match could hit a stray citation anywhere in the document.</p>
+    </details>
+  </div>
+
+  <div class="check">
+    <p class="q">Q2. The 236-character bug and the original "bare Item 7" bug -- are these the same bug, or two different ones?</p>
+    <details>
+      <summary>Reveal answer</summary>
+      <p class="answer">Same underlying mistake, found twice: a bare item-number match isn't specific enough
+      to distinguish a real section heading from an unrelated mention of that number elsewhere in the
+      document. The first instance was caught during planning (Item 7's own heading); the second was the
+      identical mistake in the *next*-heading pattern (Item 7A/8), not yet fixed because it hadn't been
+      built yet -- found only once the real implementation was tested against a real document.</p>
+    </details>
+  </div>
+
+  <div class="source">
+    <p class="label">Primary sources</p>
+    <p>
+      <a href="../docs/specs/0005-headline-sentiment-analysis.md">Spec 0005 — Headline Sentiment Analysis</a> ·
+      <a href="../docs/adr/0014-sentiment-analysis-technical-approach.md">ADR 0014 — sentiment technical approach (revised)</a>
+    </p>
+  </div>
+
+  <p class="ask">Anything unclear about why a DOM parser would have fixed the Western Digital case, or want
+  to see what the actual synthetic test fixtures look like? Ask your teacher (this agent).</p>
+
+  <div class="nav">
+    <a href="0024-openai-sentiment-classification-call.html">← Lesson 24: OpenAI sentiment classification call</a>
+    <span>Next → Lesson 26: the actual sentiment job (coming next)</span>
+  </div>
+
+</div>
+</body>
+</html>

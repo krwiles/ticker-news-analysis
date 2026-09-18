@@ -356,12 +356,27 @@ endpoint, endpoint before UI.
     itself: `providers.py` had the exact same `pymilvus`-import-order landmine `health.py` was fixed for
     during spec 0003 — never exposed until a standalone script imported this module directly. Fixed the
     same way, with the same explanatory comment. 48/48 tests (2 new), zero regressions.
-25. **Filing content extraction** — the three-tier strategy from ADR 0014 (structural anchor extraction by
-    matching the anchor `id`, not visible label text; plain-text heading search fallback; blind
-    head-truncation fallback), as a standalone content-preparation step given a raw filing URL. Substantial,
-    real-world HTML-parsing work — deserves its own lesson, mirroring lesson 19's dedicated treatment of "the
-    actual grouping logic." The content-size caps (filings ~20k tokens, news ~500 — both explicitly working
-    values in ADR 0014) get reconfirmed against a broader real sample here, not treated as final.
+25. **Filing content extraction** — a standalone content-preparation step given a raw filing URL.
+    Substantial, real-world HTML-parsing work — deserves its own lesson, mirroring lesson 19's dedicated
+    treatment of "the actual grouping logic."
+    ✅ built (plan: `docs/plans/0025-*.md`) — **the three-tier strategy from ADR 0014 was rescoped to two
+    tiers during this lesson's own planning, before any code was written.** Structural (anchor-based)
+    extraction was dropped: the original "match on anchor id" fix (from Microsoft) was never rechecked
+    against Apple (opaque anchor ids, needs label-text matching instead — neither heuristic alone is
+    universal), and a broader 5-filer sample found a third, worse failure mode (Western Digital's TOC links
+    wrap only the page number, label and link not co-located in the markup at all — needs a real DOM parser,
+    a genuine new dependency, to fix). Only 2/5 matched. Replaced with plain-text heading search, validated
+    across 12 real filers (the original 3 plus Western Digital, Richardson Electronics, George Risk
+    Industries, Standex International, Applied Industrial Technologies, Chase General, US Global Investors,
+    Biomerica) — requiring the real title ("Management") to follow the bare item number, since a bare number
+    alone matched stray citations on two filers. **The identical specificity bug recurred a second time,
+    this time caught during implementation, not planning**: the *next*-heading pattern (bare `Item 8`)
+    matched Apple's own real MD&A opening sentence, which references "Item 8" inline, cutting a real
+    ~18,000-character extraction down to 236 characters live. Fixed the same way — require the real,
+    SEC-standardized titles ("Quantitative"/"Financial") to follow. Content cap confirmed as
+    character-based, not a real tokenizer (`FILING_CONTENT_CAP_CHARS = 80,000`, ADR 0014's chars/4
+    approximation) — the user's own call, closing that open question. 56/56 tests (8 new), zero regressions.
+    ADR 0014 revised in place (same precedent as ADR 0009/0011) to reflect the real two-tier design.
 26. **The actual sentiment job** — wires 23-25 together inside a new background job, separate from
     `fetch_and_persist_headlines` per ADR 0014's job-architecture decision (not the same synchronous job
     grouping uses): selects input per Headline (news vs. filing, using lesson 25's extraction for filings),

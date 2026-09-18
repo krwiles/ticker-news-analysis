@@ -8,6 +8,7 @@ call these functions directly, no worker or server needed.
 import asyncio
 import functools
 import json
+import re
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -302,6 +303,81 @@ async def get_sentiment(text: str, client: httpx.AsyncClient) -> dict:
         return json.loads(body["choices"][0]["message"]["content"])
     except (KeyError, IndexError, json.JSONDecodeError) as exc:
         raise ProviderFetchError(f"OpenAI sentiment response missing data: {exc}") from exc
+
+
+# ~20,000 tokens (ADR 0014), approximated as chars/4 -- no real tokenizer, this is a rough
+# safety net, not a precision instrument. Comfortably above every real MD&A section measured
+# live during lesson 25's planning (~4,500-12,000 tokens across 12 real filers).
+FILING_CONTENT_CAP_CHARS = 80_000
+
+# The real title must follow "Item 7" -- a bare "Item 7." alone matched a stray citation and a
+# TOC-only mention in two of the 12 real filers checked live, producing garbage. Period is
+# optional -- one real filer (George Risk Industries) omits it ("Item 7 Management's...").
+_ITEM_7_HEADING_RE = re.compile(r"Item\s*7\.?\s*(?:Management|MANAGEMENT)", re.IGNORECASE)
+# Same "real title must follow" discipline as above -- a bare "Item 8" alone matched a real
+# MD&A's own inline cross-reference ("...notes included in Part II, Item 8 of this Form
+# 10-K...") on a live filer, cutting the section off after one sentence. Item 7A/8's titles
+# are effectively standardized by the SEC's own form requirements.
+_NEXT_ITEM_HEADING_RE = re.compile(
+    r"Item\s*7A\.?\s*(?:Quantitative|QUANTITATIVE)|Item\s*8\.?\s*(?:Financial|FINANCIAL)", re.IGNORECASE
+)
+# A real, detectable legal phrase -- confirmed live on one real filer (Friedman Industries)
+# whose actual MD&A isn't in this document at all, only a pointer to a separate exhibit; and
+# confirmed to stay silent on 11 other real filers whose MD&A is genuinely inline.
+_INCORPORATED_BY_REFERENCE_RE = re.compile(r"incorporated\s+(herein\s+)?by\s+reference", re.IGNORECASE)
+
+
+def _strip_html_to_text(html: str) -> str:
+    """Plain text from raw filing HTML -- tags removed, numeric entities
+    collapsed to spaces, whitespace normalized. Regex, not a real HTML
+    parser -- proven reliable across 12 real, diverse filings during
+    planning; a DOM parser is only needed for structural navigation
+    (considered and dropped for anchor-based extraction, see ADR 0014),
+    not for this simpler flattening step."""
+    text = re.sub(r"<[^>]+>", " ", html)
+    text = re.sub(r"&#\d+;", " ", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _extract_relevant_filing_section(text: str) -> str:
+    """The real MD&A section when it's actually findable, else the whole
+    document's start -- ADR 0014's two-tier design (structural anchor
+    extraction was considered and dropped after a broader real sample
+    showed it unreliable). Caps at FILING_CONTENT_CAP_CHARS either way."""
+    matches = list(_ITEM_7_HEADING_RE.finditer(text))
+    if matches:
+        # Last match, not first -- skips the table of contents' own earlier listing.
+        start = matches[-1].start()
+        next_match = _NEXT_ITEM_HEADING_RE.search(text, start + 10)
+        end = next_match.start() if next_match else len(text)
+        section = text[start:end]
+        # A real heading with no real content behind it (a smaller reporting company
+        # incorporating its actual MD&A by reference from a separate exhibit) -- fall
+        # through to the whole document instead of keeping a one-sentence pointer.
+        if not _INCORPORATED_BY_REFERENCE_RE.search(section[:400]):
+            return section[:FILING_CONTENT_CAP_CHARS]
+
+    # No Item 7 at all (8-K/S-1/DEF 14A, or an unmatched 10-K/10-Q), or a reference-only
+    # match above -- use the document from the start instead.
+    return text[:FILING_CONTENT_CAP_CHARS]
+
+
+async def get_filing_content(url: str, client: httpx.AsyncClient) -> str:
+    """Fetches a real filing document and extracts its most sentiment-relevant
+    content (spec 0005/ADR 0014), capped at FILING_CONTENT_CAP_CHARS."""
+    try:
+        response = await client.get(url, headers={"User-Agent": settings.sec_edgar_user_agent})
+        response.raise_for_status()
+    except httpx.HTTPError as exc:
+        raise ProviderFetchError(f"Filing content fetch failed: {exc}") from exc
+
+    text = _strip_html_to_text(response.text)
+    section = _extract_relevant_filing_section(text)
+    # Log actual truncation for future recalibration -- same discipline
+    # story_similarity_threshold's own empirical tuning already established.
+    if len(section) >= FILING_CONTENT_CAP_CHARS:
+        log.warning("providers.filing_content_capped", url=url, real_chars=len(text))
+    return section
 
 
 async def _run_milvus(func_, *args, **kwargs):

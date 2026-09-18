@@ -11,13 +11,17 @@ from sqlalchemy import select
 
 from ticker_backend.models import Company, Headline, Story
 from ticker_backend.providers import (
+    FILING_CONTENT_CAP_CHARS,
     ProviderFetchError,
+    _extract_relevant_filing_section,
+    _strip_html_to_text,
     embedding_input_text,
     fetch_and_persist_headlines,
     fetch_edgar_filings,
     fetch_finnhub_news,
     get_company,
     get_embeddings,
+    get_filing_content,
     get_sentiment,
 )
 
@@ -189,6 +193,77 @@ async def test_get_sentiment_raises_typed_error_on_failure(test_session_factory)
     async with httpx.AsyncClient() as client:
         with pytest.raises(ProviderFetchError):
             await get_sentiment("A real headline", client)
+
+
+def test_strip_html_to_text_removes_tags():
+    assert _strip_html_to_text("<p>Hello <b>world</b></p>") == "Hello world"
+
+
+def test_strip_html_to_text_decodes_numeric_entities():
+    assert _strip_html_to_text("Item&#160;7.") == "Item 7."
+
+
+def test_extract_relevant_filing_section_finds_real_content_and_stops_at_next_heading():
+    # A TOC-style early mention (bare "Item 7.", no real title after it) must not match --
+    # only the real heading, verified live to need "Management"/"MANAGEMENT" immediately after.
+    text = (
+        "TABLE OF CONTENTS Item 7. Page 24 "
+        "Item 7. Management's Discussion and Analysis of Financial Condition. "
+        "Real MD&A narrative content about the business goes here. "
+        "Item 7A. Quantitative and Qualitative Disclosures. Market risk content."
+    )
+    section = _extract_relevant_filing_section(text)
+    assert "Real MD&A narrative content" in section
+    assert "Market risk content" not in section
+
+
+def test_extract_relevant_filing_section_falls_back_to_document_start_when_incorporated_by_reference():
+    # Mirrors the one real filer found live (Friedman Industries) whose actual MD&A isn't in
+    # this document at all -- the real content living at the document's own start must be
+    # used instead of the reference-only Item 7 section.
+    text = (
+        "FORM 10-K ANNUAL REPORT. REAL BUSINESS CONTENT describing the company at the very start. "
+        "Item 1. Business. More business description. "
+        "Item 7. Management's Discussion and Analysis. "
+        "Information with respect to Item 7 is hereby incorporated herein by reference "
+        "from the Company's Annual Report to Shareholders."
+    )
+    section = _extract_relevant_filing_section(text)
+    assert "REAL BUSINESS CONTENT" in section
+    assert section.startswith("FORM 10-K")
+
+
+def test_extract_relevant_filing_section_uses_document_start_when_no_item_7_heading():
+    # Mirrors an 8-K/S-1/DEF 14A -- none of these use "Item 7" MD&A numbering at all.
+    text = "FORM 8-K CURRENT REPORT. A material event occurred. No Item 7 exists in an 8-K."
+    assert _extract_relevant_filing_section(text) == text
+
+
+def test_extract_relevant_filing_section_caps_length():
+    text = "Item 7. Management's Discussion and Analysis. " + ("word " * 50_000)
+    section = _extract_relevant_filing_section(text)
+    assert len(section) == FILING_CONTENT_CAP_CHARS
+
+
+@respx.mock
+async def test_get_filing_content_extracts_and_returns_section(test_session_factory):
+    respx.get("https://example.com/filing.htm").mock(
+        return_value=httpx.Response(
+            200, text="<html><body><p>Item 7. Management's Discussion. Real content.</p></body></html>"
+        )
+    )
+    async with httpx.AsyncClient() as client:
+        content = await get_filing_content("https://example.com/filing.htm", client)
+
+    assert "Real content" in content
+
+
+@respx.mock
+async def test_get_filing_content_raises_typed_error_on_failure(test_session_factory):
+    respx.get("https://example.com/filing.htm").mock(return_value=httpx.Response(404))
+    async with httpx.AsyncClient() as client:
+        with pytest.raises(ProviderFetchError):
+            await get_filing_content("https://example.com/filing.htm", client)
 
 
 def test_embedding_input_text_uses_title_only_when_no_summary():
