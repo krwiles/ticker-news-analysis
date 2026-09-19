@@ -516,6 +516,20 @@ to describe the actual shipped behavior (same "spec tracks reality" discipline a
 Not committed to this exact split or order — the real per-lesson plans (once each one actually gets planned)
 may reshape it, same as arcs 2 and 4's did.
 
+## Known issues & ideas
+- **Bug (found 2026-09-18, not yet fixed): revisiting a ticker with previously-errored sentiment doesn't
+  restart polling.** `compute_and_persist_sentiment` correctly re-attempts any headline still at
+  `error`/`skipped` on every `/api/search` call (spec 0005's retry-on-a-later-request design) — but
+  `hasPendingSentiment` (`search.ts`) only checks `sentiment_status === null`. If every headline in view is
+  already `ok`/`error` (none genuinely `null`), the frontend concludes there's nothing to poll for and never
+  starts, even though the backend just kicked off a real retry — its result lands in Postgres with nobody
+  watching until a full page reload. Likely fix: also treat `error` as pending in `hasPendingSentiment`
+  (`skipped` deliberately excluded — retrying it is a no-op until `OPENAI_API_KEY` is configured, which
+  polling can't observe anyway).
+- **Idea: extract the sentiment system prompt out of a literal string.** `_SENTIMENT_SYSTEM_PROMPT` in
+  `sentiment.py` is hardcoded in the module. Consider `Settings` (env-configurable) or an external file, so
+  it can be tuned without a code change/redeploy. Not decided which; revisit when actually needed.
+
 ## Preferences
 - Wants an example data table created once the spec round produces a real entity to model it on (lesson 6 above), not before — don't front-load schema/domain work into earlier lessons. Satisfied: spec 0001 + `CONTEXT.md` now exist, arc 2 is modeled on them.
 - Confirmed (2026-09-08): prefers small vertical slices over front-loaded theory or a build-everything-then-explain approach — a short concept intro right before building each slice, then verify it against the live stack, then move to the next slice. This is why arc 2 became 6 (now 7) lessons instead of 3.

@@ -1,0 +1,3 @@
+#!/bin/sh
+# Enforces CODING_STANDARDS.md's comment-length rule on staged files before every commit.
+python3 "$(git rev-parse --show-toplevel)/scripts/check_comment_length.py"

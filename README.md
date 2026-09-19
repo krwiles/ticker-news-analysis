@@ -50,6 +50,9 @@ docker compose up --build -d
 One image runs in three modes (`ui`/`api`/`worker`, picked by `APP_MODE`) — see
 `docs/adr/0001-single-image-multi-mode-containers.md` for why.
 
+Also run once per clone: `git config core.hooksPath .githooks` — activates the pre-commit hook that
+enforces `CODING_STANDARDS.md`'s comment-length rule.
+
 ## Current state
 
 The backend is complete for the first real feature (ticker search — see `docs/specs/0001-first-feature.md`) and

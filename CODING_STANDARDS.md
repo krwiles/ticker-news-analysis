@@ -35,3 +35,9 @@ deliberate choice, not an oversight to trim.
 - Applies to test files exactly the same as source files. A descriptive test name isn't a substitute for block
   comments — test functions get the same short comment above each distinct step (arrange, mock a boundary,
   act, assert) as any other code.
+
+**Enforced by a pre-commit hook** (`scripts/check_comment_length.py`, run via `.githooks/pre-commit`) that
+blocks a commit touching a `#`/`//` comment block longer than two lines. One-time setup after cloning:
+`git config core.hooksPath .githooks`. It's a line-count heuristic, not a judge of quality — it can't catch a
+comment that restates mechanics instead of intent, only ones that run too long; bypass with
+`git commit --no-verify` for a rare, deliberate exception.
