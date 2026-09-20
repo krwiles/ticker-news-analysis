@@ -1,12 +1,18 @@
 #!/usr/bin/env python3
-"""Pre-commit check: flags inline comment blocks longer than 2 lines (CODING_STANDARDS.md's
-"Comments" rule). Checks staged .py files (# comments) and staged .ts/.tsx files (// comments).
-Docstrings/JSDoc are exempt -- that rule allows them more room.
+"""Flags inline comment blocks longer than 2 lines (CODING_STANDARDS.md's "Comments" rule).
+Checks .py files (# comments) and .ts/.tsx files (// comments); docstrings/JSDoc are exempt.
+
+Two modes: no args checks staged files and exits 1 on a violation (the pre-commit hook, blocking);
+`--file PATH [PATH ...]` checks specific files and always exits 0 (the PostToolUse hook, advisory
+-- warns without interrupting an in-progress edit).
 
 A line starting a "Label:" pattern (e.g. "Arrange:", "Act & assert:") begins a fresh block even
 with no blank line above it, so two adjacent short step-comments aren't flagged as one long one.
 """
 
+from __future__ import annotations
+
+import argparse
 import re
 import subprocess
 import sys
@@ -57,20 +63,32 @@ def check(path: str, prefix: str) -> list[tuple[int, int, int]]:
     return violations
 
 
+def prefix_for(path: str) -> str | None:
+    if path.endswith(".py"):
+        return "#"
+    if path.endswith((".ts", ".tsx")):
+        return "//"
+    return None
+
+
 def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--file", action="append", default=None, help="Check specific file(s) instead of staged files; always exits 0.")
+    args = parser.parse_args()
+
+    advisory = args.file is not None
+    paths = args.file if advisory else staged_files()
+
     had_violation = False
-    for path in staged_files():
-        if path.endswith(".py"):
-            prefix = "#"
-        elif path.endswith((".ts", ".tsx")):
-            prefix = "//"
-        else:
+    for path in paths:
+        prefix = prefix_for(path)
+        if prefix is None:
             continue
         for start, end, n in check(path, prefix):
             had_violation = True
             print(f"{path}:{start}-{end}: comment block is {n} lines (CODING_STANDARDS.md caps inline comments at {MAX_LINES})")
 
-    if had_violation:
+    if had_violation and not advisory:
         print("\nTrim the blocks above to 1-2 lines (see CODING_STANDARDS.md's Comments section).")
         print("To commit anyway: git commit --no-verify")
         return 1
