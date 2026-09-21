@@ -1,0 +1,263 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 31 — Single-Flight Jobs per Ticker</title>
+<link rel="stylesheet" href="../assets/lesson.css">
+</head>
+<body>
+<div class="lesson">
+
+  <p class="eyebrow">Lesson 31 · ticker-news-analysis stack (concurrency &amp; multi-user readiness — Arc 6)</p>
+  <h1>Single-flight jobs per ticker</h1>
+  <p class="subtitle">What actually happens when two requests want the same fetch at once — measured, not guessed — and why the fix shares one run instead of making the second request wait its turn.</p>
+
+  <div class="callout">
+    <p>
+      Not a planned lesson, and not a bug report — a question asked ahead of the code: "if two requests hit the
+      same fetch before the first finishes, does the second overwrite the first?" The reason for asking was the
+      road ahead (user accounts, several people searching, a background job refreshing tickers on its own). This
+      lesson answers it with evidence from the real stack, then closes the gap.
+    </p>
+  </div>
+
+  <h2>Prove the problem before fixing it</h2>
+  <p>
+    Reading the code suggested three things might go wrong. Before changing anything, two simultaneous
+    <code>curl /api/search?ticker=ORCL</code> calls (a ticker the database had never seen) tested each guess.
+  </p>
+  <p><strong>Run 1 — a brand-new ticker.</strong> The two requests <em>disagreed</em>: one came back
+  <code>success</code>, the other <code>complete_failure</code> with no providers and no stories. The worker log
+  showed why:</p>
+  <pre><code>fetch_headlines_job failed, IntegrityError: ... UniqueViolationError:
+duplicate key value violates unique constraint "companies_pkey"</code></pre>
+  <p>
+    Two <code>sentiment_job('ORCL')</code> runs also overlapped for about 65 seconds each. The Story aggregates,
+    though, came out <em>correct</em> (131 of 131 Stories matched, 112 = 112). That looked reassuring — and
+    turned out to be luck, as the next run showed.
+  </p>
+  <p><strong>Run 2 — same ticker, its sentiment reset, same two calls.</strong> Two fetch jobs and two
+  overlapping sentiment jobs (58.4s and 64.1s), this time over fully grouped headlines:</p>
+  <pre><code>SUM(stories.sentiment_score_count) = 224
+headlines actually at sentiment_status = 'ok' = 112
+Stories inflated: 105 of 131   (26 matching, 0 undercounted)</code></pre>
+  <p>
+    Every score was folded into its Story's running average <em>twice</em>. And it's permanent: an
+    <code>ok</code> headline is never re-scored, so nothing ever corrects the count. The guess from reading the
+    code was right — but only Run 2 proved it, and Run 1 is the reminder of why one lucky run isn't proof of safety.
+  </p>
+
+  <h2>Why headline upserts were already safe</h2>
+  <p>
+    The worst-sounding scenario — both fetches inserting the same headlines — is the one Postgres already handles:
+  </p>
+  <pre><code>stmt = pg_insert(Headline).values(**headline)
+stmt = stmt.on_conflict_do_update(index_elements=["url"], set_={...}).returning(
+    Headline.id, literal_column("(xmax = 0)").label("was_inserted")
+)</code></pre>
+  <p>
+    <code>ON CONFLICT</code> is a <em>single statement</em> Postgres arbitrates itself: the second writer waits
+    for the first's row lock, then takes the "update" path on a row that now exists. The <code>xmax = 0</code>
+    column tells exactly one of them its row was genuinely new, so only one job groups it. Nothing gets
+    overwritten that matters — <code>story_id</code> and the sentiment columns aren't in the <code>set_</code>
+    list.
+  </p>
+
+  <h2>Two races that weren't safe, and the names for them</h2>
+  <p>
+    <strong>Check-then-act.</strong> <code>get_company</code> checks the cache, misses, fetches SEC's list, then
+    calls <code>session.merge(Company(...))</code>. <code>merge</code> is <em>two</em> steps — a SELECT, then an
+    INSERT — with a gap between them. Both jobs looked during the gap, both saw "no row", both inserted, and the
+    second hit the primary key. That's Run 1's crash. Note the contrast with the upsert above: one atomic
+    statement versus two steps with a gap.
+  </p>
+  <p>
+    <strong>Read-modify-write.</strong> <code>Story.record_sentiment()</code> reads the current count and average
+    into Python, computes the new values, and writes them back:
+  </p>
+  <pre><code>new_count = self.sentiment_score_count + 1
+self.sentiment_average += (score - self.sentiment_average) / new_count
+self.sentiment_score_count += 1</code></pre>
+  <p>
+    Called once per headline that's fine. Called twice per headline by two jobs, you get Run 2's 224. (Lesson 30's
+    sequential-writes comment protects two headlines <em>within one job</em>; nothing protected two jobs from each
+    other.)
+  </p>
+
+  <h2>A semaphore serializes. What you want is single-flight.</h2>
+  <p>
+    The natural instinct is "a semaphore per ticker" — lesson 26 taught <code>Semaphore(20)</code>, and a
+    semaphore of size 1 keyed by ticker is a lock. It would stop the overlap, but look at what the second request
+    then does: waits, then runs the <em>entire</em> fetch again, calling EDGAR and Finnhub for data the first run
+    just stored. Two requests, two full runs, just not at the same time.
+  </p>
+  <p>
+    <strong>Single-flight</strong> (also called request coalescing) does better: the second caller notices a run
+    is already in progress and <em>waits for that run's result</em>. One fetch, two callers, one shared answer.
+    If you know Angular, it's in the spirit of sharing one in-flight observable among several subscribers with
+    <code>shareReplay</code> rather than letting each subscriber start its own HTTP call.
+  </p>
+  <p>
+    That's also the shape a future background refresher wants. If it refreshes AAPL while a user searches AAPL,
+    the user should simply join the refresh already running, not trigger a second one.
+  </p>
+
+  <h2>ARQ already has the atomic part built in</h2>
+  <p>
+    Every ARQ job has an ID; by default it's random. If you pass your own, <code>enqueue_job</code> returns
+    <code>None</code> instead of a <code>Job</code> when that ID is already queued, running, or has a stored
+    result. Redis checks-and-claims the ID in one atomic step (a <code>WATCH</code>/<code>MULTI</code>
+    transaction), so it holds across any number of api and worker processes. The whole idea is one small function
+    in the new <code>jobs.py</code>:
+  </p>
+  <pre><code>async def enqueue_or_join_fetch(arq_redis, ticker, job_factory=Job):
+    job_id = fetch_job_id(ticker)                    # "fetch_headlines:AAPL"
+    job = await arq_redis.enqueue_job("fetch_headlines_job", ticker, _job_id=job_id)
+    if job is None:                                  # ID taken: someone else's fetch is in flight
+        job = job_factory(job_id, redis=arq_redis)   # a handle to *their* job
+    return job                                       # either way: await job.result(...)</code></pre>
+  <p>
+    This is why the coordination lives in Redis and not an <code>asyncio.Lock</code>. A lock lives in one
+    process's memory. ADR 0014 concluded "one worker process is enough" — true today, but a background refresher,
+    a second worker, or the api container calling in would each be a place a memory lock can't see. Redis is the
+    one place all of them already share.
+  </p>
+  <p>
+    The sentiment job uses the same trick with <code>sentiment:AAPL</code>, but nobody awaits it (it's
+    fire-and-forget), so a <code>None</code> is simply ignored: a job for that ticker is already running.
+  </p>
+
+  <h2>Two ARQ details you only find by reading its source</h2>
+  <p>
+    <strong>Results must be kept — briefly.</strong> A joiner calls <code>Job.result()</code>. If the job finishes
+    and no result was stored, and it's no longer in the queue, ARQ raises <code>ResultNotFound</code> — the joiner
+    would get an error instead of an answer. But ARQ's default is to keep results for an hour, and
+    <code>enqueue_job</code> returns <code>None</code> while a result exists — so with the default, every Refresh
+    would silently return an hour-old result. The fix is the middle path, set where the worker registers the job:
+  </p>
+  <pre><code>functions = [
+    func(fetch_headlines_job, keep_result=FETCH_RESULT_TTL_SECONDS),   # 5 seconds
+    func(sentiment_job, keep_result=0),                                # nobody reads it
+]</code></pre>
+  <p>
+    A side effect worth knowing: for 5 seconds after a fetch finishes, a new request shares its result instead of
+    running a fresh one. That's a small deliberate cooldown, and it's a useful guard against hammering the
+    providers.
+  </p>
+  <p>
+    <strong>Why there's no <code>_expires</code>.</strong> ARQ lets you give a job an expiry, which sounds like a
+    safety net against a stuck job blocking a ticker forever. But sentiment jobs run 60-100+ seconds; an expiry
+    shorter than that would let a <em>second</em> sentiment job start mid-run, reopening the exact overlap this
+    lesson closes. A hung job is already bounded by ARQ's 300-second <code>job_timeout</code>, and a crashed
+    worker's job just gets retried when a worker returns.
+  </p>
+
+  <h2>Testing the join path without a Redis</h2>
+  <p>
+    <code>enqueue_or_join_fetch</code> takes <code>job_factory=Job</code> as a parameter — the same
+    dependency-injection habit as <code>milvus=None</code> in ADR 0012. Tests hand it a fake, and a small fake
+    Redis that mimics the one ARQ rule that matters (first enqueue of an ID wins, later ones get
+    <code>None</code>). The key test fires two callers with <code>asyncio.gather</code> and asserts exactly one
+    real enqueue and one shared result. To be sure the tests could actually fail, three things were deliberately
+    broken one at a time — dropping <code>.upper()</code> from the ID, making the join return <code>None</code>,
+    setting fetch's <code>keep_result=0</code> — and the right tests went red each time. 78 tests became 86.
+  </p>
+  <p>
+    What tests with fakes <em>can't</em> prove is that ARQ really behaves that way. That's what the live checks
+    below are for.
+  </p>
+
+  <h2>After the fix, same procedure</h2>
+  <p>ORCL's sentiment reset again, the same two simultaneous requests, stack rebuilt with the change:</p>
+  <ul>
+    <li>Both responses <code>success</code>, identical providers — no more one-fails-one-succeeds.</li>
+    <li>The worker ran <strong>one</strong> <code>fetch_headlines:ORCL</code> job and <strong>one</strong>
+      <code>sentiment:ORCL</code> job — the deterministic IDs now appear in ARQ's own log lines.</li>
+    <li><code>SUM(sentiment_score_count)</code> = <strong>112</strong> against 112 <code>ok</code> headlines;
+      <strong>0 of 131</strong> Stories inflated (was 224 vs 112, and 105 inflated).</li>
+    <li>A request immediately after another returned in <strong>11 ms</strong> with no new fetch (it shared the
+      kept result); a request 7 seconds later ran a genuinely new one.</li>
+    <li>Simultaneous <code>AAPL</code> and <code>MSFT</code> searches started their fetches in the same second
+      and overlapped — only <em>same-ticker</em> requests coalesce.</li>
+  </ul>
+
+  <h2>A bug the baseline found that this doesn't fix</h2>
+  <p>
+    Remember Run 1's lucky-correct aggregates? The reason is a separate problem. <code>search()</code> enqueues
+    the sentiment job even when the fetch failed or timed out, so a sentiment job can start while a fetch is still
+    grouping in the background. Its headlines are loaded with <code>story_id = None</code>, and
+    <code>_persist_result</code> skips the Story aggregate for those — so their scores <em>never</em> reach it,
+    and since <code>ok</code> is never re-scored, never will. Single-flight doesn't change that. It's recorded in
+    plan 0031's out-of-scope list as its own future fix — noticing it and writing it down, rather than quietly
+    widening this lesson, is the same discipline as the URL-attribution note in <code>NOTES.md</code>.
+  </p>
+
+  <h2>Check your understanding</h2>
+
+  <div class="check">
+    <p class="q">Q1. Why is the headline <code>ON CONFLICT</code> upsert safe under concurrency, while <code>get_company</code>'s <code>session.merge()</code> crashed?</p>
+    <details>
+      <summary>Reveal answer</summary>
+      <p class="answer">ON CONFLICT is one atomic statement that Postgres arbitrates: the second writer waits for
+      the first's row lock, then takes the update path on a row that now exists. merge() is two separate steps,
+      a SELECT and then an INSERT, with a gap between them. Both jobs ran their SELECT inside that gap, both saw
+      "no such company", both INSERTed, and the second one hit the primary key. That's check-then-act.</p>
+    </details>
+  </div>
+
+  <div class="check">
+    <p class="q">Q2. Why can't the fetch job use <code>keep_result=0</code>? And why not just leave ARQ's one-hour default?</p>
+    <details>
+      <summary>Reveal answer</summary>
+      <p class="answer">A joiner waits on Job.result(). If the job finishes with no stored result and is no
+      longer in the queue, ARQ raises ResultNotFound, so a caller who joined just before completion would get
+      an error, not an answer. The one-hour default fails the other way: enqueue_job returns None for as long as
+      a result exists, so every Refresh would join a finished job and return an hour-old result. A few seconds
+      covers both: long enough for joiners to collect it, short enough that the next real search runs fresh.</p>
+    </details>
+  </div>
+
+  <div class="check">
+    <p class="q">Q3. A background refresher is planned. Why would a per-ticker <code>asyncio.Lock</code> inside the worker be the wrong tool for coordinating it with user searches?</p>
+    <details>
+      <summary>Reveal answer</summary>
+      <p class="answer">A lock lives in one process's memory, so it only coordinates code inside that process. The
+      api container, a second worker, or a cron job in another process can't see it. It also serializes rather
+      than shares: the second caller waits, then repeats the whole fetch. A deterministic job ID in Redis is
+      visible to every process, and joining the in-flight job gives both callers one result from one fetch.</p>
+    </details>
+  </div>
+
+  <div class="check">
+    <p class="q">Q4. In Run 1 the Story aggregates came out correct even though two sentiment jobs overlapped. Why doesn't that mean the overlap was safe?</p>
+    <details>
+      <summary>Reveal answer</summary>
+      <p class="answer">The first job started before the winning fetch had finished grouping, so its headlines
+      still had story_id = None and it skipped the aggregate update entirely. Only the second job folded scores
+      in, so each was counted once, by timing luck. Run 2, with grouped headlines, showed the real behavior:
+      every score counted twice. One passing run can't show that a race is safe; only the interleaving that
+      happened to occur is proven.</p>
+    </details>
+  </div>
+
+  <div class="source">
+    <p class="label">Primary sources</p>
+    <p>
+      <a href="../docs/plans/0031-single-flight-jobs-per-ticker.md">Lesson 31's plan doc (baseline + after numbers)</a> ·
+      <a href="../docs/adr/0015-single-flight-jobs-per-ticker.md">ADR 0015 — single-flight jobs per ticker</a> ·
+      <a href="https://arq-docs.helpmanual.io/">ARQ documentation</a> ·
+      <a href="https://www.postgresql.org/docs/current/sql-insert.html">PostgreSQL docs — INSERT ... ON CONFLICT</a>
+    </p>
+  </div>
+
+  <p class="ask">Anything unclear about why joining beats queuing, or want to re-run the two-curl experiment yourself
+  and watch the worker log? Ask your teacher (this agent).</p>
+
+  <div class="nav">
+    <a href="0030-sentiment-retry-ordering-and-incremental-writes.html">← Lesson 30: sentiment retry, ordering, and incremental writes</a>
+  </div>
+
+</div>
+</body>
+</html>

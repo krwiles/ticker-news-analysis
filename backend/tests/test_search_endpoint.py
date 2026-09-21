@@ -28,13 +28,15 @@ class _FakeJob:
 
 class _FakeArqRedis:
     # Stands in for a real ArqRedis pool -- enqueue_job() hands back the fake job above, and
-    # records every job name enqueued so a test can prove sentiment_job fires too.
+    # records every job name (and its deterministic ID, ADR 0015) so a test can prove sentiment_job fires too.
     def __init__(self, job: _FakeJob):
         self._job = job
         self.enqueued_job_names: list[str] = []
+        self.enqueued_job_ids: list[str | None] = []
 
-    async def enqueue_job(self, name, *args, **kwargs):
+    async def enqueue_job(self, name, *args, _job_id=None, **kwargs):
         self.enqueued_job_names.append(name)
+        self.enqueued_job_ids.append(_job_id)
         return self._job
 
 
@@ -234,6 +236,8 @@ async def test_search_enqueues_sentiment_job_fire_and_forget(test_session_factor
 
     assert response.status_code == 200
     assert fake_redis.enqueued_job_names == ["fetch_headlines_job", "sentiment_job"]
+    # Both jobs go out under their per-ticker IDs, so a concurrent search can't start a second copy (ADR 0015).
+    assert fake_redis.enqueued_job_ids == ["fetch_headlines:AAPL", "sentiment:AAPL"]
 
 
 async def test_search_status_endpoint_never_touches_arq(test_session_factory):

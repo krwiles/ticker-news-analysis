@@ -513,6 +513,40 @@ its docstring trimmed to point at ADR 0014 instead of re-arguing the design choi
 to describe the actual shipped behavior (same "spec tracks reality" discipline as the layout fixes above).
 78/78 backend tests pass unchanged (moved, not rewritten, except two updated imports).
 
+### Arc 6 — Concurrency & multi-user readiness (opened 2026-09-21, not part of the original arc plan)
+
+Opened by a question from the user rather than a spec: with user accounts, several people searching, and
+automatic background ticker fetching on the horizon, what happens today when two requests want the same
+fetch at once? Same "not a planned lesson" honesty as lesson 30.
+
+31. **Single-flight fetch and sentiment jobs per ticker** — ✅ built (plan: `docs/plans/0031-*.md`, decision:
+    `docs/adr/0015-single-flight-jobs-per-ticker.md`; lesson `lessons/0031-*.html`). Measured live *before*
+    changing anything, two simultaneous searches for a fresh ticker (ORCL): one request returned
+    `complete_failure` because a fetch job died with `UniqueViolationError: companies_pkey` (`get_company`'s
+    cache-miss → `merge` → `INSERT` check-then-act race, confirmed); two `sentiment_job`s overlapped ~65s each.
+    With ORCL's sentiment reset and the same two calls: `SUM(sentiment_score_count)` **224 vs 112** actual `ok`
+    headlines, **105 of 131** Stories inflated, permanently (an `ok` headline is never re-scored). The first
+    run's aggregates had come out *correct* — by timing luck (that sentiment job started before grouping
+    finished, so its headlines had `story_id = None` and skipped the aggregate), a useful reminder that one
+    clean run doesn't prove a race is safe. Headline upserts were already safe (`ON CONFLICT (url)` is atomic,
+    `xmax = 0` marks exactly one writer). Fix: deterministic ARQ job IDs (`fetch_headlines:{TICKER}`,
+    `sentiment:{TICKER}`); `enqueue_job` returns `None` when the ID is taken, and the fetch caller then
+    **joins** the in-flight job via `arq.jobs.Job(...).result()` instead of starting a second — chosen over
+    serializing behind a lock because a later background refresher and other users should share one run, not
+    repeat it. New flat module `jobs.py` (`fetch_job_id`, `sentiment_job_id`, `enqueue_or_join_fetch` with an
+    injectable `job_factory` like ADR 0012's `milvus=`, `enqueue_sentiment`) so every future caller coalesces
+    on the same IDs; `worker.py` registers the jobs through `func(...)` with `keep_result=5` for fetch (must
+    be > 0 — `Job.result()` raises `ResultNotFound` otherwise — but ARQ's 1h default would pin Refresh to a
+    stale result) and `0` for sentiment; deliberately **no** `_expires` (it would let a second 60-100s
+    sentiment job start mid-run). 86/86 backend tests (8 new in `test_jobs.py`, one extended assertion);
+    three deliberate breakages (drop `.upper()`, never join, fetch `keep_result=0`) each turned the right
+    tests red. Live after-check, same procedure: one `fetch_headlines:ORCL` + one `sentiment:ORCL` job, both
+    responses `success`, **112 = 112**, 0/131 inflated; a request right after another returned in 11 ms
+    sharing the kept result, one 7s later ran a fresh fetch; simultaneous AAPL + MSFT ran in parallel.
+    **Deliberately not fixed** (in plan 0031's out-of-scope list): a sentiment job can still start while a
+    timed-out fetch is grouping in the background, so its scores never reach the Story aggregate; global
+    rate limiting across tickers; row-level locking on `record_sentiment()`.
+
 Not committed to this exact split or order — the real per-lesson plans (once each one actually gets planned)
 may reshape it, same as arcs 2 and 4's did.
 
@@ -529,6 +563,54 @@ may reshape it, same as arcs 2 and 4's did.
 - **Idea: extract the sentiment system prompt out of a literal string.** `_SENTIMENT_SYSTEM_PROMPT` in
   `sentiment.py` is hardcoded in the module. Consider `Settings` (env-configurable) or an external file, so
   it can be tuned without a code change/redeploy. Not decided which; revisit when actually needed.
+- **Potential bug (noticed 2026-09-21, from reading the code — not reproduced): an article shared by two
+  tickers' feeds is only attributed to the first ticker that fetched it.** `headlines.url` is globally unique
+  (`headlines_url_idx`), and `fetch_and_persist_headlines`'s `ON CONFLICT (url) DO UPDATE` doesn't touch
+  `ticker`. So if a search for `MSFT` later fetches an article URL already stored under `AAPL`, the row stays
+  `AAPL`'s and never shows up in `MSFT`'s results (`_load_search_results` filters on `Headline.ticker`). Not
+  yet confirmed that Finnhub/EDGAR actually return the same URL for two tickers in practice — check that
+  first. Likely fixes: make uniqueness `(ticker, url)` instead of `url`, or a ticker join table (an article
+  can belong to many tickers). Either changes spec 0001's "dedup by source URL" wording, so it needs a
+  spec/ADR decision, not just a migration. Becomes more likely to matter with multiple users searching
+  overlapping tickers.
+- **Potential bug (noticed 2026-09-21, from lesson 31's baseline run — inferred from the code plus that run's
+  timing, not reproduced in isolation): a timed-out or failed fetch lets a sentiment job start before grouping
+  finishes, so those scores never reach their Story's aggregate.** `search()` enqueues `sentiment_job` even
+  when the fetch job timed out (10s) or failed, while the fetch may still be grouping in the background. The
+  sentiment job loads its headlines with `story_id = None`, and `_persist_result` skips the aggregate update for
+  those. Since an `ok` headline is never re-scored, the Story's `sentiment_score_count`/average stay too low
+  permanently. In lesson 31's first baseline run the sentiment job started at 15:42:16 and grouping finished
+  at 15:42:19. Single-flight jobs (ADR 0015) don't change this. Likely fixes: re-read each headline's current
+  `story_id` at write time in `_persist_result`, or only enqueue sentiment once the fetch has actually
+  finished (e.g. from the end of the fetch job). Also in plan 0031's out-of-scope list.
+- **Bug (noticed 2026-09-21, not yet fixed): headlines that previously errored keep showing "failed" while a
+  retry is running, including after a page refresh.** The backend re-attempts `error` headlines on every later
+  request, but nothing tells the UI. Proposed fix: set `error` headlines back to `NULL` when a new sentiment
+  job starts, so the existing "Pending" state and `hasPendingSentiment` polling apply with no frontend
+  change; it may also cover the polling bug above. Two things to settle before building it:
+  - **Timing:** `search()` enqueues the sentiment job and then immediately builds its response. If the reset
+    happens inside the worker job, the response can still contain `error` rows and the UI sees no `NULL`s to
+    poll on. The reset probably has to run in `search()` before results are loaded, or the job has to signal
+    that it's starting.
+  - **Overlap (new since lesson 31):** with single-flight jobs, a request that arrives while a sentiment job
+    is already running is skipped. If it reset errors to `NULL` anyway, rows the running job already gave up
+    on would show as pending with nothing about to retry them. So the reset must only happen when a job is
+    actually going to run.
+  - Whether `skipped` should reset too is undecided; the polling-bug note above deliberately excluded it,
+    since retrying `skipped` does nothing until `OPENAI_API_KEY` is configured.
+- **Idea (2026-09-21): an admin panel in the UI showing each container's logs.** Not designed yet; things to
+  settle when it's picked up:
+  - **Where the logs come from:** today every container just writes to its own stdout, readable only via
+    `docker compose logs`. The `api` and `ui` containers can't see another container's stdout, so the panel
+    needs a real source. Options to weigh: mounting the Docker socket into `api` (simplest, but gives that
+    container control of the host's Docker — a serious trade-off), or having each container also ship its logs
+    somewhere `api` can read (Redis, Postgres, or a log tool like Loki).
+  - **Log format:** the worker's output is mixed — structlog JSON lines (e.g. `worker.heartbeat`) beside ARQ's
+    own plain-text job lines (`→ job(...)` / `← job ●`) — so a panel either parses both or normalizes them first.
+  - **Access control:** logs can expose ticker searches and internal errors, so this needs an admin role, which
+    only makes sense once user accounts exist (OAuth/OIDC-style auth is in the original stack list).
+  - **Natural home:** the existing status page (ADR 0001/0002's aggregate health check) already shows per-container
+    state, so logs could grow out of it rather than being a separate app.
 
 ## Preferences
 - Wants an example data table created once the spec round produces a real entity to model it on (lesson 6 above), not before — don't front-load schema/domain work into earlier lessons. Satisfied: spec 0001 + `CONTEXT.md` now exist, arc 2 is modeled on them.

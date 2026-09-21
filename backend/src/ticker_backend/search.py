@@ -18,6 +18,7 @@ from sqlalchemy import select
 
 from ticker_backend.config import RECENT_HEADLINES_WINDOW, derive_sentiment_enum, settings
 from ticker_backend.db import async_session_factory
+from ticker_backend.jobs import enqueue_or_join_fetch, enqueue_sentiment
 from ticker_backend.models import Headline, Story
 
 log = structlog.get_logger()
@@ -209,8 +210,8 @@ async def search(
     # "unknown", not "ok"/"skipped"/"error" -- the job never ran, so grouping's outcome can't be known.
     grouping_status = "unknown"
     try:
-        # Enqueue lesson 7's fetch job and wait for it to finish, so Postgres has fresh data before we query it.
-        job = await arq_redis.enqueue_job("fetch_headlines_job", ticker)
+        # Start lesson 7's fetch job -- or join the one already running for this ticker (ADR 0015) -- and wait for it.
+        job = await enqueue_or_join_fetch(arq_redis, ticker)
         result = await job.result(timeout=settings.job_timeout_seconds)
         # Pull the job's own status, per-provider detail, and grouping outcome out of its result.
         status = result["status"]
@@ -222,9 +223,9 @@ async def search(
         log.warning("search.job_failed", ticker=ticker, error=f"{type(exc).__name__}: {exc}")
         status = "complete_failure"
 
-    # Fire-and-forget (ADR 0014) -- enqueuing is awaited but its *result* never is; the frontend
-    # polls /api/search/status, not this endpoint, to find out when sentiment fills in.
-    await arq_redis.enqueue_job("sentiment_job", ticker)
+    # Fire-and-forget (ADR 0014): the result is never awaited -- the frontend polls /api/search/status
+    # instead. Skipped if this ticker's sentiment job is already running (ADR 0015).
+    await enqueue_sentiment(arq_redis, ticker)
 
     # Now that fresh data is in Postgres, query it and build the response.
     days, sentiment_status = await _load_search_results(ticker, session_factory)

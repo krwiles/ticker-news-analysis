@@ -8,11 +8,12 @@ provider-fetch job triggered by /api/search (see ADR 0004).
 import time
 
 import structlog
-from arq import cron
+from arq import cron, func
 from arq.connections import RedisSettings
 
 from ticker_backend.config import settings
 from ticker_backend.health import WORKER_HEARTBEAT_KEY
+from ticker_backend.jobs import FETCH_RESULT_TTL_SECONDS
 from ticker_backend.logging import configure_logging
 from ticker_backend.providers import fetch_and_persist_headlines
 from ticker_backend.sentiment import compute_and_persist_sentiment
@@ -51,9 +52,12 @@ class WorkerSettings:
     see docker-compose.yml's worker command) -- not imported and called
     directly anywhere in this codebase."""
 
-    # Enqueue-able job functions -- what /api/search's `enqueue_job(...)`
-    # is actually dispatching to (ADR 0004).
-    functions = [fetch_headlines_job, sentiment_job]
+    # Enqueue-able job functions -- what /api/search's `enqueue_job(...)` is dispatching to (ADR 0004).
+    # func() wraps each to set how long ARQ keeps its result: brief for fetch, none for sentiment (ADR 0015).
+    functions = [
+        func(fetch_headlines_job, keep_result=FETCH_RESULT_TTL_SECONDS),
+        func(sentiment_job, keep_result=0),
+    ]
     # Runs on its own, every 5 seconds, no external trigger -- the other
     # ARQ pattern this project deliberately exercises alongside `functions`.
     cron_jobs = [cron(heartbeat, second=set(range(0, 60, 5)))]
