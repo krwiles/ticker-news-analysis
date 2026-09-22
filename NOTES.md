@@ -611,6 +611,117 @@ may reshape it, same as arcs 2 and 4's did.
     only makes sense once user accounts exist (OAuth/OIDC-style auth is in the original stack list).
   - **Natural home:** the existing status page (ADR 0001/0002's aggregate health check) already shows per-container
     state, so logs could grow out of it rather than being a separate app.
+- **Planned features (2026-09-21) — the direction, none specced or built yet.** Rough dependency order: accounts
+  first, watchlists and notifications build on them, Kubernetes is largely independent and can happen any time
+  after the app is stable. Each needs its own spec (behavior) and ADRs (architecture) when picked up.
+  - **OAuth with user accounts.** OAuth/OIDC-style login with signed session cookies is already in the original
+    stack list. Nothing today has a user: `/api/search` is anonymous and every ticker's data is shared. Unlocks
+    the admin-panel idea above (needs an admin role), per-user watchlists, and per-user notifications.
+    - **Leading idea: "Sign in with Google"** (Google's OpenID Connect), assuming it's free. Checked against
+      Google's docs on 2026-09-21: Google states it "does not charge the developer any fees" for OAuth app
+      verification/security assessment (only third-party CASA assessors charge, and that applies to
+      restricted scopes, not plain login). I did *not* find a page that states outright that sign-in itself
+      is free, so confirm in the Cloud Console before relying on it, including whether creating the Google
+      Cloud project asks for a billing account.
+    - **Setup, per Google's docs:** create OAuth 2.0 credentials in the Google Cloud Console (client ID and
+      secret), register exact redirect URIs, and fill in the consent-screen branding. Request only `openid
+      email` (optionally `profile`). The server-side flow makes an anti-forgery `state` token, exchanges the
+      authorization code for tokens, then validates the ID token (issuer `https://accounts.google.com`, `aud`
+      equals our client ID, not expired, signature checked against Google's published keys).
+    - **Scope caveat:** unverified apps that request *sensitive or restricted* scopes are capped at 100 new
+      users, and apps requesting only name/email/profile are reportedly exempt. That comes from search-result
+      summaries, not a Google page I could quote, so verify it before assuming a login-only app never needs
+      verification.
+    - **What it would touch here:** `ui` (:3000) and `api` (:8000) are different origins (ADR 0002), and the
+      current CORS setup in `main.py` doesn't allow credentialed requests, so session cookies would need
+      `allow_credentials` on the api side and `credentials: "include"` on the frontend's fetches. It also needs a
+      `users` table keyed on Google's stable `sub` claim (standard OIDC practice) rather than the email address.
+    - **Open decisions:** hand-roll the flow with `httpx` (consistent with ADR 0010's no-SDKs stance, and
+      good for learning) or use a library such as Authlib; where sessions live (a signed cookie, or
+      Redis-backed); whether to add other providers later; and what "logged out" still allows (anonymous
+      search, probably).
+  - **Watchlists that keep tickers updated automatically.** A user's watched tickers get refreshed by
+    scheduled background jobs, so their data is already fresh when they open the app. Already anticipated by
+    ADR 0003, ADR 0004 and spec 0001 (a `cron_jobs` trigger calling the same fetch job). Things this touches:
+    - Go through `jobs.py`'s per-ticker job IDs (ADR 0015) so a scheduled refresh and a user's search share one
+      run, and enqueue sentiment through `enqueue_sentiment` afterward.
+    - Refresh once per *distinct* watched ticker, not once per user watching it.
+    - Refresh frequency × number of distinct tickers runs into the providers' global limits (Finnhub's free
+      tier, OpenAI) — the rate-limiting gap ADR 0015 left open becomes real here.
+    - Two open bugs above matter more once this exists: the URL-attribution one (an article shared by two
+      tickers is only attributed to the first) and the timed-out-fetch/sentiment one.
+  - **Notifications for new news on a watchlist, optionally filtered by sentiment.** The fetch job already
+    knows which headlines are genuinely new (`new_headlines`, from the upsert's `xmax = 0` check), which is the
+    natural "something to notify about" signal. The catch: sentiment is computed *afterward* by the separate,
+    fire-and-forget `sentiment_job` (ADR 0014), and is skipped entirely without an `OPENAI_API_KEY`. So a
+    sentiment-filtered notification can't fire when the headline is inserted; it has to wait until that
+    headline's score exists, and needs a rule for headlines whose sentiment errored or was skipped. Sentiment
+    filtering could use the existing positive/neutral/negative enum (`derive_sentiment_enum`) or a raw score
+    threshold. Delivery channel (email, in-app, push) is undecided, and needs de-duplication so one headline
+    doesn't notify the same user twice.
+  - **Move the application to Kubernetes, to learn orchestration.** The original stack list already names
+    Kubernetes, OpenShift and ArgoCD as deferred, and picking them up was framed as converting the existing
+    `docker-compose.yml` (now 8 services: db, redis, etcd, minio, milvus, api, ui, worker) into a real
+    deployment. Things to work out along the way:
+    - `api`, `ui` and `worker` are one image in three modes (ADR 0001), which maps naturally onto three
+      Deployments.
+    - Migrations currently run from the host with `dbmate`; in a cluster they'd become a Job or init step.
+    - The worker's heartbeat and the `/api/health` checks map onto readiness/liveness probes.
+    - Plain `.env` secrets are what Vault (also deferred) would replace.
+    - Stateful pieces (Postgres, Milvus with its etcd and MinIO) are the hard part, and it's worth deciding
+      early whether to run them in-cluster or keep them outside it.
+    - A local cluster (`kind` or `minikube`) first, ArgoCD/GitOps once a real cluster exists.
+- **Idea (2026-09-21): secrets management, aimed at a possible public-facing deployment.** Goal: keep the API
+  keys (and the OAuth/session secrets coming with accounts) safe once the app is reachable from the internet, not
+  just on a laptop. The GitHub repo is already **public**, so the repo side matters today too. Checked today: neither the current `FINNHUB_API_KEY` nor `OPENAI_API_KEY`
+  value appears in any commit across all branches, `.env` is gitignored, `.dockerignore` keeps it out of the
+  image, and only `.env.example` (placeholders) is tracked. So nothing has leaked; what's left is weaker
+  protection than it should be:
+  - **Plain text on disk.** Any process running as the user can read `.env`.
+  - **Every app container gets every key.** `docker-compose.yml`'s shared `&app-env` anchor passes both API keys
+    to `api`, `ui` and `worker`, but only the worker calls Finnhub and OpenAI. `ui` needs neither, and `api` only
+    checks whether the OpenAI key is *set* (`_compute_sentiment_status` in `search.py`), never uses its value.
+  - **Env vars are visible to the host.** They show up in `docker inspect` for each container.
+  - **No rotation story.** If a key leaks, the fix is revoking it in the provider's dashboard and editing `.env`
+    by hand.
+  - **More secrets are coming:** the Google OAuth client secret and a session-signing key (both more sensitive
+    than a news API key), any notification-provider credentials, and the Postgres credentials, which are the
+    dev defaults `ticker/ticker` today.
+  - **Options, cheapest first:**
+    - *No new tooling:* pass keys only to `worker` (giving `api` a plain "sentiment configured" flag instead of
+      the key); use Docker Compose's file-based `secrets:` instead of env vars; add a secret scanner such as
+      `gitleaks` to the existing pre-commit hook and CI, so a key can't be committed by accident; and use
+      spend-limited or restricted keys where the provider offers them.
+    - *HashiCorp Vault:* already a deferred item in the original stack list, and the smallest, most contained
+      one to pick up, because the set of secrets is finite and known. Adds real practice with dynamic secrets
+      and rotation.
+    - *If the Kubernetes move happens:* Kubernetes Secrets are only base64-encoded by default, not encrypted, so
+      they'd want pairing with Vault or an external-secrets tool.
+  - **What going public adds** (beyond keeping keys out of git):
+    - *Secrets must be injected at deploy time*, never baked into an image or printed in CI logs; a public
+      deployment's secrets would live in the host's or CI's secret store (e.g. GitHub Actions secrets), not a
+      `.env` copied onto a server.
+    - *Abuse of the keys through the app, not just theft of them.* `/api/search` is anonymous today and any
+      ticker triggers a fetch plus paid OpenAI sentiment calls. Once public, strangers could run up the OpenAI
+      bill or exhaust Finnhub's free-tier limit without ever seeing a key. That points at rate limiting and/or
+      requiring login (the accounts idea above) as part of the same hardening, plus a spend cap on the key.
+    - *Other public-facing gaps this doesn't cover:* the frontend hardcodes the API at `http://localhost:8000`
+      (`frontend/src/config.ts`), and there's no HTTPS or real CORS origin yet. Needs its own spec/ADR.
+  - **Ordering:** the no-tooling steps can happen any time; something proper should be in place *before* the app
+    is public or accounts go live, since that's when the sensitive secrets appear.
+- **Idea (2026-09-21): a secret scanner in the pre-commit hook and CI.** Blocks a commit (and fails the CI run)
+  if a staged change contains something that looks like an API key, token or private key. Tools like `gitleaks`
+  or `trufflehog` do this with maintained rule sets for common providers (OpenAI, GitHub, Google and so on), so
+  we don't hand-write regexes. Why it fits here:
+  - The repo is public and nothing has leaked so far, but that's discipline, not a guardrail; this is the
+    guardrail. A pasted key in a commit, a lesson snippet or `NOTES.md` would be public immediately.
+  - The plumbing exists: `.githooks/pre-commit` already runs `scripts/check_comment_length.py`, and
+    `.github/workflows/ci.yml` already has jobs to add a step to. CI matters as the backstop, since a local hook
+    only runs on machines that ran `git config core.hooksPath .githooks`.
+  - Things to decide: which tool, whether to scan full history once as a baseline (a one-off check of the two
+    current keys was clean, but a real scan covers every kind of secret), how to allowlist obvious placeholders
+    like those in `.env.example`, and what to do about a key that's already been committed (revoke it first;
+    rewriting history doesn't un-leak it from a public repo).
 
 ## Preferences
 - Wants an example data table created once the spec round produces a real entity to model it on (lesson 6 above), not before — don't front-load schema/domain work into earlier lessons. Satisfied: spec 0001 + `CONTEXT.md` now exist, arc 2 is modeled on them.
