@@ -68,5 +68,6 @@ local `main` now carries two extra no-op commits (the mistake + its revert) that
 doesn't have, to be reconciled the next time local `main` syncs with a merged PR.
 
 CI: `secret-scan` job added to `ci.yml` using `gitleaks/gitleaks-action@v2` against full history
-(`fetch-depth: 0`) — not yet watched running green on GitHub's own runners (that happens once this
-branch is pushed and opened as a PR, same as plan 0015's own verification step 2).
+(`fetch-depth: 0`) — pushed as PR #2 and watched run for real on GitHub's own runners (same "watch
+it run, don't just trust the YAML" discipline plan 0015 used): all four jobs green, including
+`secret-scan`, on the first real run.

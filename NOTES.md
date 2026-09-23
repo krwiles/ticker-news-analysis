@@ -583,6 +583,8 @@ fetch at once? Same "not a planned lesson" honesty as lesson 30.
     first verification attempt committed straight to `main` instead of a branch; fixed with
     `git revert` (not a history rewrite — a hard reset was correctly refused as irreversible), leaving
     two harmless no-op commits on local `main` to reconcile once it next syncs with a merged PR.
+    Pushed as PR #2 and watched run for real: all four CI jobs green, including `secret-scan`, on the
+    first real run.
 
 Not committed to this exact split or order — the real per-lesson plans (once each one actually gets planned)
 may reshape it, same as arcs 2 and 4's did.
