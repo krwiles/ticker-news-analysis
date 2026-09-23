@@ -13,7 +13,7 @@ from arq.connections import RedisSettings
 
 from ticker_backend.config import settings
 from ticker_backend.health import WORKER_HEARTBEAT_KEY
-from ticker_backend.jobs import FETCH_RESULT_TTL_SECONDS
+from ticker_backend.jobs import FETCH_RESULT_TTL_SECONDS, enqueue_sentiment_after_fetch
 from ticker_backend.logging import configure_logging
 from ticker_backend.providers import fetch_and_persist_headlines
 from ticker_backend.sentiment import compute_and_persist_sentiment
@@ -36,7 +36,11 @@ async def fetch_headlines_job(ctx: dict, ticker: str) -> dict:
     """Thin ARQ wrapper — the actual logic stays framework-agnostic in
     providers.py so it's callable directly from a test (lesson 9) or, later,
     from a cron_jobs entry for the future watchlist feature."""
-    return await fetch_and_persist_headlines(ticker)
+    result = await fetch_and_persist_headlines(ticker)
+    # Sentiment starts only once this job's own fetch+grouping is truly done (plan 0036) --
+    # never from search(), which can't know when a background-run job finishes.
+    await enqueue_sentiment_after_fetch(ctx["redis"], ticker)
+    return result
 
 
 async def sentiment_job(ctx: dict, ticker: str) -> dict:

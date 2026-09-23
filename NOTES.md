@@ -600,6 +600,27 @@ fetch at once? Same "not a planned lesson" honesty as lesson 30.
     file was already ~80 lines stale from unrelated prior migrations — catching that up now would
     have been scope creep, not part of this fix. 92/92 tests (1 new), zero regressions. Migration
     dry-run verified in a rolled-back transaction against real dev data, then applied for real.
+35. **Defer sentiment-enqueue until the fetch job actually finishes** — the sentiment-race fix, not a
+    lesson, no spec/ADR (extends ADR 0015's single-flight signal, doesn't add new architecture).
+    ✅ built (plan: `docs/plans/0036-*.md`) — sentiment is now triggered from `worker.py`'s
+    `fetch_headlines_job`, right after grouping finishes, never from `search()` (which can return
+    long before a background-run job does). New `jobs.py:enqueue_sentiment_after_fetch` wraps
+    `enqueue_sentiment` plus plan 0032's reset-stale-status logic (relocated here unchanged),
+    swallowing its own failures so a hiccup can't turn a successful fetch into a reported failure.
+    `search.py` simplified: no longer needs to know anything about sentiment's own lifecycle.
+    94/94 tests (5 relocated/rewritten, 1 new `test_worker.py`), zero regressions. **Live re-verified
+    with lesson 34's exact repro** (`JOB_TIMEOUT_SECONDS=1`, ticker `PLTR`): `sentiment:PLTR` now
+    starts strictly after `fetch_headlines:PLTR` finishes; zero headlines ended up `ok` with
+    `story_id IS NULL` (was every one of ~85 Stories); multi-member aggregates matched real member
+    scores exactly (e.g. `{22,32,32,28}` → `28.5`). **A real test-environment mistake found along the
+    way, not a bug in the fix**: the first re-verification attempt hit a `headlines_story_id_fkey`
+    violation — a leftover Milvus vector from lesson 34's own earlier PLTR test (cleaned up in
+    Postgres but not Milvus) matched a new headline against an already-deleted Story. Fixed by also
+    deleting the stale Milvus vectors before retrying — a reminder the dual-store design needs both
+    sides kept in sync during manual cleanup. **A second, unrelated finding**, deliberately not
+    chased here: `RECENT_HEADLINES_WINDOW`'s exact-timestamp cutoff can exclude a headline Finnhub's
+    own day-granularity fetch just included, zeroing 12 otherwise-real Stories' aggregates for an
+    unrelated reason — noted as its own idea above.
 
 Not committed to this exact split or order — the real per-lesson plans (once each one actually gets planned)
 may reshape it, same as arcs 2 and 4's did.
@@ -608,21 +629,15 @@ may reshape it, same as arcs 2 and 4's did.
 - **Idea: extract the sentiment system prompt out of a literal string.** `_SENTIMENT_SYSTEM_PROMPT` in
   `sentiment.py` is hardcoded in the module. Consider `Settings` (env-configurable) or an external file, so
   it can be tuned without a code change/redeploy. Not decided which; revisit when actually needed.
-- **Confirmed real and worse than suspected (2026-09-23, was "potential"): a timed-out fetch lets a
-  sentiment job start before grouping finishes, and can zero out an entire ticker's Story aggregates, not
-  just undercount them.** `search()` enqueues `sentiment_job` unconditionally, even when the fetch job
-  timed out, while the fetch may still be grouping in the background; the sentiment job loads its headlines
-  with `story_id = None`, and `_persist_result` skips the aggregate update for those — permanently, since an
-  `ok` headline is never re-scored. Lesson 31's baseline run only glimpsed a partial version of this (a
-  3-second gap). **Reproduced live and in isolation** (see lesson 34): with `JOB_TIMEOUT_SECONDS`
-  temporarily set to 1s, a real fetch for a fresh ticker (`PLTR`, 101 headlines) timed out at the API layer
-  while `sentiment:PLTR` started 2 full seconds before `fetch_headlines:PLTR` (which includes grouping)
-  actually finished — every single headline was sentiment-scored with `story_id = None`. Result: **every
-  one of PLTR's ~85 Stories, including multi-member ones with real per-headline scores, ended up with
-  `sentiment_score_count = 0`, permanently** — not a partial undercount, a complete loss for the whole
-  ticker. Single-flight jobs (ADR 0015) don't change this. Likely fixes: re-read each headline's current
-  `story_id` at write time in `_persist_result`, or only enqueue sentiment once the fetch has actually
-  finished. Given the severity found, worth prioritizing a real fix — not just leaving noted.
+- **Idea (2026-09-23, found while re-verifying plan 0036): `RECENT_HEADLINES_WINDOW`'s exact-timestamp
+  cutoff can silently exclude a headline that Finnhub itself just fetched.** Finnhub's `from`/`to` range
+  is day-granularity, so a headline published early on the oldest included day can be fetched and grouped
+  into a real Story, while the app's own "still needs sentiment"/"show in search" cutoff (`now - 7 days`,
+  an exact timestamp) excludes it a few hours later than its own published time. Confirmed live: 12 of 114
+  real Stories for a freshly-fetched ticker showed a permanently-zero aggregate this way — not the plan
+  0036 race (verified: zero headlines had `sentiment_status = 'ok'` with `story_id IS NULL`), just an
+  unrelated boundary mismatch. Not designed or scoped yet; likely direction is aligning the cutoff to
+  day-granularity too, or accepting the small edge window.
 - **Idea (2026-09-21): an admin panel in the UI showing each container's logs.** Not designed yet; things to
   settle when it's picked up:
   - **Where the logs come from:** today every container just writes to its own stdout, readable only via
