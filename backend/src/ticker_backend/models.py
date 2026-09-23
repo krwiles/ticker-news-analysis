@@ -11,7 +11,7 @@ import uuid
 from datetime import datetime
 from typing import Literal
 
-from sqlalchemy import DateTime, Float, Integer, Text, func, text
+from sqlalchemy import DateTime, Float, Integer, Text, UniqueConstraint, func, text
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -54,13 +54,16 @@ class Headline(Base):
     """
 
     __tablename__ = "headlines"
+    # A shared article can belong to more than one ticker's feed (plan 0035) -- dedup is
+    # per-ticker, not global, so this is a composite constraint, not a bare column-level unique=True.
+    __table_args__ = (UniqueConstraint("ticker", "url"),)
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")
     )
     ticker: Mapped[str] = mapped_column(Text)
     title: Mapped[str] = mapped_column(Text)
-    url: Mapped[str] = mapped_column(Text, unique=True)
+    url: Mapped[str] = mapped_column(Text)
     category: Mapped[Literal["news", "filing"]] = mapped_column(Text)
     provider: Mapped[str] = mapped_column(Text)
     outlet: Mapped[str | None] = mapped_column(Text, default=None)
