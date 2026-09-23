@@ -563,6 +563,26 @@ fetch at once? Same "not a planned lesson" honesty as lesson 30.
     fresh sentiment job started (page-level status flipped `error` → `processing` in the same response),
     resolved to a real `ok`/20/"concerning" moments later; a second call made *while* AAPL's own real
     job was still running correctly left an existing `error` row untouched (ADR 0015 join, no reset).
+33. **A secret scanner in the pre-commit hook and CI** — not a lesson, no spec/ADR (infra, not
+    user-facing behavior, same reasoning as lesson 15). Picks up the 2026-09-21 idea now that the
+    repo is public and more sensitive values (OAuth client secret, session key) are coming.
+    ✅ built (plan: `docs/plans/0033-*.md`) — **Gitleaks, not TruffleHog**: regex-based (matches known
+    secret shapes), fully offline, maintained GitHub Action + TOML allowlisting; TruffleHog's
+    differentiator (live credential verification) needs network calls per scan and targets noisy
+    repos with high false-positive volume, not this project's two-key scale. Ran a real full-history
+    baseline (`gitleaks detect`, 87 commits) before wiring anything blocking: zero leaks, zero false
+    positives (including `.env.example`'s placeholders and the test suite's `"test-key-not-real"`
+    strings) — no `.gitleaks.toml` needed yet, same "don't build it until needed" instinct as lesson
+    15's "no linter yet." `.githooks/pre-commit` gained a second blocking step
+    (`gitleaks protect --staged`); `ci.yml` gained a `secret-scan` job (`gitleaks/gitleaks-action@v2`,
+    full history). **A real gap found during verification**: a synthetic OpenAI-shaped fake key
+    wasn't flagged — gitleaks' `openai-api-key` rule requires the real format's embedded `T3BlbkFJ`
+    marker, which a merely `sk-`-prefixed random string lacks; confirmed the tool actually works with
+    a Finnhub-shaped fake instead (gitleaks ships a dedicated `finnhub-access-token` rule — a real
+    leaked key of either shape would be caught). **A real process mistake, not a tool one**: the
+    first verification attempt committed straight to `main` instead of a branch; fixed with
+    `git revert` (not a history rewrite — a hard reset was correctly refused as irreversible), leaving
+    two harmless no-op commits on local `main` to reconcile once it next syncs with a merged PR.
 
 Not committed to this exact split or order — the real per-lesson plans (once each one actually gets planned)
 may reshape it, same as arcs 2 and 4's did.
@@ -702,20 +722,6 @@ may reshape it, same as arcs 2 and 4's did.
       (`frontend/src/config.ts`), and there's no HTTPS or real CORS origin yet. Needs its own spec/ADR.
   - **Ordering:** the no-tooling steps can happen any time; something proper should be in place *before* the app
     is public or accounts go live, since that's when the sensitive secrets appear.
-- **Idea (2026-09-21): a secret scanner in the pre-commit hook and CI.** Blocks a commit (and fails the CI run)
-  if a staged change contains something that looks like an API key, token or private key. Tools like `gitleaks`
-  or `trufflehog` do this with maintained rule sets for common providers (OpenAI, GitHub, Google and so on), so
-  we don't hand-write regexes. Why it fits here:
-  - The repo is public and nothing has leaked so far, but that's discipline, not a guardrail; this is the
-    guardrail. A pasted key in a commit, a lesson snippet or `NOTES.md` would be public immediately.
-  - The plumbing exists: `.githooks/pre-commit` already runs `scripts/check_comment_length.py`, and
-    `.github/workflows/ci.yml` already has jobs to add a step to. CI matters as the backstop, since a local hook
-    only runs on machines that ran `git config core.hooksPath .githooks`.
-  - Things to decide: which tool, whether to scan full history once as a baseline (a one-off check of the two
-    current keys was clean, but a real scan covers every kind of secret), how to allowlist obvious placeholders
-    like those in `.env.example`, and what to do about a key that's already been committed (revoke it first;
-    rewriting history doesn't un-leak it from a public repo).
-
 ## Preferences
 - Wants an example data table created once the spec round produces a real entity to model it on (lesson 6 above), not before — don't front-load schema/domain work into earlier lessons. Satisfied: spec 0001 + `CONTEXT.md` now exist, arc 2 is modeled on them.
 - Confirmed (2026-09-08): prefers small vertical slices over front-loaded theory or a build-everything-then-explain approach — a short concept intro right before building each slice, then verify it against the live stack, then move to the next slice. This is why arc 2 became 6 (now 7) lessons instead of 3.
