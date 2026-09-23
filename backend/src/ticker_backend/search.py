@@ -14,7 +14,7 @@ import structlog
 from arq import ArqRedis, create_pool
 from arq.connections import RedisSettings
 from fastapi import APIRouter, Depends, FastAPI, Request
-from sqlalchemy import select
+from sqlalchemy import select, update
 
 from ticker_backend.config import RECENT_HEADLINES_WINDOW, derive_sentiment_enum, settings
 from ticker_backend.db import async_session_factory
@@ -166,6 +166,30 @@ def _compute_sentiment_status(headlines: list[Headline]) -> str:
     return "ok"
 
 
+async def _reset_stale_sentiment_status(ticker: str, session_factory) -> None:
+    """Clears a previously-failed/skipped headline's status back to pending right as a *new*
+    sentiment job actually starts, so the response (and hasPendingSentiment, search.ts) shows it
+    as still-in-progress rather than stuck on a stale outcome while the retry runs (plan 0032).
+
+    Only called when settings.openai_api_key is truthy -- without it, an impending job just
+    re-batches everything to 'skipped' almost instantly (sentiment.py:_mark_skipped), so 'skipped'
+    is left out of the target set entirely and there's nothing worth resetting to pending for.
+    The WHERE below only ever matches 'error'/'skipped' rows, so it can never race against and
+    overwrite a row the job just wrote 'ok' to (plan 0032's safety property)."""
+    cutoff = datetime.now(timezone.utc) - RECENT_HEADLINES_WINDOW
+    async with session_factory() as session:
+        await session.execute(
+            update(Headline)
+            .where(
+                Headline.ticker == ticker,
+                Headline.published_at >= cutoff,
+                Headline.sentiment_status.in_(["error", "skipped"]),
+            )
+            .values(sentiment_status=None)
+        )
+        await session.commit()
+
+
 async def _load_search_results(ticker: str, session_factory) -> tuple[list[dict], str]:
     """Queries Postgres for this ticker's recent headlines and builds both the day view and the
     page-level sentiment status from the same rows -- shared by /api/search and
@@ -223,9 +247,12 @@ async def search(
         log.warning("search.job_failed", ticker=ticker, error=f"{type(exc).__name__}: {exc}")
         status = "complete_failure"
 
-    # Fire-and-forget (ADR 0014): the result is never awaited -- the frontend polls /api/search/status
-    # instead. Skipped if this ticker's sentiment job is already running (ADR 0015).
-    await enqueue_sentiment(arq_redis, ticker)
+    # Fire-and-forget (ADR 0014, never awaited); None if already running (ADR 0015), else a real Job.
+    sentiment_job_handle = await enqueue_sentiment(arq_redis, ticker)
+    if sentiment_job_handle is not None and settings.openai_api_key:
+        # A fresh retry is genuinely about to happen -- clear stale error/skipped rows so the
+        # response shows them pending again instead of stuck on a prior outcome (plan 0032).
+        await _reset_stale_sentiment_status(ticker, session_factory)
 
     # Now that fresh data is in Postgres, query it and build the response.
     days, sentiment_status = await _load_search_results(ticker, session_factory)

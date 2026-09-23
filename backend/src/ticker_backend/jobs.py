@@ -38,8 +38,10 @@ async def enqueue_or_join_fetch(arq_redis: ArqRedis, ticker: str, job_factory=Jo
     return job
 
 
-async def enqueue_sentiment(arq_redis: ArqRedis, ticker: str) -> None:
+async def enqueue_sentiment(arq_redis: ArqRedis, ticker: str) -> Job | None:
     """Starts the ticker's sentiment job unless one is already queued or running. Fire-and-forget:
-    nothing awaits it, so a duplicate needs no handling -- the running job already covers this ticker."""
-    # enqueue_job() returns None when the ID is taken; deliberately ignored for that reason.
-    await arq_redis.enqueue_job("sentiment_job", ticker, _job_id=sentiment_job_id(ticker))
+    nobody awaits the returned Job -- but callers do care whether a *new* job actually started
+    (a real Job) versus one already being in flight (None), e.g. search.py's stale-status reset,
+    which must only run when a fresh retry is genuinely about to happen."""
+    # enqueue_job() returns None when the ID is taken -- handed straight back, not swallowed.
+    return await arq_redis.enqueue_job("sentiment_job", ticker, _job_id=sentiment_job_id(ticker))

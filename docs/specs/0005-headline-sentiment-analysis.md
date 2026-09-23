@@ -55,7 +55,9 @@ closely, without reading everything closely first.
 - Once a Headline actually receives a real score, it's permanent — never re-evaluated later, mirroring
   Story's own once-set-never-touched rule. A skipped or errored attempt is different: it isn't a dead end —
   a later request that happens to touch the same Headline again is allowed to retry it. Only a real score,
-  once it exists, is untouchable.
+  once it exists, is untouchable. While that retry is actually running, the Headline shows identically to
+  one that's never been attempted — the greyed-out Pending state — not stuck showing its prior outcome for
+  the duration of the retry.
 - A Story's *aggregate*, unlike an individual Headline's sentiment, is allowed to visibly update more than
   once — it naturally reflects however many members currently have a real score, and updates again as more
   do (including a member that only succeeds on a later retry), rather than waiting for every member to
@@ -166,6 +168,9 @@ for the primary's own pill.
 - A Story's displayed aggregate score always equals the true average of whichever members currently have a
   real score, verifiable against those members' own individual scores directly — a skipped or errored member
   never pulls that average toward a phantom value in the meantime.
+- A previously skipped or errored Headline that a later request retries shows Pending again for the duration
+  of that retry, not stuck on its prior outcome — verified for both a real per-headline retry (`error`) and a
+  batch re-check once the dependency becomes configured (`skipped`).
 - The primary Headline inside a Story's outer card renders identically — same pill, same pending behavior —
   to how it would render as a standalone Headline; being inside a Story changes nothing about it.
 - A Story with only one member never shows the outer Story card, the "Story" pill, or an aggregate pill.
