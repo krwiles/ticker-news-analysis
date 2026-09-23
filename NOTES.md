@@ -593,26 +593,32 @@ may reshape it, same as arcs 2 and 4's did.
 - **Idea: extract the sentiment system prompt out of a literal string.** `_SENTIMENT_SYSTEM_PROMPT` in
   `sentiment.py` is hardcoded in the module. Consider `Settings` (env-configurable) or an external file, so
   it can be tuned without a code change/redeploy. Not decided which; revisit when actually needed.
-- **Potential bug (noticed 2026-09-21, from reading the code — not reproduced): an article shared by two
-  tickers' feeds is only attributed to the first ticker that fetched it.** `headlines.url` is globally unique
+- **Confirmed real (2026-09-23, was "potential"): an article shared by two tickers' feeds is only
+  attributed to the first ticker that fetched it.** `headlines.url` is globally unique
   (`headlines_url_idx`), and `fetch_and_persist_headlines`'s `ON CONFLICT (url) DO UPDATE` doesn't touch
-  `ticker`. So if a search for `MSFT` later fetches an article URL already stored under `AAPL`, the row stays
-  `AAPL`'s and never shows up in `MSFT`'s results (`_load_search_results` filters on `Headline.ticker`). Not
-  yet confirmed that Finnhub/EDGAR actually return the same URL for two tickers in practice — check that
-  first. Likely fixes: make uniqueness `(ticker, url)` instead of `url`, or a ticker join table (an article
-  can belong to many tickers). Either changes spec 0001's "dedup by source URL" wording, so it needs a
-  spec/ADR decision, not just a migration. Becomes more likely to matter with multiple users searching
-  overlapping tickers.
-- **Potential bug (noticed 2026-09-21, from lesson 31's baseline run — inferred from the code plus that run's
-  timing, not reproduced in isolation): a timed-out or failed fetch lets a sentiment job start before grouping
-  finishes, so those scores never reach their Story's aggregate.** `search()` enqueues `sentiment_job` even
-  when the fetch job timed out (10s) or failed, while the fetch may still be grouping in the background. The
-  sentiment job loads its headlines with `story_id = None`, and `_persist_result` skips the aggregate update for
-  those. Since an `ok` headline is never re-scored, the Story's `sentiment_score_count`/average stay too low
-  permanently. In lesson 31's first baseline run the sentiment job started at 15:42:16 and grouping finished
-  at 15:42:19. Single-flight jobs (ADR 0015) don't change this. Likely fixes: re-read each headline's current
+  `ticker`. Confirmed live, not just read from the code: a real Finnhub article already stored under `AAPL`
+  ("Amazon, Apple, Micron, Check Point Software On CNBC's 'Final Trades'") also appears in `AMZN`'s own
+  Finnhub feed for the same window, under the identical URL — it would never show up in an `AMZN` search.
+  **Decided (2026-09-23): leave as-is, not worth fixing right now.** Both real fixes (`(ticker, url)`
+  uniqueness, or a ticker-join table) are schema changes, and the actual user-facing cost is small — the
+  app still functions correctly, just occasionally misses a shared article under a second ticker's search,
+  plus some wasted sentiment-classification tokens on the missing duplicate. Not worth the migration weight
+  for that. Keep watching: becomes more likely to matter with multiple users searching overlapping tickers.
+- **Confirmed real and worse than suspected (2026-09-23, was "potential"): a timed-out fetch lets a
+  sentiment job start before grouping finishes, and can zero out an entire ticker's Story aggregates, not
+  just undercount them.** `search()` enqueues `sentiment_job` unconditionally, even when the fetch job
+  timed out, while the fetch may still be grouping in the background; the sentiment job loads its headlines
+  with `story_id = None`, and `_persist_result` skips the aggregate update for those — permanently, since an
+  `ok` headline is never re-scored. Lesson 31's baseline run only glimpsed a partial version of this (a
+  3-second gap). **Reproduced live and in isolation** (see lesson 34): with `JOB_TIMEOUT_SECONDS`
+  temporarily set to 1s, a real fetch for a fresh ticker (`PLTR`, 101 headlines) timed out at the API layer
+  while `sentiment:PLTR` started 2 full seconds before `fetch_headlines:PLTR` (which includes grouping)
+  actually finished — every single headline was sentiment-scored with `story_id = None`. Result: **every
+  one of PLTR's ~85 Stories, including multi-member ones with real per-headline scores, ended up with
+  `sentiment_score_count = 0`, permanently** — not a partial undercount, a complete loss for the whole
+  ticker. Single-flight jobs (ADR 0015) don't change this. Likely fixes: re-read each headline's current
   `story_id` at write time in `_persist_result`, or only enqueue sentiment once the fetch has actually
-  finished (e.g. from the end of the fetch job). Also in plan 0031's out-of-scope list.
+  finished. Given the severity found, worth prioritizing a real fix — not just leaving noted.
 - **Idea (2026-09-21): an admin panel in the UI showing each container's logs.** Not designed yet; things to
   settle when it's picked up:
   - **Where the logs come from:** today every container just writes to its own stdout, readable only via

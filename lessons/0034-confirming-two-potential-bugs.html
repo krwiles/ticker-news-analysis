@@ -1,0 +1,166 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 34 — Confirming Two "Potential" Bugs</title>
+<link rel="stylesheet" href="../assets/lesson.css">
+</head>
+<body>
+<div class="lesson">
+
+  <p class="eyebrow">Lesson 34 · ticker-news-analysis stack (investigation — no fix shipped yet)</p>
+  <h1>Confirming two "potential" bugs — one dismissed, one escalated</h1>
+  <p class="subtitle">Two bugs sat in NOTES.md labeled "potential... not reproduced." Investigating them for real turned out to matter: one was genuinely minor, the other was far worse than the evidence on hand suggested.</p>
+
+  <div class="callout">
+    <p>
+      Not a bug fix — an investigation, on purpose. Both items had sat as reasoned-from-the-code guesses for
+      two days. The question wasn't "how do we fix these," it was "are these even real, and how bad." That
+      distinction matters: a cheap check can save real effort on a non-problem, or reveal a problem worth far
+      more effort than assumed.
+    </p>
+  </div>
+
+  <h2>Bug 1: does Finnhub actually reuse a URL across tickers?</h2>
+  <p>
+    <code>headlines.url</code> is globally unique, and the upsert that dedupes headlines doesn't touch
+    <code>ticker</code>. So if the same article URL is ever returned for two different tickers' feeds, it
+    permanently belongs to whichever ticker fetched it first — the second ticker's search never sees it. The
+    open question was simple: does this actually happen, or is it a theoretical worry?
+  </p>
+  <p>
+    The dev database already had a strong candidate: a real headline titled <em>"Amazon, Apple, Micron, Check
+    Point Software On CNBC's 'Final Trades'"</em>, stored under <code>AAPL</code>. An obvious guess — a
+    multi-company story like that is exactly the shape likely to be syndicated to every company it mentions.
+    One live call to Finnhub's own API confirmed it:
+  </p>
+  <pre><code>GET /company-news?symbol=AMZN&from=2026-09-22&to=2026-09-23
+# → the exact same article, same URL, same id, in AMZN's feed too</code></pre>
+  <p>Confirmed, not theoretical. But confirming it doesn't automatically mean fixing it.</p>
+
+  <h2>Deciding not to fix it — and why that's a legitimate outcome</h2>
+  <p>
+    Both real fixes — making uniqueness <code>(ticker, url)</code> instead of just <code>url</code>, or a
+    ticker-join table so one article can belong to several tickers — are schema changes. Weighed against
+    what actually breaks for a user today: nothing does. The app still works; a shared article occasionally
+    doesn't show up under a second ticker's search, and a few sentiment-classification calls get spent
+    re-analyzing the "duplicate" under the first ticker instead of being shared. That's a real but small
+    cost, and not one worth a migration for right now. The decision: leave it, keep it noted, watch whether
+    it matters more once multiple users are searching overlapping tickers regularly.
+  </p>
+  <p>
+    This is worth naming explicitly: <strong>confirming a bug is real is a different question from deciding
+    it's worth fixing.</strong> Investigation answers the first question. The second is a cost/benefit call,
+    and "not yet" is a legitimate answer to it.
+  </p>
+
+  <h2>Bug 2: does a timed-out fetch really corrupt a Story's sentiment aggregate?</h2>
+  <p>
+    This one had thinner evidence: lesson 31's own baseline run happened to show a sentiment job starting 3
+    seconds before its ticker's grouping finished, purely as a side effect of measuring something else
+    entirely. The mechanism was clear from reading the code — <code>search()</code> enqueues the sentiment
+    job unconditionally, even after a fetch job times out, while that fetch may still be grouping headlines
+    in the background — but it had never been reproduced on purpose, and nobody knew how bad it actually got.
+  </p>
+  <p>
+    Reproducing a race deterministically, instead of hoping to catch one by luck, meant controlling the one
+    variable that makes it possible: how long <code>/api/search</code> is willing to wait before giving up on
+    the fetch job.
+  </p>
+  <p class="filename">docker-compose.yml (temporary, reverted immediately after)</p>
+  <pre><code>api:
+  environment:
+    JOB_TIMEOUT_SECONDS: "1"   # normally 10 — forces a real, fast timeout</code></pre>
+  <p>
+    Then one real search for a completely fresh ticker (<code>PLTR</code>, never fetched before — guaranteed
+    to have genuinely new headlines to process) against the real, rebuilt <code>api</code> container.
+  </p>
+
+  <h2>What actually happened, second by second</h2>
+  <pre><code>15:45:45   curl /api/search?ticker=PLTR sent
+15:45:46   fetch_headlines:PLTR starts (worker)
+15:45:46   /api/search gives up waiting (1s timeout) → status: complete_failure, grouping: unknown
+15:45:47   sentiment:PLTR starts — 2 full seconds BEFORE grouping finishes
+15:45:49   fetch_headlines:PLTR finishes (3.69s total) — grouping now assigns every headline a story_id
+15:46:32   sentiment:PLTR finishes (44.86s) — every headline scored 'ok'</code></pre>
+  <p>
+    The sentiment job read every one of PLTR's headlines while every single one still had
+    <code>story_id = NULL</code>, because grouping hadn't run yet. It scored every one of them successfully.
+    None of those scores ever reached a Story, because <code>_persist_result</code> only folds a score into
+    the aggregate when the headline already has a <code>story_id</code> at the moment it's persisted — and by
+    the rule that makes an <code>ok</code> headline permanent, none of them will ever be re-scored to fix it.
+  </p>
+
+  <h2>The actual damage — worse than the name "undercount" suggests</h2>
+  <p>Checking the real data after both jobs finished:</p>
+  <pre><code>SELECT s.id, s.sentiment_average, s.sentiment_score_count, count(h.id) AS member_count
+FROM stories s JOIN headlines h ON h.story_id = s.id
+WHERE s.ticker = 'PLTR' GROUP BY s.id, s.sentiment_average, s.sentiment_score_count;
+
+-- every single row: sentiment_average = NULL, sentiment_score_count = 0
+-- including 3-member Stories whose headlines scored 38, 52, and 72 individually</code></pre>
+  <p>
+    Every one of PLTR's roughly 85 Stories — including multi-member ones with three real, correctly-computed
+    per-headline scores sitting right there in the same table — showed a permanently empty aggregate.
+    Lesson 31's baseline run only glimpsed a partial version of this (one ticker, a few seconds of overlap).
+    Forcing the race to its extreme showed the real ceiling: when the fetch is slow enough relative to the
+    timeout, the damage isn't a partial undercount, it's a <strong>complete loss for the whole ticker</strong>.
+  </p>
+
+  <h2>Where this leaves things</h2>
+  <p>
+    Not fixed yet — this lesson is the investigation, not the fix. Two candidate fixes are already named in
+    <code>NOTES.md</code>: re-read each headline's current <code>story_id</code> at the moment
+    <code>_persist_result</code> writes it, instead of trusting the snapshot read at job start; or don't
+    enqueue the sentiment job at all until the fetch has genuinely finished. Given what this investigation
+    found, it's a real candidate for the next thing actually built, not just left noted — unlike Bug 1 above.
+  </p>
+
+  <h2>Check your understanding</h2>
+
+  <div class="check">
+    <p class="q">Q1. Why is deliberately setting <code>JOB_TIMEOUT_SECONDS=1</code> a legitimate way to investigate this bug, rather than "cheating" the test?</p>
+    <details>
+      <summary>Reveal answer</summary>
+      <p class="answer">The bug's mechanism doesn't depend on the specific timeout value — it depends on the fetch+grouping job taking longer than whatever the timeout is. A 10-second timeout only sometimes gets exceeded, by chance, depending on real headline volume. Forcing a 1-second timeout guarantees the same race happens on demand, using the real code paths and real jobs — it changes when the race is triggered, not what the race actually is.</p>
+    </details>
+  </div>
+
+  <div class="check">
+    <p class="q">Q2. Both bugs turned out to be real. Why does Bug 1 get "leave it as-is" while Bug 2 gets "worth prioritizing a fix"?</p>
+    <details>
+      <summary>Reveal answer</summary>
+      <p class="answer">They differ in both fix cost and actual damage. Bug 1's real fixes are schema changes (composite uniqueness or a join table), and the cost of leaving it is small — an occasional missing article under a second ticker's search. Bug 2's damage, once measured, turned out to be a complete, permanent loss of a ticker's sentiment aggregates — much worse than assumed — while a fix (re-reading story_id at write time) doesn't require a schema change at all. Being real isn't the deciding factor; cost-to-fix versus actual damage is.</p>
+    </details>
+  </div>
+
+  <div class="check">
+    <p class="q">Q3. Why can't this bug ever self-correct once it happens to a headline?</p>
+    <details>
+      <summary>Reveal answer</summary>
+      <p class="answer">Spec 0005's own rule says a Headline that reaches a real score (status 'ok') is permanent and never re-evaluated. The sentiment job's query for "still pending" work only ever looks at NULL/skipped/error headlines. A headline that got scored with story_id = NULL is already 'ok' — it will never be picked up again, so its score can never retroactively reach its Story's aggregate.</p>
+    </details>
+  </div>
+
+  <div class="source">
+    <p class="label">Primary sources</p>
+    <p>
+      <a href="../NOTES.md">NOTES.md's updated "Known issues" entries (2026-09-23)</a> ·
+      <a href="../docs/adr/0015-single-flight-jobs-per-ticker.md">ADR 0015 — single-flight jobs per ticker</a> ·
+      <a href="../docs/adr/0012-grouping-dependency-injection-and-failure-signaling.md">ADR 0012 — grouping status semantics</a> ·
+      <a href="https://finnhub.io/docs/api/company-news">Finnhub company-news API docs</a>
+    </p>
+  </div>
+
+  <p class="ask">Want to see the raw worker logs from the PLTR run, dig into which of the two candidate fixes
+  is actually simpler to build, or check whether Bug 1's decision still holds once watchlists exist? Ask your
+  teacher (this agent).</p>
+
+  <div class="nav">
+    <a href="0033-secret-scanner.html">← Lesson 33: a secret scanner in pre-commit and CI</a>
+  </div>
+
+</div>
+</body>
+</html>
