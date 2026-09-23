@@ -101,7 +101,7 @@ async def _insert_new(session_factory, headline_dict: dict) -> dict:
         await session.merge(Company(ticker=headline_dict["ticker"]))
         stmt = pg_insert(Headline).values(**headline_dict)
         stmt = stmt.on_conflict_do_update(
-            index_elements=["url"], set_={"title": stmt.excluded.title}
+            index_elements=["ticker", "url"], set_={"title": stmt.excluded.title}
         ).returning(Headline.id, literal_column("(xmax = 0)").label("was_inserted"))
         row = (await session.execute(stmt)).one()
         await session.commit()

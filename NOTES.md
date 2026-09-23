@@ -585,6 +585,21 @@ fetch at once? Same "not a planned lesson" honesty as lesson 30.
     two harmless no-op commits on local `main` to reconcile once it next syncs with a merged PR.
     Pushed as PR #2 and watched run for real: all four CI jobs green, including `secret-scan`, on the
     first real run.
+34. **Cross-ticker URL attribution fix** — not a lesson, no spec/ADR (implementation detail; spec 0001's
+    dedup wording was already scoped to one ticker's own page, confirmed unaffected — see lesson 34's
+    grilling round). Reverses the 2026-09-23 "leave as-is" call above once the real cost was reconsidered:
+    duplicated rows/tokens are worth it to never hide real news from a ticker.
+    ✅ built (plan: `docs/plans/0035-*.md`) — `headlines`' uniqueness moved from `url` alone to
+    `(ticker, url)` (migration + `models.py`'s `UniqueConstraint`), and `providers.py`'s upsert
+    conflict target updated to match. A shared article now gets one row per ticker, each
+    independently embedded/grouped/sentiment-scored. **A real gap found during the test run**:
+    `test_grouping.py` had its own test-local upsert helper duplicating `providers.py`'s conflict
+    target independently rather than importing it — needed the same fix, or every grouping test
+    broke underneath the new constraint. `db/schema.sql` regeneration was tried, then reverted: this
+    repo has always applied migrations with `--no-dump-schema` (no `pg_dump` on this host), so the
+    file was already ~80 lines stale from unrelated prior migrations — catching that up now would
+    have been scope creep, not part of this fix. 92/92 tests (1 new), zero regressions. Migration
+    dry-run verified in a rolled-back transaction against real dev data, then applied for real.
 
 Not committed to this exact split or order — the real per-lesson plans (once each one actually gets planned)
 may reshape it, same as arcs 2 and 4's did.
@@ -593,17 +608,6 @@ may reshape it, same as arcs 2 and 4's did.
 - **Idea: extract the sentiment system prompt out of a literal string.** `_SENTIMENT_SYSTEM_PROMPT` in
   `sentiment.py` is hardcoded in the module. Consider `Settings` (env-configurable) or an external file, so
   it can be tuned without a code change/redeploy. Not decided which; revisit when actually needed.
-- **Confirmed real (2026-09-23, was "potential"): an article shared by two tickers' feeds is only
-  attributed to the first ticker that fetched it.** `headlines.url` is globally unique
-  (`headlines_url_idx`), and `fetch_and_persist_headlines`'s `ON CONFLICT (url) DO UPDATE` doesn't touch
-  `ticker`. Confirmed live, not just read from the code: a real Finnhub article already stored under `AAPL`
-  ("Amazon, Apple, Micron, Check Point Software On CNBC's 'Final Trades'") also appears in `AMZN`'s own
-  Finnhub feed for the same window, under the identical URL — it would never show up in an `AMZN` search.
-  **Decided (2026-09-23): leave as-is, not worth fixing right now.** Both real fixes (`(ticker, url)`
-  uniqueness, or a ticker-join table) are schema changes, and the actual user-facing cost is small — the
-  app still functions correctly, just occasionally misses a shared article under a second ticker's search,
-  plus some wasted sentiment-classification tokens on the missing duplicate. Not worth the migration weight
-  for that. Keep watching: becomes more likely to matter with multiple users searching overlapping tickers.
 - **Confirmed real and worse than suspected (2026-09-23, was "potential"): a timed-out fetch lets a
   sentiment job start before grouping finishes, and can zero out an entire ticker's Story aggregates, not
   just undercount them.** `search()` enqueues `sentiment_job` unconditionally, even when the fetch job

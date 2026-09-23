@@ -400,12 +400,12 @@ async def fetch_and_persist_headlines(ticker: str, session_factory=async_session
         if company.cik is None and all_headlines:
             await session.merge(Company(ticker=ticker, cik=None, company_name=None))
 
-        # Upsert each headline, deduping by URL -- `xmax = 0` on the returned
-        # row distinguishes a genuine INSERT from an ON CONFLICT UPDATE.
+        # Upsert each headline, deduping by (ticker, url) -- a shared article gets one row per
+        # ticker (plan 0035); `xmax = 0` distinguishes a genuine INSERT from an ON CONFLICT UPDATE.
         for headline in all_headlines:
             stmt = pg_insert(Headline).values(**headline)
             stmt = stmt.on_conflict_do_update(
-                index_elements=["url"],
+                index_elements=["ticker", "url"],
                 set_={
                     "title": stmt.excluded.title,
                     "outlet": stmt.excluded.outlet,

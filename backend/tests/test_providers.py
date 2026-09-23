@@ -229,6 +229,52 @@ async def test_dedup_by_url_on_second_fetch(test_session_factory):
 
 
 @respx.mock
+async def test_same_url_fetched_by_two_tickers_creates_one_row_each(test_session_factory):
+    """Plan 0035: a shared article (real example, lesson 34 -- the same Finnhub URL genuinely
+    showed up in both AAPL's and AMZN's feeds) must not be hidden from the second ticker."""
+    # Arrange: two real companies, both providers empty on EDGAR, Finnhub returns the identical
+    # article/URL regardless of which ticker's feed is being requested.
+    respx.get("https://www.sec.gov/files/company_tickers.json").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "0": {"cik_str": 320193, "ticker": "AAPL", "title": "Apple Inc."},
+                "1": {"cik_str": 1018724, "ticker": "AMZN", "title": "Amazon.com Inc."},
+            },
+        )
+    )
+    respx.get("https://data.sec.gov/submissions/CIK0000320193.json").mock(
+        return_value=httpx.Response(200, json=_edgar_submissions([]))
+    )
+    respx.get("https://data.sec.gov/submissions/CIK0001018724.json").mock(
+        return_value=httpx.Response(200, json=_edgar_submissions([]))
+    )
+    shared_article = {
+        "category": "company",
+        "datetime": 1789055298,
+        "headline": "Amazon, Apple, Micron, Check Point Software On CNBC's 'Final Trades'",
+        "id": 1,
+        "image": "https://example.com/x.png",
+        "related": "AAPL",
+        "source": "CNBC",
+        "summary": "A shared multi-company story.",
+        "url": "https://finnhub.io/api/news?id=shared-article",
+    }
+    respx.get("https://finnhub.io/api/v1/company-news").mock(return_value=httpx.Response(200, json=[shared_article]))
+
+    # Act: fetch both tickers, same shared article in both feeds.
+    await fetch_and_persist_headlines("AAPL", session_factory=test_session_factory)
+    await fetch_and_persist_headlines("AMZN", session_factory=test_session_factory)
+
+    # Assert: one row per ticker, not one row total claimed by whichever ticker fetched it first.
+    async with test_session_factory() as session:
+        rows = (
+            await session.execute(select(Headline).where(Headline.url == shared_article["url"]))
+        ).scalars().all()
+    assert sorted(h.ticker for h in rows) == ["AAPL", "AMZN"]
+
+
+@respx.mock
 async def test_no_company_row_when_both_providers_empty(test_session_factory):
     # A real ticker mapping exists, but not for the one we're about to search.
     respx.get("https://www.sec.gov/files/company_tickers.json").mock(
