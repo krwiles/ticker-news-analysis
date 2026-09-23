@@ -1,3 +1,6 @@
 #!/bin/sh
 # Enforces CODING_STANDARDS.md's comment-length rule on staged files before every commit.
-python3 "$(git rev-parse --show-toplevel)/scripts/check_comment_length.py"
+python3 "$(git rev-parse --show-toplevel)/scripts/check_comment_length.py" || exit 1
+
+# Blocks a commit whose staged changes look like a real API key/token/credential (plan 0033).
+gitleaks protect --staged --no-banner

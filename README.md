@@ -50,6 +50,7 @@ not from a container.
 | **Git** | Cloning the repo | [git-scm.com](https://git-scm.com/downloads) |
 | **Docker** with **Compose v2** (`docker compose`, not `docker-compose`) | Running the whole stack | [Docker Desktop](https://www.docker.com/products/docker-desktop/) (Mac/Windows) or Docker Engine + the Compose plugin (Linux) |
 | **dbmate** | Applying the SQL migrations in `db/migrations/` | `brew install dbmate` on macOS, or a binary from [dbmate's releases](https://github.com/amacneil/dbmate/releases) (CI pins `v2.35.1`) |
+| **gitleaks** | Only if you activate the pre-commit hooks below | `brew install gitleaks` on macOS, or a binary from [gitleaks' releases](https://github.com/gitleaks/gitleaks/releases) |
 
 Docker needs to actually be running before you start. The stack includes Milvus (plus its etcd and MinIO
 sidecars), which is the heavy part — if containers get killed or Milvus never turns healthy, raise Docker's
@@ -138,7 +139,8 @@ docker compose up --build -d        # rebuild after changing backend or frontend
 
 ```bash
 git config core.hooksPath .githooks   # once per clone — activates the pre-commit comment-length check
-                                      # (see CODING_STANDARDS.md); needs python3 on your PATH
+                                      # (see CODING_STANDARDS.md, needs python3) and a secret scan
+                                      # (needs gitleaks — see the prerequisites table above)
 
 # Backend tests — the `db` container must be up and migrations applied (they create/migrate `ticker_test` themselves)
 cd backend && uv run pytest

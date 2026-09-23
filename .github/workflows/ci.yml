@@ -69,3 +69,13 @@ jobs:
       # Validates the real multi-stage build (ADR 0001) still succeeds --
       # not pushed anywhere, no registry target exists yet.
       - run: docker build .
+
+  secret-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # Full history, not just this push's commits -- gitleaks scans it all (plan 0033).
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
