@@ -321,11 +321,14 @@ async def _assign_stories(
     try:
         # Resolve the real client off the event loop -- a test-injected fake needs no connection at all.
         milvus = milvus if milvus is not None else await _run_milvus(get_milvus_client)
+        # Ensure the required collection exists before searching or inserting embeddings.
         await _run_milvus(ensure_story_primaries_collection, milvus)
+
         # Every new news headline's embedding, in one batched request (lesson 18).
         texts = [embedding_input_text(h["title"], h["summary"]) for h in news_headlines]
         embeddings = await get_embeddings(texts, client)
 
+        # Assign each headline to a Story, persist those links, and commit the grouping updates together.
         async with session_factory() as session:
             for headline, vector in zip(news_headlines, embeddings):
                 day = headline["published_at"].astimezone(EASTERN).date().isoformat()

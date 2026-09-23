@@ -143,6 +143,20 @@ async def test_sentiment_enqueue_uses_deterministic_id_and_tolerates_a_duplicate
     assert result is None
 
 
+async def test_sentiment_enqueue_returns_the_job_when_nothing_is_running():
+    # Arrange: no sentiment job for AAPL in flight yet.
+    redis = _FakeArqRedis()
+
+    # Act: enqueue -- ARQ accepts the deterministic ID and hands back a real Job.
+    result = await enqueue_sentiment(redis, "AAPL")
+
+    # Assert: callers (search.py's error-reset) can tell a *new* job actually started, not just that
+    # the call didn't raise -- this is the same signal enqueue_or_join_fetch already relies on.
+    assert redis.accepted_ids == ["sentiment:AAPL"]
+    assert result is not None
+    assert await result.result() == "own result"
+
+
 def test_worker_registers_both_jobs_with_the_intended_result_retention():
     # Arrange: index the registered ARQ Function objects by the name enqueue_job() dispatches to.
     functions = {fn.name: fn for fn in WorkerSettings.functions}

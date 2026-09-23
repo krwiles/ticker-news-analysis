@@ -546,20 +546,28 @@ fetch at once? Same "not a planned lesson" honesty as lesson 30.
     **Deliberately not fixed** (in plan 0031's out-of-scope list): a sentiment job can still start while a
     timed-out fetch is grouping in the background, so its scores never reach the Story aggregate; global
     rate limiting across tickers; row-level locking on `record_sentiment()`.
+32. **Sentiment retry status reset** — not a planned lesson: a live bug-fix closing two related "Known
+    issues" (2026-09-18 polling, 2026-09-21 stuck-on-"failed"), same shape as lesson 30.
+    ✅ built (plan: `docs/plans/0032-*.md`) — both bugs traced to one root cause: `error`/`skipped` are
+    used for "no retry in flight" and "a retry is genuinely running right now" alike, and the response
+    can't tell them apart. `jobs.py`'s `enqueue_sentiment` now returns the real `Job`/`None` ARQ already
+    hands back instead of discarding it (ADR 0015's own single-flight signal, repurposed); `search()`
+    resets stale `error`/`skipped` rows to `NULL` only when that return value confirms a *new* job
+    actually started. **`skipped` isn't symmetric with `error`** — pushed back on during planning rather
+    than accepted by analogy: `error` is written per-headline after a real timed attempt, `skipped` in one
+    synchronous batch before any network call, purely a function of `OPENAI_API_KEY`. Reset is gated on
+    that key being currently configured, not on status value alone (see learning record 0018). No new
+    ADR (extends ADR 0012/0014's existing status semantics); spec 0005 amended in place (Goals + Success
+    criteria), not a new spec, per record 0007. 91/91 backend tests (5 new), zero regressions. Live-
+    verified against the real running stack: a synthetic `error` headline reset to `NULL` the instant a
+    fresh sentiment job started (page-level status flipped `error` → `processing` in the same response),
+    resolved to a real `ok`/20/"concerning" moments later; a second call made *while* AAPL's own real
+    job was still running correctly left an existing `error` row untouched (ADR 0015 join, no reset).
 
 Not committed to this exact split or order — the real per-lesson plans (once each one actually gets planned)
 may reshape it, same as arcs 2 and 4's did.
 
 ## Known issues & ideas
-- **Bug (found 2026-09-18, not yet fixed): revisiting a ticker with previously-errored sentiment doesn't
-  restart polling.** `compute_and_persist_sentiment` correctly re-attempts any headline still at
-  `error`/`skipped` on every `/api/search` call (spec 0005's retry-on-a-later-request design) — but
-  `hasPendingSentiment` (`search.ts`) only checks `sentiment_status === null`. If every headline in view is
-  already `ok`/`error` (none genuinely `null`), the frontend concludes there's nothing to poll for and never
-  starts, even though the backend just kicked off a real retry — its result lands in Postgres with nobody
-  watching until a full page reload. Likely fix: also treat `error` as pending in `hasPendingSentiment`
-  (`skipped` deliberately excluded — retrying it is a no-op until `OPENAI_API_KEY` is configured, which
-  polling can't observe anyway).
 - **Idea: extract the sentiment system prompt out of a literal string.** `_SENTIMENT_SYSTEM_PROMPT` in
   `sentiment.py` is hardcoded in the module. Consider `Settings` (env-configurable) or an external file, so
   it can be tuned without a code change/redeploy. Not decided which; revisit when actually needed.
@@ -583,21 +591,6 @@ may reshape it, same as arcs 2 and 4's did.
   at 15:42:19. Single-flight jobs (ADR 0015) don't change this. Likely fixes: re-read each headline's current
   `story_id` at write time in `_persist_result`, or only enqueue sentiment once the fetch has actually
   finished (e.g. from the end of the fetch job). Also in plan 0031's out-of-scope list.
-- **Bug (noticed 2026-09-21, not yet fixed): headlines that previously errored keep showing "failed" while a
-  retry is running, including after a page refresh.** The backend re-attempts `error` headlines on every later
-  request, but nothing tells the UI. Proposed fix: set `error` headlines back to `NULL` when a new sentiment
-  job starts, so the existing "Pending" state and `hasPendingSentiment` polling apply with no frontend
-  change; it may also cover the polling bug above. Two things to settle before building it:
-  - **Timing:** `search()` enqueues the sentiment job and then immediately builds its response. If the reset
-    happens inside the worker job, the response can still contain `error` rows and the UI sees no `NULL`s to
-    poll on. The reset probably has to run in `search()` before results are loaded, or the job has to signal
-    that it's starting.
-  - **Overlap (new since lesson 31):** with single-flight jobs, a request that arrives while a sentiment job
-    is already running is skipped. If it reset errors to `NULL` anyway, rows the running job already gave up
-    on would show as pending with nothing about to retry them. So the reset must only happen when a job is
-    actually going to run.
-  - Whether `skipped` should reset too is undecided; the polling-bug note above deliberately excluded it,
-    since retrying `skipped` does nothing until `OPENAI_API_KEY` is configured.
 - **Idea (2026-09-21): an admin panel in the UI showing each container's logs.** Not designed yet; things to
   settle when it's picked up:
   - **Where the logs come from:** today every container just writes to its own stdout, readable only via
