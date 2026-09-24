@@ -27,19 +27,16 @@ class _FakeJob:
 
 
 class _FakeArqRedis:
-    # Stands in for a real ArqRedis pool -- records every job name/ID, and hands back the fake job
-    # (or None for sentiment_job when sentiment_already_running, ADR 0015's single-flight join).
-    def __init__(self, job: _FakeJob, sentiment_already_running: bool = False):
+    # Stands in for a real ArqRedis pool -- enqueue_job() hands back the fake job above, and
+    # records every job name (and its deterministic ID, ADR 0015) so a test can inspect what fired.
+    def __init__(self, job: _FakeJob):
         self._job = job
-        self._sentiment_already_running = sentiment_already_running
         self.enqueued_job_names: list[str] = []
         self.enqueued_job_ids: list[str | None] = []
 
     async def enqueue_job(self, name, *args, _job_id=None, **kwargs):
         self.enqueued_job_names.append(name)
         self.enqueued_job_ids.append(_job_id)
-        if name == "sentiment_job" and self._sentiment_already_running:
-            return None
         return self._job
 
 
@@ -220,11 +217,11 @@ def test_sentiment_status_ok_when_everything_resolved(monkeypatch):
     assert _compute_sentiment_status([_headline_with_status("ok"), _headline_with_status("ok")]) == "ok"
 
 
-async def test_search_enqueues_sentiment_job_fire_and_forget(test_session_factory):
-    """/api/search must enqueue sentiment_job alongside fetch_headlines_job
-    (lesson 26/ADR 0014) -- fire-and-forget, so the endpoint never calls
-    .result() on it (only _FakeJob's constructor result matters here, since
-    a hang on the second job's result would make this test hang too)."""
+async def test_search_only_enqueues_the_fetch_job(test_session_factory):
+    """Plan 0036: /api/search no longer enqueues sentiment_job itself -- that's triggered from
+    the fetch job's own completion (worker.py's fetch_headlines_job), so it can never start
+    scoring a headline before grouping assigns it a real story_id. Covered directly in
+    test_jobs.py (enqueue_sentiment_after_fetch) and test_worker.py (the wiring)."""
     app.dependency_overrides[get_session_factory] = lambda: test_session_factory
     fake_redis = _FakeArqRedis(
         _FakeJob(result={"status": "success", "providers": {"edgar": "ok", "finnhub": "ok"}, "headline_count": 0, "grouping": "skipped"})
@@ -238,9 +235,8 @@ async def test_search_enqueues_sentiment_job_fire_and_forget(test_session_factor
         app.dependency_overrides.clear()
 
     assert response.status_code == 200
-    assert fake_redis.enqueued_job_names == ["fetch_headlines_job", "sentiment_job"]
-    # Both jobs go out under their per-ticker IDs, so a concurrent search can't start a second copy (ADR 0015).
-    assert fake_redis.enqueued_job_ids == ["fetch_headlines:AAPL", "sentiment:AAPL"]
+    assert fake_redis.enqueued_job_names == ["fetch_headlines_job"]
+    assert fake_redis.enqueued_job_ids == ["fetch_headlines:AAPL"]
 
 
 async def test_search_status_endpoint_never_touches_arq(test_session_factory):
@@ -303,125 +299,3 @@ async def test_search_status_includes_per_headline_and_story_sentiment(test_sess
     assert story_dict["sentiment_average"] == 64.0
     assert story_dict["sentiment_enum"] == "neutral"
 
-
-async def test_search_resets_errored_headline_to_pending_when_a_new_sentiment_job_starts(
-    test_session_factory, monkeypatch
-):
-    """Plan 0032: a stale 'error' from a previous run must not outlive a genuinely fresh retry --
-    the frontend's hasPendingSentiment (search.ts) only treats NULL as "still coming"."""
-    from ticker_backend.config import settings
-
-    monkeypatch.setattr(settings, "openai_api_key", "test-key-not-real")
-    await _seed_headline(
-        test_session_factory, "SPCX", "Previously failed", "https://example.com/reset-1",
-        sentiment_status="error",
-    )
-
-    app.dependency_overrides[get_session_factory] = lambda: test_session_factory
-    # sentiment_already_running defaults False -- this call is the one that actually starts a new job.
-    app.dependency_overrides[get_arq_redis] = lambda: _FakeArqRedis(
-        _FakeJob(result={"status": "success", "providers": {"edgar": "ok", "finnhub": "ok"}, "headline_count": 0, "grouping": "skipped"})
-    )
-    try:
-        transport = ASGITransport(app=app)
-        async with AsyncClient(transport=transport, base_url="http://test") as client:
-            response = await client.get("/api/search", params={"ticker": "SPCX"})
-    finally:
-        app.dependency_overrides.clear()
-
-    body = response.json()
-    today = next(d for d in body["days"] if d["is_today"])
-    assert today["stories"][0]["primary"]["sentiment_status"] is None
-    assert today["stories"][0]["primary"]["sentiment_enum"] is None
-
-
-async def test_search_leaves_errored_headline_untouched_when_sentiment_job_already_running(
-    test_session_factory, monkeypatch
-):
-    """ADR 0015: a caller that joins an already-running sentiment job must not reset rows that job
-    already read its own pending list from -- nothing new is about to retry them."""
-    from ticker_backend.config import settings
-
-    monkeypatch.setattr(settings, "openai_api_key", "test-key-not-real")
-    await _seed_headline(
-        test_session_factory, "SPCX", "Previously failed", "https://example.com/reset-2",
-        sentiment_status="error",
-    )
-
-    app.dependency_overrides[get_session_factory] = lambda: test_session_factory
-    app.dependency_overrides[get_arq_redis] = lambda: _FakeArqRedis(
-        _FakeJob(result={"status": "success", "providers": {"edgar": "ok", "finnhub": "ok"}, "headline_count": 0, "grouping": "skipped"}),
-        sentiment_already_running=True,
-    )
-    try:
-        transport = ASGITransport(app=app)
-        async with AsyncClient(transport=transport, base_url="http://test") as client:
-            response = await client.get("/api/search", params={"ticker": "SPCX"})
-    finally:
-        app.dependency_overrides.clear()
-
-    body = response.json()
-    today = next(d for d in body["days"] if d["is_today"])
-    assert today["stories"][0]["primary"]["sentiment_status"] == "error"
-
-
-async def test_search_resets_skipped_headline_when_a_new_job_starts_and_key_is_configured(
-    test_session_factory, monkeypatch
-):
-    """A 'skipped' headline gets a real attempt once OPENAI_API_KEY is configured -- the same
-    staleness bug as 'error' applies once that real attempt is genuinely in flight."""
-    from ticker_backend.config import settings
-
-    monkeypatch.setattr(settings, "openai_api_key", "test-key-not-real")
-    await _seed_headline(
-        test_session_factory, "SPCX", "Previously skipped", "https://example.com/reset-3",
-        sentiment_status="skipped",
-    )
-
-    app.dependency_overrides[get_session_factory] = lambda: test_session_factory
-    app.dependency_overrides[get_arq_redis] = lambda: _FakeArqRedis(
-        _FakeJob(result={"status": "success", "providers": {"edgar": "ok", "finnhub": "ok"}, "headline_count": 0, "grouping": "skipped"})
-    )
-    try:
-        transport = ASGITransport(app=app)
-        async with AsyncClient(transport=transport, base_url="http://test") as client:
-            response = await client.get("/api/search", params={"ticker": "SPCX"})
-    finally:
-        app.dependency_overrides.clear()
-
-    body = response.json()
-    today = next(d for d in body["days"] if d["is_today"])
-    assert today["stories"][0]["primary"]["sentiment_status"] is None
-
-
-async def test_search_does_not_reset_anything_when_key_is_not_configured(test_session_factory, monkeypatch):
-    """Without OPENAI_API_KEY, a fresh job just re-batches everything to 'skipped' almost instantly
-    (sentiment.py:_mark_skipped) -- no real per-headline work happens, so nothing is genuinely
-    "pending" and resetting would only flash a misleading state."""
-    from ticker_backend.config import settings
-
-    monkeypatch.setattr(settings, "openai_api_key", "")
-    await _seed_headline(
-        test_session_factory, "SPCX", "Previously failed", "https://example.com/reset-4",
-        sentiment_status="error",
-    )
-    await _seed_headline(
-        test_session_factory, "SPCX", "Previously skipped", "https://example.com/reset-5",
-        sentiment_status="skipped",
-    )
-
-    app.dependency_overrides[get_session_factory] = lambda: test_session_factory
-    app.dependency_overrides[get_arq_redis] = lambda: _FakeArqRedis(
-        _FakeJob(result={"status": "success", "providers": {"edgar": "ok", "finnhub": "ok"}, "headline_count": 0, "grouping": "skipped"})
-    )
-    try:
-        transport = ASGITransport(app=app)
-        async with AsyncClient(transport=transport, base_url="http://test") as client:
-            response = await client.get("/api/search", params={"ticker": "SPCX"})
-    finally:
-        app.dependency_overrides.clear()
-
-    body = response.json()
-    today = next(d for d in body["days"] if d["is_today"])
-    statuses = {s["primary"]["title"]: s["primary"]["sentiment_status"] for s in today["stories"]}
-    assert statuses == {"Previously failed": "error", "Previously skipped": "skipped"}

@@ -4,15 +4,45 @@ the fakes below mimic the one ARQ behavior this relies on (a taken job ID makes
 enqueue_job() return None), which the live stack check in plan 0031 proves for real."""
 
 import asyncio
+from datetime import datetime, timezone
+
+from sqlalchemy import select
 
 from ticker_backend.jobs import (
     FETCH_RESULT_TTL_SECONDS,
     enqueue_or_join_fetch,
     enqueue_sentiment,
+    enqueue_sentiment_after_fetch,
     fetch_job_id,
     sentiment_job_id,
 )
+from ticker_backend.models import Company, Headline
 from ticker_backend.worker import WorkerSettings
+
+
+async def _seed_headline(session_factory, ticker: str, url: str, sentiment_status):
+    # Bare-minimum real headline row -- these tests only care about sentiment_status transitions.
+    async with session_factory() as session:
+        await session.merge(Company(ticker=ticker))
+        session.add(
+            Headline(
+                ticker=ticker,
+                title="Plan 0036 test headline",
+                url=url,
+                category="news",
+                provider="finnhub",
+                outlet="Yahoo",
+                published_at=datetime.now(timezone.utc),
+                sentiment_status=sentiment_status,
+            )
+        )
+        await session.commit()
+
+
+async def _sentiment_status_for(session_factory, url: str) -> str | None:
+    async with session_factory() as session:
+        row = (await session.execute(select(Headline).where(Headline.url == url))).scalar_one()
+        return row.sentiment_status
 
 
 class _FakeJob:
@@ -166,3 +196,81 @@ def test_worker_registers_both_jobs_with_the_intended_result_retention():
     assert FETCH_RESULT_TTL_SECONDS > 0
     # Sentiment is fire-and-forget, so nothing keeps its result.
     assert functions["sentiment_job"].keep_result_s == 0
+
+
+async def test_enqueue_sentiment_after_fetch_resets_errored_headline_when_key_configured(
+    test_session_factory, monkeypatch
+):
+    """Plan 0036 (relocated from plan 0032's search.py tests): a stale 'error' must not outlive a
+    genuinely fresh retry -- the frontend's hasPendingSentiment only treats NULL as "still coming"."""
+    from ticker_backend.config import settings
+
+    monkeypatch.setattr(settings, "openai_api_key", "test-key-not-real")
+    await _seed_headline(test_session_factory, "SPCX", "https://example.com/jobs-reset-1", "error")
+    redis = _FakeArqRedis()  # nothing running yet -- this call starts a real job
+
+    await enqueue_sentiment_after_fetch(redis, "SPCX", session_factory=test_session_factory)
+
+    assert await _sentiment_status_for(test_session_factory, "https://example.com/jobs-reset-1") is None
+
+
+async def test_enqueue_sentiment_after_fetch_leaves_errored_headline_when_already_running(
+    test_session_factory, monkeypatch
+):
+    # ADR 0015: joining an already-running sentiment job must not reset rows that job already
+    # read its own pending list from -- nothing new is about to retry them.
+    from ticker_backend.config import settings
+
+    monkeypatch.setattr(settings, "openai_api_key", "test-key-not-real")
+    await _seed_headline(test_session_factory, "SPCX", "https://example.com/jobs-reset-2", "error")
+    redis = _FakeArqRedis(taken_ids={"sentiment:SPCX"})  # already running
+
+    await enqueue_sentiment_after_fetch(redis, "SPCX", session_factory=test_session_factory)
+
+    assert await _sentiment_status_for(test_session_factory, "https://example.com/jobs-reset-2") == "error"
+
+
+async def test_enqueue_sentiment_after_fetch_resets_skipped_headline_when_key_configured(
+    test_session_factory, monkeypatch
+):
+    # A 'skipped' headline gets a real attempt once OPENAI_API_KEY is configured -- same staleness
+    # bug as 'error' once that real attempt is genuinely in flight.
+    from ticker_backend.config import settings
+
+    monkeypatch.setattr(settings, "openai_api_key", "test-key-not-real")
+    await _seed_headline(test_session_factory, "SPCX", "https://example.com/jobs-reset-3", "skipped")
+    redis = _FakeArqRedis()
+
+    await enqueue_sentiment_after_fetch(redis, "SPCX", session_factory=test_session_factory)
+
+    assert await _sentiment_status_for(test_session_factory, "https://example.com/jobs-reset-3") is None
+
+
+async def test_enqueue_sentiment_after_fetch_resets_nothing_when_key_not_configured(
+    test_session_factory, monkeypatch
+):
+    # Without a key, the impending job just re-batches everything to 'skipped' almost instantly --
+    # no real work happens, so nothing is genuinely "pending" to reset.
+    from ticker_backend.config import settings
+
+    monkeypatch.setattr(settings, "openai_api_key", "")
+    await _seed_headline(test_session_factory, "SPCX", "https://example.com/jobs-reset-4", "error")
+    await _seed_headline(test_session_factory, "SPCX", "https://example.com/jobs-reset-5", "skipped")
+    redis = _FakeArqRedis()
+
+    await enqueue_sentiment_after_fetch(redis, "SPCX", session_factory=test_session_factory)
+
+    assert await _sentiment_status_for(test_session_factory, "https://example.com/jobs-reset-4") == "error"
+    assert await _sentiment_status_for(test_session_factory, "https://example.com/jobs-reset-5") == "skipped"
+
+
+async def test_enqueue_sentiment_after_fetch_swallows_its_own_failures(monkeypatch):
+    """A hiccup here (Redis, a bad query) must never turn an otherwise-successful fetch job's
+    reported result into a failure -- worker.py awaits this bare, with no try/except of its own."""
+
+    class _BoomRedis:
+        async def enqueue_job(self, *args, **kwargs):
+            raise RuntimeError("boom")
+
+    # Act + assert: the exception is logged and swallowed, never raised to the caller.
+    await enqueue_sentiment_after_fetch(_BoomRedis(), "SPCX", session_factory=None)
