@@ -625,6 +625,34 @@ fetch at once? Same "not a planned lesson" honesty as lesson 30.
 Not committed to this exact split or order — the real per-lesson plans (once each one actually gets planned)
 may reshape it, same as arcs 2 and 4's did.
 
+### Arc 7 — User Accounts (opened 2026-09-26, following the "planned features" note above)
+
+The dependency root for watchlists, notifications, and an eventual admin role. `docs/specs/0006-user-accounts.md`
+finalized via a full grilling round: Google Sign-In only for now (no in-house password storage, ever); anonymous
+search stays exactly as open as today; a walking-skeleton first slice (sign in, see name+profile picture and a
+sign-out control in the shared `Layout`, site-wide); persistent sessions across browser restarts; account-linking
+across multiple providers explicitly out of scope until a second provider is real (noted here for that future
+decision, not lost). A follow-up grilling round settled the technical direction, to be written up as one ADR
+(the OAuth flow, session storage, and `users` table shape are tightly coupled, unlike spec 0002's separable
+decisions): **Authlib**, not hand-rolled `httpx` — researched rather than assumed, since ADR 0010's raw-HTTP
+precedent doesn't transfer to OAuth's fiddlier, security-sensitive parts (ID-token signature verification against
+a provider's rotating public keys); Google's own docs recommend a client library for exactly that step. **Redis-backed
+sessions**, not signed cookies — Redis is already running here for ARQ, the marginal cost is one cheap lookup per
+request, and it buys real per-session revocation (useful once "sign out everywhere" or an admin capability exists)
+that a stateless cookie can never offer.
+
+35. **One Redis, two jobs** — concept lesson, ARQ and session storage sharing one Redis instance: key
+    namespacing (`arq:*` vs `session:*`), why it doesn't slow the worker queue (Redis's own command cost is
+    microseconds against real jobs' 60-100+s OpenAI-bound runtimes), and this project's own `redis` service
+    having no `maxmemory`/eviction policy configured at all (so nothing competes for eviction). ✅ built
+    (`lessons/0035-*.html`).
+36. **OAuth at a high level** — concept lesson, the provider-agnostic shape every "Sign in with X" button uses:
+    the four actors, the authorization-code dance, why the client secret and code exchange stay server-side,
+    OAuth vs. OpenID Connect (the ID token is OIDC's addition, not bare OAuth's), and why adding a second
+    provider later is realistic, not wishful. ✅ built (`lessons/0036-*.html`).
+
+Next: the ADR for the technical approach (Authlib, Redis sessions, `users` table shape), then a per-lesson plan.
+
 ## Known issues & ideas
 - **Idea: extract the sentiment system prompt out of a literal string.** `_SENTIMENT_SYSTEM_PROMPT` in
   `sentiment.py` is hardcoded in the module. Consider `Settings` (env-configurable) or an external file, so

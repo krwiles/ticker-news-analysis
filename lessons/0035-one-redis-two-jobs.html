@@ -1,0 +1,138 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 35 — One Redis, Two Jobs</title>
+<link rel="stylesheet" href="../assets/lesson.css">
+</head>
+<body>
+<div class="lesson">
+
+  <p class="eyebrow">Lesson 35 · ticker-news-analysis stack (Arc 7 — User Accounts, opening concept lesson)</p>
+  <h1>One Redis, two jobs: ARQ and sessions</h1>
+  <p class="subtitle">Spec 0006's grilling round picked Redis-backed sessions over signed cookies. This project's Redis already runs ARQ's entire job queue — how do the two coexist in one instance without stepping on each other?</p>
+
+  <div class="callout">
+    <p>
+      The real question, asked directly: does adding session storage to the same Redis that runs the worker
+      queue slow the queue down, and how does Redis keep two completely different kinds of data from colliding
+      with each other?
+    </p>
+  </div>
+
+  <h2>What ARQ already stores in this Redis</h2>
+  <p>
+    ARQ isn't shy about its key names — they're hardcoded, not configurable, and worth knowing since they're
+    already running in this project's `redis` container right now:
+  </p>
+  <pre><code>arq:queue              # a sorted set — job IDs, scored by when they're due to run
+arq:job:{id}           # the serialized job itself (function, args) — PSETEX, expires on its own
+arq:in-progress:{id}   # exists only while a worker is actually executing that job
+arq:retry:{id}         # an atomic counter, how many times this job has been retried
+arq:result:{id}        # the job's return value, if keep_result &gt; 0 (jobs.py's own FETCH_RESULT_TTL_SECONDS)</code></pre>
+  <p>
+    Every one of these starts with the literal prefix <code>arq:</code>. That's not a convention this project
+    chose — it's baked into the library itself.
+  </p>
+
+  <h2>What a session adds</h2>
+  <p>
+    A Redis-backed session needs exactly one new key shape: something like <code>session:{opaque-id}</code>,
+    holding whatever's needed to know who's signed in, with a TTL so it eventually expires on its own. The
+    browser's cookie holds only the opaque ID — never the session contents — so the cookie itself reveals
+    nothing if someone got hold of it without also having Redis access.
+  </p>
+
+  <h2>Why they can't collide</h2>
+  <p>
+    <code>arq:*</code> and <code>session:*</code> share nothing — Redis has one flat keyspace, but a key is
+    just a string, and two strings with different prefixes are simply different keys. This is the standard
+    pattern for running several concerns on one Redis instance: a common convention is exactly
+    <code>queue:job-id</code> next to <code>session:session-id</code>, distinguished by prefix alone, no special
+    Redis feature required. Nothing about adding session keys can overwrite, corrupt, or even see ARQ's keys —
+    they're just neighbors in the same address space.
+  </p>
+
+  <h2>Does this slow the worker queue down?</h2>
+  <p>
+    Redis executes commands from a single thread, one at a time — but "one at a time" is misleading if you
+    picture it as slow. A single <code>GET</code> or <code>SET</code> takes on the order of microseconds; a
+    modest Redis instance handles tens of thousands of simple operations per second before that thread becomes
+    the bottleneck. A session lookup adds one such command to an authenticated request. Compare that to what
+    this project's own jobs actually spend their time on: `sentiment_job`'s real measured runs take 60-100+
+    seconds (lesson 30/31), and essentially none of that is Redis time — it's waiting on OpenAI's API over the
+    network. Redis itself was never the slow part of this project's worker queue, so a session lookup or two
+    per request isn't a meaningful new load next to that.
+  </p>
+
+  <h2>What about memory pressure?</h2>
+  <p>
+    A real concern at larger scale: if Redis runs low on memory and has an eviction policy configured (like
+    <code>allkeys-lru</code>), it can start deleting keys to make room — and a job's data getting evicted mid-run,
+    or a session getting silently dropped, would be a real bug. Checked directly against this project's own
+    <code>docker-compose.yml</code>: the <code>redis</code> service sets no <code>maxmemory</code> and no eviction
+    policy at all — Redis's own default in that case is <code>noeviction</code>, meaning it refuses new writes with
+    an error rather than silently deleting anything. There's no competition between ARQ's keys and session keys
+    for eviction, because nothing here evicts. The real ceiling is the host's actual memory, and at this
+    project's scale (a handful of jobs, a handful of sessions) that's nowhere close to being tested.
+  </p>
+
+  <h2>When would separate instances actually matter?</h2>
+  <p>
+    Real production systems sometimes do split these onto separate Redis instances — GitLab.com is a documented
+    example. The reason is workload isolation: at real scale, you don't want one concern's memory pressure or
+    eviction behavior bleeding into another's, and a noisy job queue shouldn't be able to degrade session
+    lookups (or vice versa) by competing for the same instance's resources. That's a real tradeoff worth
+    knowing, not a reason to distrust one instance here — at personal-project scale, with no eviction policy and
+    negligible command volume from either side, one Redis instance is the right call, the same "don't
+    pre-optimize for a scale you're not at" instinct this project already applies elsewhere (ADR 0003).
+  </p>
+
+  <h2>Check your understanding</h2>
+
+  <div class="check">
+    <p class="q">Q1. ARQ's Redis keys are hardcoded with an <code>arq:</code> prefix. If a session key were also named <code>arq:something</code> by accident, what would actually happen?</p>
+    <details>
+      <summary>Reveal answer</summary>
+      <p class="answer">Redis has one flat keyspace per logical database — if a session key happened to collide with a real ARQ key name, one would simply overwrite the other, silently. This is exactly why picking a genuinely distinct prefix (session:) matters; it's a naming discipline, not something Redis enforces automatically.</p>
+    </details>
+  </div>
+
+  <div class="check">
+    <p class="q">Q2. Why doesn't a session lookup meaningfully compete with a sentiment job for Redis's attention, even though Redis only runs one command at a time?</p>
+    <details>
+      <summary>Reveal answer</summary>
+      <p class="answer">A session lookup is one GET/SET taking microseconds. A sentiment job's real 60-100+ second runtime is almost entirely spent waiting on OpenAI's API over the network, not issuing Redis commands. The two workloads are wildly different in what actually consumes time, so adding a handful of session commands per request doesn't meaningfully compete with work that was never Redis-bound in the first place.</p>
+    </details>
+  </div>
+
+  <div class="check">
+    <p class="q">Q3. This project's redis service sets no maxmemory or eviction policy. What does that actually mean for a session sitting next to ARQ's job keys?</p>
+    <details>
+      <summary>Reveal answer</summary>
+      <p class="answer">With no maxmemory/eviction policy set, Redis defaults to noeviction — it refuses new writes with an error under memory pressure rather than silently deleting existing keys to make room. So there's no scenario here where a session key gets evicted to make space for a job key, or vice versa; the only real limit is the host's actual available memory.</p>
+    </details>
+  </div>
+
+  <div class="source">
+    <p class="label">Primary sources</p>
+    <p>
+      <a href="https://github.com/python-arq/arq">ARQ — GitHub repository</a> ·
+      <a href="https://redis.io/docs/latest/develop/use-cases/job-queue/">Redis docs — job queue use case</a> ·
+      <a href="https://redis.io/docs/latest/develop/use-cases/session-store/">Redis docs — session store use case</a>
+    </p>
+  </div>
+
+  <p class="ask">Want to see ARQ's real keys directly (<code>redis-cli --scan --pattern "arq:*"</code> against
+  the running stack), or dig into how a session's TTL would actually get refreshed on activity? Ask your
+  teacher (this agent).</p>
+
+  <div class="nav">
+    <a href="0034-confirming-two-potential-bugs.html">← Lesson 34: confirming two potential bugs</a> ·
+    <a href="0036-oauth-at-a-high-level.html">Lesson 36: OAuth at a high level →</a>
+  </div>
+
+</div>
+</body>
+</html>
