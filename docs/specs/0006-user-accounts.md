@@ -68,5 +68,6 @@ or an error to make sense of; signing in again is always the way forward.
 
 ## Technical approach
 
-Not decided here — the OAuth flow mechanics, session storage, and the `users` table shape belong in a
-follow-up ADR, once this spec's behavior is confirmed.
+See `docs/adr/0016-user-accounts-technical-approach.md` — the sign-in mechanism, session storage, and the
+`users` table shape, all decided during this spec's own grilling round, following this project's usual
+pattern (see ADR 0006/0007 for the equivalent decisions grouping made).

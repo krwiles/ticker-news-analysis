@@ -632,14 +632,21 @@ finalized via a full grilling round: Google Sign-In only for now (no in-house pa
 search stays exactly as open as today; a walking-skeleton first slice (sign in, see name+profile picture and a
 sign-out control in the shared `Layout`, site-wide); persistent sessions across browser restarts; account-linking
 across multiple providers explicitly out of scope until a second provider is real (noted here for that future
-decision, not lost). A follow-up grilling round settled the technical direction, to be written up as one ADR
-(the OAuth flow, session storage, and `users` table shape are tightly coupled, unlike spec 0002's separable
-decisions): **Authlib**, not hand-rolled `httpx` — researched rather than assumed, since ADR 0010's raw-HTTP
-precedent doesn't transfer to OAuth's fiddlier, security-sensitive parts (ID-token signature verification against
-a provider's rotating public keys); Google's own docs recommend a client library for exactly that step. **Redis-backed
-sessions**, not signed cookies — Redis is already running here for ARQ, the marginal cost is one cheap lookup per
-request, and it buys real per-session revocation (useful once "sign out everywhere" or an admin capability exists)
-that a stateless cookie can never offer.
+decision, not lost). A follow-up grilling round settled the technical direction, written up as
+`docs/adr/0016-user-accounts-technical-approach.md` (one ADR, not several — the sign-in mechanism, session
+storage, and `users` table shape are tightly coupled, unlike spec 0002's separable decisions). **A real
+correction made before any code was written, not after**: research first landed on Authlib (the dominant
+FastAPI-community choice for the classic OAuth Authorization Code flow) — reconsidered once Google's own docs
+turned up recommending **Google Identity Services (GIS)** instead for apps that only need identity, never a
+Google API on the user's behalf, calling classic OAuth "unnecessarily complex" for that case. Final: **GIS**
+(frontend button, returns a signed ID token directly, no code exchange) + Google's own **`google-auth`**
+library for verifying it — not Authlib. **Redis-backed sessions**, not signed cookies — Redis is already
+running here for ARQ (lesson 35), the marginal cost is one cheap lookup per request, and it buys real
+per-session revocation a stateless cookie can never offer. The cookie's own attributes were verified rather
+than assumed, catching two more wrong guesses along the way: `SameSite=Lax` (not `None`) is actually sufficient
+since `ui`/`api` are different *origins* but the same *site* (port doesn't count toward "site"); `Secure` must
+be environment-driven (off for local HTTP dev, on once real HTTPS exists), since browsers refuse to store a
+`Secure` cookie at all over plain HTTP.
 
 35. **One Redis, two jobs** — concept lesson, ARQ and session storage sharing one Redis instance: key
     namespacing (`arq:*` vs `session:*`), why it doesn't slow the worker queue (Redis's own command cost is
@@ -651,7 +658,7 @@ that a stateless cookie can never offer.
     OAuth vs. OpenID Connect (the ID token is OIDC's addition, not bare OAuth's), and why adding a second
     provider later is realistic, not wishful. ✅ built (`lessons/0036-*.html`).
 
-Next: the ADR for the technical approach (Authlib, Redis sessions, `users` table shape), then a per-lesson plan.
+Next: the actual per-lesson implementation plan, now that spec 0006 and ADR 0016 are both settled.
 
 ## Known issues & ideas
 - **Idea: extract the sentiment system prompt out of a literal string.** `_SENTIMENT_SYSTEM_PROMPT` in
@@ -682,32 +689,14 @@ Next: the ADR for the technical approach (Authlib, Redis sessions, `users` table
 - **Planned features (2026-09-21) — the direction, none specced or built yet.** Rough dependency order: accounts
   first, watchlists and notifications build on them, Kubernetes is largely independent and can happen any time
   after the app is stable. Each needs its own spec (behavior) and ADRs (architecture) when picked up.
-  - **OAuth with user accounts.** OAuth/OIDC-style login with signed session cookies is already in the original
-    stack list. Nothing today has a user: `/api/search` is anonymous and every ticker's data is shared. Unlocks
-    the admin-panel idea above (needs an admin role), per-user watchlists, and per-user notifications.
-    - **Leading idea: "Sign in with Google"** (Google's OpenID Connect), assuming it's free. Checked against
-      Google's docs on 2026-09-21: Google states it "does not charge the developer any fees" for OAuth app
-      verification/security assessment (only third-party CASA assessors charge, and that applies to
-      restricted scopes, not plain login). I did *not* find a page that states outright that sign-in itself
-      is free, so confirm in the Cloud Console before relying on it, including whether creating the Google
-      Cloud project asks for a billing account.
-    - **Setup, per Google's docs:** create OAuth 2.0 credentials in the Google Cloud Console (client ID and
-      secret), register exact redirect URIs, and fill in the consent-screen branding. Request only `openid
-      email` (optionally `profile`). The server-side flow makes an anti-forgery `state` token, exchanges the
-      authorization code for tokens, then validates the ID token (issuer `https://accounts.google.com`, `aud`
-      equals our client ID, not expired, signature checked against Google's published keys).
-    - **Scope caveat:** unverified apps that request *sensitive or restricted* scopes are capped at 100 new
-      users, and apps requesting only name/email/profile are reportedly exempt. That comes from search-result
-      summaries, not a Google page I could quote, so verify it before assuming a login-only app never needs
-      verification.
-    - **What it would touch here:** `ui` (:3000) and `api` (:8000) are different origins (ADR 0002), and the
-      current CORS setup in `main.py` doesn't allow credentialed requests, so session cookies would need
-      `allow_credentials` on the api side and `credentials: "include"` on the frontend's fetches. It also needs a
-      `users` table keyed on Google's stable `sub` claim (standard OIDC practice) rather than the email address.
-    - **Open decisions:** hand-roll the flow with `httpx` (consistent with ADR 0010's no-SDKs stance, and
-      good for learning) or use a library such as Authlib; where sessions live (a signed cookie, or
-      Redis-backed); whether to add other providers later; and what "logged out" still allows (anonymous
-      search, probably).
+  - **OAuth with user accounts.** Now Arc 7 above, not just an idea — spec 0006 and ADR 0016 cover the
+    behavior and technical approach in full. Two things from the original 2026-09-21 research still not
+    verified, both about actually setting up the Google Cloud project rather than the app's own architecture:
+    whether sign-in itself is free (Google confirms *app verification/security assessment* costs nothing, but
+    no page found stating sign-in itself is free — confirm in the Cloud Console, including whether creating
+    the project asks for a billing account), and whether an unverified app requesting only name/email/profile
+    is genuinely exempt from the 100-new-user cap that applies to sensitive/restricted scopes (came from
+    search-result summaries, not a Google page quoted directly).
   - **Watchlists that keep tickers updated automatically.** A user's watched tickers get refreshed by
     scheduled background jobs, so their data is already fresh when they open the app. Already anticipated by
     ADR 0003, ADR 0004 and spec 0001 (a `cron_jobs` trigger calling the same fetch job). Things this touches:
