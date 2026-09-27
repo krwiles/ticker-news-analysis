@@ -1,6 +1,12 @@
 # env
 .env
 
+# Google's own default name for a downloaded OAuth client credentials file --
+# unneeded here (spec 0006/ADR 0016 uses GIS's credential flow, no client
+# secret) but guarded against anyway, since Google's console offers it by
+# default and it contains a real client_secret when it exists.
+client_secret_*.json
+
 # python
 backend/.venv/
 __pycache__/

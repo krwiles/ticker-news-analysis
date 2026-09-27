@@ -690,13 +690,11 @@ Next: the actual per-lesson implementation plan, now that spec 0006 and ADR 0016
   first, watchlists and notifications build on them, Kubernetes is largely independent and can happen any time
   after the app is stable. Each needs its own spec (behavior) and ADRs (architecture) when picked up.
   - **OAuth with user accounts.** Now Arc 7 above, not just an idea — spec 0006 and ADR 0016 cover the
-    behavior and technical approach in full. Two things from the original 2026-09-21 research still not
-    verified, both about actually setting up the Google Cloud project rather than the app's own architecture:
-    whether sign-in itself is free (Google confirms *app verification/security assessment* costs nothing, but
-    no page found stating sign-in itself is free — confirm in the Cloud Console, including whether creating
-    the project asks for a billing account), and whether an unverified app requesting only name/email/profile
-    is genuinely exempt from the 100-new-user cap that applies to sensitive/restricted scopes (came from
-    search-result summaries, not a Google page quoted directly).
+    behavior and technical approach in full. Both open questions from the original 2026-09-21 research
+    **confirmed live (2026-09-26)** while actually setting up the real Google Cloud project: no billing
+    account was required to create/use it, and the console showed no user cap or verification requirement for
+    the `openid`/`email`/`profile` scope set this app actually requests. Real `GOOGLE_CLIENT_ID` obtained and
+    in `.env`; no client secret needed at all (GIS's credential flow, ADR 0016, never exchanges one).
   - **Watchlists that keep tickers updated automatically.** A user's watched tickers get refreshed by
     scheduled background jobs, so their data is already fresh when they open the app. Already anticipated by
     ADR 0003, ADR 0004 and spec 0001 (a `cron_jobs` trigger calling the same fetch job). Things this touches:
