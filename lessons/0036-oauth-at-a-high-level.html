@@ -1,0 +1,145 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 36 — OAuth at a High Level</title>
+<link rel="stylesheet" href="../assets/lesson.css">
+</head>
+<body>
+<div class="lesson">
+
+  <p class="eyebrow">Lesson 36 · ticker-news-analysis stack (Arc 7 — User Accounts)</p>
+  <h1>OAuth at a high level: how "Sign in with Google" actually works</h1>
+  <p class="subtitle">Not Google-specific mechanics — the same shape every "Sign in with X" button uses, so it transfers directly to GitHub, Microsoft, or whatever spec 0006's "door open for more providers later" eventually points at.</p>
+
+  <div class="callout">
+    <p>
+      One thing to unlearn first: OAuth's job is <strong>authorization</strong> — "can this app do something on my
+      behalf" — not identity. "Sign in with Google" layers identity on top of that (more on this below), but the
+      underlying dance is the same either way.
+    </p>
+  </div>
+
+  <h2>The four actors</h2>
+  <p>Every OAuth flow, for any provider, involves the same four roles:</p>
+  <ul>
+    <li><strong>Resource Owner</strong> — the real person, sitting at their browser.</li>
+    <li><strong>Client</strong> — this app, wanting to know who that person is.</li>
+    <li><strong>Authorization Server</strong> — Google's own login/consent system (or GitHub's, or Microsoft's).</li>
+    <li><strong>Resource Server</strong> — the API that actually holds the data the Client wants (here, just "who is this person").</li>
+  </ul>
+  <p>
+    For a plain sign-in, the Authorization Server and Resource Server are effectively the same place (Google),
+    but the roles are still worth naming separately — a different OAuth use case (say, an app that reads your
+    Google Calendar) makes the Resource Server a genuinely distinct API the Authorization Server merely grants
+    access to.
+  </p>
+
+  <h2>The actual dance, step by step</h2>
+  <ol>
+    <li>The app redirects the browser to the provider's own authorization endpoint, with its client ID, the
+      permissions it's asking for (scopes), and a random anti-forgery value (<code>state</code>).</li>
+    <li>The provider handles login and shows the consent screen entirely on its own — the app never sees the
+      person's password, ever.</li>
+    <li>On approval, the provider redirects the browser back to the app with a one-time-use authorization code,
+      plus the same <code>state</code> value echoed back.</li>
+    <li>The app's <strong>server</strong> — not the browser — sends that code, along with its client secret,
+      directly to the provider's token endpoint.</li>
+    <li>The provider replies with tokens: an ID token (a signed statement of who the person is) and often an
+      access token (permission to call the Resource Server's API).</li>
+    <li>The app verifies the ID token — its signature against the provider's published public keys, plus the
+      issuer, audience, and expiry — before trusting anything it says.</li>
+  </ol>
+
+  <h2>Why the client secret never touches the browser</h2>
+  <p>
+    Step 4 happens server-to-server specifically because a secret embedded anywhere in browser-delivered code
+    (JavaScript, a mobile app binary) isn't actually secret — anyone can extract it. The one-time authorization
+    code from step 3 is safe to pass through the browser precisely because it's useless without the client
+    secret to redeem it, and that secret only ever exists on the app's own server.
+  </p>
+
+  <h2>OAuth vs. OpenID Connect — the actual distinction</h2>
+  <p>
+    OAuth 2.0 itself has no formal concept of "identity" — it's purely about authorization tokens for accessing
+    an API. <strong>OpenID Connect (OIDC)</strong> is a thin identity layer built on top of OAuth 2.0 that adds
+    exactly one new thing: the ID token, a signed JWT that says "this is who signed in." Every "Sign in with
+    Google/GitHub/Microsoft" button in the wild is technically OIDC, not bare OAuth — the term "OAuth login"
+    is common shorthand, but the identity part specifically comes from OIDC riding on top.
+  </p>
+
+  <h2>What <code>state</code> and <code>nonce</code> actually prevent</h2>
+  <p>
+    <code>state</code> (step 1/3) stops a specific attack: a malicious site tricking a signed-in user's browser
+    into completing a login flow the user never actually started, by replaying a stolen authorization code. The
+    app checks that the <code>state</code> it gets back matches the one it sent — a mismatch means the flow
+    didn't originate from this app's own request. <code>nonce</code> is the OIDC-specific cousin: a value embedded
+    inside the ID token itself, checked to make sure a captured token can't be replayed later as if it were fresh.
+  </p>
+
+  <h2>Why this generalizes cleanly to "more providers later"</h2>
+  <p>
+    Every real provider — Google, GitHub, Microsoft, anyone implementing OAuth2/OIDC — exposes the identical
+    shape: an authorization endpoint, a token endpoint, scopes, redirect URIs. What differs is just the specific
+    URLs, the exact scope names, and the shape of the claims inside the ID token. That's precisely why spec
+    0006's "door open for more providers later, no account-linking decided yet" is realistic rather than
+    wishful: adding a second provider later means pointing the same client library at a different provider's
+    configuration, not re-deriving this whole flow from scratch.
+  </p>
+
+  <h2>Check your understanding</h2>
+
+  <div class="check">
+    <p class="q">Q1. Is "Sign in with Google" OAuth or OpenID Connect?</p>
+    <details>
+      <summary>Reveal answer</summary>
+      <p class="answer">Technically OpenID Connect — OAuth 2.0 itself carries no identity concept, only authorization tokens. OIDC is the identity layer on top that adds the ID token, which is what actually says who signed in. "OAuth login" is the common colloquial name, but the identity part specifically comes from OIDC.</p>
+    </details>
+  </div>
+
+  <div class="check">
+    <p class="q">Q2. Why does the authorization-code-for-token exchange have to happen from the app's server, never from JavaScript running in the browser?</p>
+    <details>
+      <summary>Reveal answer</summary>
+      <p class="answer">That exchange requires the client secret, and any secret shipped to the browser (in JS, in a mobile app binary) can be extracted by anyone — it isn't actually secret once it's client-side. The one-time authorization code is safe to pass through the browser precisely because it's useless without the secret, which only ever lives on the server.</p>
+    </details>
+  </div>
+
+  <div class="check">
+    <p class="q">Q3. What specific attack does the state parameter prevent?</p>
+    <details>
+      <summary>Reveal answer</summary>
+      <p class="answer">A malicious site tricking a user's browser into completing a login flow the user never initiated (a cross-site request forgery on the login flow itself), often by replaying a stolen authorization code. The app generates a random state value before redirecting and rejects the callback if the state that comes back doesn't match, proving the flow really originated from this app's own request.</p>
+    </details>
+  </div>
+
+  <div class="check">
+    <p class="q">Q4. Why is adding a second sign-in provider later expected to be straightforward, not a redesign?</p>
+    <details>
+      <summary>Reveal answer</summary>
+      <p class="answer">Every real OAuth2/OIDC provider implements the identical shape — an authorization endpoint, a token endpoint, scopes, redirect URIs. Only the specific URLs, scope names, and claim formats differ between providers. A client library configured for one provider is reconfigured for another, not rebuilt.</p>
+    </details>
+  </div>
+
+  <div class="source">
+    <p class="label">Primary sources</p>
+    <p>
+      <a href="https://developers.google.com/identity/protocols/oauth2">Google — OAuth 2.0 for server-side web applications</a> ·
+      <a href="https://developers.google.com/identity/siwg/best-practices">Google — Best Practices for Sign in with Google</a> ·
+      <a href="https://docs.authlib.org/en/v0.15.5/client/fastapi.html">Authlib — FastAPI OAuth client docs</a> ·
+      <a href="../docs/specs/0006-user-accounts.md">Spec 0006 — User Accounts (Google Sign-In)</a>
+    </p>
+  </div>
+
+  <p class="ask">Want to walk through what spec 0006's actual redirect URIs and scopes will look like once the
+  ADR is written, or dig into how ID token signature verification actually checks a provider's rotating public
+  keys? Ask your teacher (this agent).</p>
+
+  <div class="nav">
+    <a href="0035-one-redis-two-jobs.html">← Lesson 35: one Redis, two jobs</a>
+  </div>
+
+</div>
+</body>
+</html>
