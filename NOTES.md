@@ -711,7 +711,7 @@ Analysis) · Arc 6 (concurrency/multi-user readiness, secret scanner) · Arc 7 (
 **Phase 1 — quick, independent wins (no dependencies, any order):**
 - ~~Dark mode~~ — ✅ built (plan: `docs/plans/0038-*.md`), see the completed writeup below.
 - Extract the sentiment system prompt out of its literal string (idea below).
-- Fix `RECENT_HEADLINES_WINDOW`'s day-granularity mismatch (idea below).
+- ~~Fix `RECENT_HEADLINES_WINDOW`'s day-granularity mismatch~~ — ✅ fixed (plan: `docs/plans/0039-*.md`).
 - Wire in Kaizen UI (NVIDIA's design system) — an original stack item never picked up; the app still uses
   plain Tailwind. Pairs naturally with dark mode, since both touch the same visual layer.
 - Set up the already-decided MCP servers (Docker MCP Gateway + Postgres MCP + Milvus MCP) — the decision was
@@ -765,15 +765,25 @@ see the `nvidia-vulnops-portfolio-stack` project memory for the full reasoning).
 - **Idea: extract the sentiment system prompt out of a literal string.** `_SENTIMENT_SYSTEM_PROMPT` in
   `sentiment.py` is hardcoded in the module. Consider `Settings` (env-configurable) or an external file, so
   it can be tuned without a code change/redeploy. Not decided which; revisit when actually needed.
-- **Idea (2026-09-23, found while re-verifying plan 0036): `RECENT_HEADLINES_WINDOW`'s exact-timestamp
-  cutoff can silently exclude a headline that Finnhub itself just fetched.** Finnhub's `from`/`to` range
-  is day-granularity, so a headline published early on the oldest included day can be fetched and grouped
-  into a real Story, while the app's own "still needs sentiment"/"show in search" cutoff (`now - 7 days`,
-  an exact timestamp) excludes it a few hours later than its own published time. Confirmed live: 12 of 114
-  real Stories for a freshly-fetched ticker showed a permanently-zero aggregate this way — not the plan
-  0036 race (verified: zero headlines had `sentiment_status = 'ok'` with `story_id IS NULL`), just an
-  unrelated boundary mismatch. Not designed or scoped yet; likely direction is aligning the cutoff to
-  day-granularity too, or accepting the small edge window.
+- **`RECENT_HEADLINES_WINDOW`'s exact-timestamp cutoff vs. Finnhub's day-granularity fetch** — ✅ fixed
+  (2026-09-27, plan `docs/plans/0039-*.md`), the idea first noted 2026-09-23 while re-verifying plan 0036.
+  Confirmed by reading the actual code (not re-guessed from the idea's own text): `sentiment.py`'s
+  `_fetch_pending_headlines` used an exact-instant cutoff (`now - RECENT_HEADLINES_WINDOW`) to decide
+  sentiment-scoring eligibility, while `providers.py`'s Finnhub fetch uses a day-granularity `from`/`to`
+  range — a headline published early on the oldest included day gets fetched fine, but can fall outside the
+  exact-instant cutoff by the time the sentiment job's own query runs moments later, permanently stranding
+  it at `sentiment_status = NULL` (time only moves forward, so a headline that misses this once misses it
+  forever). New `recent_headlines_cutoff()` in `config.py` aligns the cutoff to the start of the oldest
+  included UTC day instead — a strict superset of the old exact-instant cutoff, so it only ever widens the
+  window (by at most a day, on the oldest day only), never narrows it. Used at all three existing call
+  sites (`search.py`, `sentiment.py`, `jobs.py`); `providers.py` needed no change (EDGAR's own fetch filter
+  already used the safe exact-instant form, and a day-aligned downstream cutoff is a superset of that too).
+  New `tests/test_config.py` (3 tests, including the exact regression scenario), 106/106 backend tests, zero
+  regressions. **Live-verified against the real running stack**, not just unit tests: since no
+  naturally-occurring gap headline existed at the moment of the fix, inserted a synthetic one at the exact
+  boundary and called the real deployed `_fetch_pending_headlines`/`_load_search_results` functions directly
+  inside the running `api` container — both correctly picked it up; cleaned up afterward. A real
+  `/api/search?ticker=AAPL` call confirmed existing behavior unaffected.
 - **Idea (2026-09-21): an admin panel in the UI showing each container's logs.** Not designed yet; things to
   settle when it's picked up:
   - **Where the logs come from:** today every container just writes to its own stdout, readable only via

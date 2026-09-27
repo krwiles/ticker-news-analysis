@@ -14,7 +14,7 @@ import httpx
 import structlog
 from sqlalchemy import select, update
 
-from ticker_backend.config import RECENT_HEADLINES_WINDOW, settings
+from ticker_backend.config import recent_headlines_cutoff, settings
 from ticker_backend.db import async_session_factory
 from ticker_backend.models import Headline, Story
 from ticker_backend.providers import ProviderFetchError, embedding_input_text
@@ -163,7 +163,8 @@ async def _fetch_pending_headlines(ticker: str, session_factory) -> list[Headlin
     0014's own Non-goal: no dedicated backfill, only whatever a later request's own scope happens
     to include again). Newest first (spec 0005): the most recently published headlines are what a
     user actually came back to check, so they're worth resolving before older ones."""
-    cutoff = datetime.now(timezone.utc) - RECENT_HEADLINES_WINDOW
+    # Day-aligned, not an exact instant -- see docs/plans/0039-*.md.
+    cutoff = recent_headlines_cutoff(datetime.now(timezone.utc))
     # Only a real score (`ok`) is permanent -- this WHERE clause is the entire enforcement of
     # that rule (spec 0005); `skipped`/`error` both stay eligible for retry.
     async with session_factory() as session:

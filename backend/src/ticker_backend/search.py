@@ -16,7 +16,7 @@ from arq.connections import RedisSettings
 from fastapi import APIRouter, Depends, FastAPI, Request
 from sqlalchemy import select
 
-from ticker_backend.config import RECENT_HEADLINES_WINDOW, derive_sentiment_enum, settings
+from ticker_backend.config import derive_sentiment_enum, recent_headlines_cutoff, settings
 from ticker_backend.db import async_session_factory
 from ticker_backend.jobs import enqueue_or_join_fetch
 from ticker_backend.models import Headline, Story
@@ -170,7 +170,8 @@ async def _load_search_results(ticker: str, session_factory) -> tuple[list[dict]
     """Queries Postgres for this ticker's recent headlines and builds both the day view and the
     page-level sentiment status from the same rows -- shared by /api/search and
     /api/search/status (lesson 26) so the two never drift out of sync with each other."""
-    cutoff = datetime.now(timezone.utc) - RECENT_HEADLINES_WINDOW
+    # Day-aligned, not an exact instant -- see docs/plans/0039-*.md.
+    cutoff = recent_headlines_cutoff(datetime.now(timezone.utc))
 
     # Query Postgres directly for this ticker's recent headlines -- neither
     # job hands back headline data itself, per the module docstring.
