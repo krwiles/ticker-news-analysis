@@ -77,10 +77,10 @@ export function AuthControls() {
         {user.picture_url && (
           <img src={user.picture_url} alt="" referrerPolicy="no-referrer" className="h-8 w-8 rounded-full" />
         )}
-        <span className="text-sm font-medium text-slate-700">{user.name}</span>
+        <span className="text-sm font-medium text-slate-700 dark:text-slate-300">{user.name}</span>
         <button
           onClick={handleSignOut}
-          className="rounded border border-slate-300 px-2 py-1 text-sm text-slate-600 hover:bg-slate-50"
+          className="rounded border border-slate-300 px-2 py-1 text-sm text-slate-600 hover:bg-slate-50 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800"
         >
           Sign out
         </button>

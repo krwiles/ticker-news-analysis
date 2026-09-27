@@ -709,7 +709,7 @@ Story Grouping — Milvus fully built, in continuous production use) · Arc 5 (s
 Analysis) · Arc 6 (concurrency/multi-user readiness, secret scanner) · Arc 7 (spec 0006, User Accounts).
 
 **Phase 1 — quick, independent wins (no dependencies, any order):**
-- Dark mode (idea below).
+- ~~Dark mode~~ — ✅ built (plan: `docs/plans/0038-*.md`), see the completed writeup below.
 - Extract the sentiment system prompt out of its literal string (idea below).
 - Fix `RECENT_HEADLINES_WINDOW`'s day-granularity mismatch (idea below).
 - Wire in Kaizen UI (NVIDIA's design system) — an original stack item never picked up; the app still uses
@@ -741,11 +741,23 @@ deferrable to Phase 4.
 see the `nvidia-vulnops-portfolio-stack` project memory for the full reasoning).
 
 ## Known issues & ideas
-- **Idea (2026-09-27): dark mode for the frontend.** Not designed or scoped yet. `assets/lesson.css` (the
-  teaching workspace's own stylesheet, not the app) already has a real `@media (prefers-color-scheme: dark)`
-  precedent worth reusing the same instinct for — a CSS custom-property palette swapped per color scheme,
-  rather than a second full stylesheet or a JS-driven theme toggle. Tailwind v4 (already in use, see
-  `RESOURCES.md`) has its own `dark:` variant support, which would be the natural mechanism if picked up.
+- **Dark mode for the frontend** — ✅ built (2026-09-27, plan `docs/plans/0038-*.md`), scoped via `/grill-me`:
+  a two-state (light/dark) toggle in `Layout`'s nav, defaulting to the OS preference on a first-ever visit
+  and remembered via `localStorage` after that. Tailwind v4 switched from its default media-query-only
+  `dark:` variant to a class-based one (`@custom-variant dark (&:where(.dark, .dark *));` in `index.css`) so
+  the manual toggle can override the OS setting. New `theme.ts` (the storage read/write, deliberately isolated
+  so a future account-synced preference — the user's actual long-term intent — only needs to change this one
+  module, not every call site or the `users` schema today) and `ThemeToggle.tsx` (inline SVG sun/moon icon, no
+  new dependency). Full pass across every component with hardcoded colors (~13 files), not just the page
+  shell — a half-dark app was judged worse than the extra file count. The nav and `StatusPage` both widened
+  `max-w-md` → `max-w-2xl` to match `SearchPage`'s own card width, at the user's request once the toggle's
+  placement highlighted the mismatch. 100/100 frontend tests (12 new), zero regressions. **A real gap found
+  during verification**: jsdom implements no `matchMedia` at all, which crashed `App.test.tsx` (mounts
+  `Layout` → `ThemeToggle` with no stub of its own) — fixed with a safe default in the shared
+  `vitest.setup.ts`. No browser automation was available this session, so verification went one level more
+  direct than usual: confirmed in the actual compiled bundle running in the rebuilt `ui` container that the
+  `dark:` variant compiles to a real `:where(.dark, .dark *)` class selector, not a media query. A manual
+  click-through in a real browser is still the recommended final check.
 - **Idea: extract the sentiment system prompt out of a literal string.** `_SENTIMENT_SYSTEM_PROMPT` in
   `sentiment.py` is hardcoded in the module. Consider `Settings` (env-configurable) or an external file, so
   it can be tuned without a code change/redeploy. Not decided which; revisit when actually needed.
