@@ -1,4 +1,4 @@
-from datetime import timedelta
+from datetime import datetime, time, timedelta, timezone
 from typing import Literal
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -47,6 +47,16 @@ RECENT_HEADLINES_WINDOW = timedelta(days=7)
 # import-chain reason as RECENT_HEADLINES_WINDOW above.
 SENTIMENT_NEGATIVE_MAX = 40
 SENTIMENT_POSITIVE_MIN = 70
+
+
+def recent_headlines_cutoff(now: datetime) -> datetime:
+    """The earliest published_at a headline can have and still count as "recent" -- aligned to the
+    start of the oldest included UTC day, not an exact instant, so it can never fall inside the
+    same-day granularity gap Finnhub's own from/to date range fetches by (providers.py, docs/plans/
+    0039-*.md). `now` is a parameter, not datetime.now() called internally, matching
+    build_daily_view's own testable-purity style (search.py)."""
+    oldest_day = (now - RECENT_HEADLINES_WINDOW).date()
+    return datetime.combine(oldest_day, time.min, tzinfo=timezone.utc)
 
 
 def derive_sentiment_enum(score: int | float) -> Literal["positive", "neutral", "negative"]:

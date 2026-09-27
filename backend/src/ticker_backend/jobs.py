@@ -12,7 +12,7 @@ from arq import ArqRedis
 from arq.jobs import Job
 from sqlalchemy import update
 
-from ticker_backend.config import RECENT_HEADLINES_WINDOW, settings
+from ticker_backend.config import recent_headlines_cutoff, settings
 from ticker_backend.db import async_session_factory
 from ticker_backend.models import Headline
 
@@ -67,7 +67,8 @@ async def _reset_stale_sentiment_status(ticker: str, session_factory) -> None:
     is left out of the target set entirely and there's nothing worth resetting to pending for.
     The WHERE below only ever matches 'error'/'skipped' rows, so it can never race against and
     overwrite a row the job just wrote 'ok' to (plan 0032's safety property)."""
-    cutoff = datetime.now(timezone.utc) - RECENT_HEADLINES_WINDOW
+    # Day-aligned, not an exact instant -- see docs/plans/0039-*.md.
+    cutoff = recent_headlines_cutoff(datetime.now(timezone.utc))
     async with session_factory() as session:
         await session.execute(
             update(Headline)
