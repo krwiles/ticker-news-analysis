@@ -690,6 +690,11 @@ Next: a real browser sign-in to close out Arc 7's walking skeleton, then revisit
 list above (watchlists, notifications) now that accounts are real.
 
 ## Known issues & ideas
+- **Idea (2026-09-27): dark mode for the frontend.** Not designed or scoped yet. `assets/lesson.css` (the
+  teaching workspace's own stylesheet, not the app) already has a real `@media (prefers-color-scheme: dark)`
+  precedent worth reusing the same instinct for — a CSS custom-property palette swapped per color scheme,
+  rather than a second full stylesheet or a JS-driven theme toggle. Tailwind v4 (already in use, see
+  `RESOURCES.md`) has its own `dark:` variant support, which would be the natural mechanism if picked up.
 - **Idea: extract the sentiment system prompt out of a literal string.** `_SENTIMENT_SYSTEM_PROMPT` in
   `sentiment.py` is hardcoded in the module. Consider `Settings` (env-configurable) or an external file, so
   it can be tuned without a code change/redeploy. Not decided which; revisit when actually needed.
