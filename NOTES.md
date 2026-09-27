@@ -689,6 +689,57 @@ be environment-driven (off for local HTTP dev, on once real HTTPS exists), since
 Next: a real browser sign-in to close out Arc 7's walking skeleton, then revisit the "planned features"
 list above (watchlists, notifications) now that accounts are real.
 
+**Update (2026-09-27): Arc 7 fully implemented, merged, and confirmed with a real Google account sign-in in a
+real browser** — `auth.py`, the `users` migration, all three routes, and `AuthControls` are all live on `main`
+(PR #8), plus lesson 37 and a follow-up fix for the sign-in button not disappearing until refresh (a React
+key/reconciliation bug where GIS's own injected DOM node survived because both signed-in/signed-out views
+returned a same-position `<div>`). Arc 7's walking skeleton is genuinely done now.
+
+**Workflow change (2026-09-27):** a permanent `working` branch now sits between feature branches and `main`.
+Feature work branches off `working`, PRs back into `working`; merging `working` into `main` is the user's own
+call, on their own schedule — not automatic. See the roadmap below for what's next.
+
+## Roadmap
+
+What's built (Arcs 1-7 above) vs. what's still ahead, phased by dependency. Reshape this as real work happens,
+same discipline the arc lists above already use — not a fixed contract.
+
+**Done:** Arc 1 (walking skeleton) · Arc 2 (spec 0001, News Search) · Arc 3 (CI) · Arc 4 (spec 0002, Daily
+Story Grouping — Milvus fully built, in continuous production use) · Arc 5 (spec 0005, Headline Sentiment
+Analysis) · Arc 6 (concurrency/multi-user readiness, secret scanner) · Arc 7 (spec 0006, User Accounts).
+
+**Phase 1 — quick, independent wins (no dependencies, any order):**
+- Dark mode (idea below).
+- Extract the sentiment system prompt out of its literal string (idea below).
+- Fix `RECENT_HEADLINES_WINDOW`'s day-granularity mismatch (idea below).
+- Wire in Kaizen UI (NVIDIA's design system) — an original stack item never picked up; the app still uses
+  plain Tailwind. Pairs naturally with dark mode, since both touch the same visual layer.
+- Set up the already-decided MCP servers (Docker MCP Gateway + Postgres MCP + Milvus MCP) — the decision was
+  made and the trigger condition met back around lesson 19; it's just never been installed. Pure tooling, no
+  product code involved.
+
+**Phase 2 — secrets management** (recommended before Phase 3 pushes the app further public-facing): the
+2026-09-21 secrets-management idea below already says "something proper should be in place before ... accounts
+go live" — accounts are live now. Start with the no-new-tooling tier (keys only to `worker`, Docker Compose
+`secrets:`, spend-limited provider keys — gitleaks is already done); Vault is the heavier original-stack item,
+deferrable to Phase 4.
+
+**Phase 3 — features that build on accounts** (Arc 7 was the unlocking dependency, now done):
+1. **Watchlists** — a user's tracked tickers, auto-refreshed via `jobs.py`'s existing single-flight machinery
+   (ADR 0015) rather than a new mechanism.
+2. **Notifications** — new news on a watchlist, optionally sentiment-filtered; depends on watchlists existing.
+3. **Admin panel (container logs)** — needs a real admin-role concept, which doesn't exist yet (accounts do,
+   roles don't) — the smallest new spec among these three, but a real one.
+
+**Phase 4 — infrastructure** (independent of the product; original stack items, deliberately deferred):
+- **Kubernetes / OpenShift / ArgoCD** — convert the now-8-service `docker-compose.yml` into a real deployment.
+  Original reasoning still holds: once the app is feature-stable, not before.
+- **Vault** (if not already covered in Phase 2) — dynamic secrets/rotation practice, naturally paired with
+  having a real cluster to deploy against.
+
+**Not on this roadmap, decided against already:** Next.js, GitLab CI/CD (both deliberately dropped early on —
+see the `nvidia-vulnops-portfolio-stack` project memory for the full reasoning).
+
 ## Known issues & ideas
 - **Idea (2026-09-27): dark mode for the frontend.** Not designed or scoped yet. `assets/lesson.css` (the
   teaching workspace's own stylesheet, not the app) already has a real `@media (prefers-color-scheme: dark)`
