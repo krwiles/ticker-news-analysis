@@ -40,14 +40,14 @@ interface MilvusStatusProps {
 export function MilvusStatus({ milvus }: MilvusStatusProps) {
   const detail = detailFor(milvus);
   return (
-    <div className="flex items-center justify-between rounded-lg border border-slate-200 bg-white px-4 py-3 shadow-sm">
+    <div className="flex items-center justify-between rounded-lg border border-slate-200 bg-white px-4 py-3 shadow-sm dark:border-slate-800 dark:bg-slate-900">
       <div>
-        <p className="font-medium text-slate-900">Milvus</p>
-        {detail && <p className="text-sm text-slate-500">{detail}</p>}
+        <p className="font-medium text-slate-900 dark:text-slate-100">Milvus</p>
+        {detail && <p className="text-sm text-slate-500 dark:text-slate-400">{detail}</p>}
       </div>
       <div className="flex items-center gap-2">
         <span className={`h-2.5 w-2.5 rounded-full ${DOT_COLOR[milvus.status]}`} />
-        <span className="text-sm text-slate-600">{LABEL[milvus.status]}</span>
+        <span className="text-sm text-slate-600 dark:text-slate-400">{LABEL[milvus.status]}</span>
       </div>
     </div>
   );

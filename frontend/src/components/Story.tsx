@@ -22,19 +22,19 @@ export function Story({ story }: StoryProps) {
   }
 
   return (
-    <div className="rounded-lg border border-slate-100 bg-slate-50/50 p-2">
+    <div className="rounded-lg border border-slate-100 bg-slate-50/50 p-2 dark:border-slate-800 dark:bg-slate-900/50">
       <div className="mb-2 flex items-center gap-1.5 px-1">
-        <span className="inline-block shrink-0 rounded-full bg-slate-200 px-2 py-0.5 text-xs font-medium text-slate-600">
+        <span className="inline-block shrink-0 rounded-full bg-slate-200 px-2 py-0.5 text-xs font-medium text-slate-600 dark:bg-slate-800 dark:text-slate-400">
           Story
         </span>
         <SentimentPill enumValue={story.sentiment_enum} score={story.sentiment_average} />
       </div>
       {primaryCard}
       <details className="mt-1 ml-1">
-        <summary className="cursor-pointer text-xs font-medium text-slate-500 hover:text-slate-700">
+        <summary className="cursor-pointer text-xs font-medium text-slate-500 hover:text-slate-700 dark:text-slate-400 dark:hover:text-slate-200">
           +{story.other_members.length} more source{story.other_members.length === 1 ? "" : "s"}
         </summary>
-        <div className="mt-2 flex flex-col gap-2 border-l-2 border-slate-200 pl-3">
+        <div className="mt-2 flex flex-col gap-2 border-l-2 border-slate-200 pl-3 dark:border-slate-700">
           {story.other_members.map((member) => (
             <HeadlineCard key={member.url} headline={member} />
           ))}

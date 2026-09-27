@@ -94,8 +94,8 @@ export function SearchPage() {
 
   return (
     <main className="mx-auto max-w-2xl px-6 py-16">
-      <h1 className="text-2xl font-semibold text-slate-900">Search</h1>
-      <p className="mt-1 text-sm text-slate-500">News and filings from the past week, by ticker.</p>
+      <h1 className="text-2xl font-semibold text-slate-900 dark:text-slate-100">Search</h1>
+      <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">News and filings from the past week, by ticker.</p>
 
       <div className="mt-8">
         {/* Keyed on the URL ticker: forces a fresh SearchBar (and a fresh
@@ -114,8 +114,8 @@ export function SearchPage() {
           underneath a spinner) is deliberate, not a gap -- spec 0001's own
           Non-goals rule out stale-then-fresh loading for v1. This applies
           identically whether it's the first search or a Refresh. */}
-      {loading && <p className="mt-6 text-sm text-slate-500">Searching…</p>}
-      {error && <p className="mt-6 text-sm text-red-600">Couldn&apos;t reach the API: {error}</p>}
+      {loading && <p className="mt-6 text-sm text-slate-500 dark:text-slate-400">Searching…</p>}
+      {error && <p className="mt-6 text-sm text-red-600 dark:text-red-400">Couldn&apos;t reach the API: {error}</p>}
 
       {results && !loading && (
         <div className="mt-6">
@@ -125,7 +125,7 @@ export function SearchPage() {
               type="button"
               onClick={handleRefresh}
               disabled={loading}
-              className="shrink-0 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-sm font-medium text-slate-700 shadow-sm hover:bg-slate-50 disabled:opacity-50"
+              className="shrink-0 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-sm font-medium text-slate-700 shadow-sm hover:bg-slate-50 disabled:opacity-50 dark:border-slate-800 dark:bg-slate-900 dark:text-slate-300 dark:hover:bg-slate-800"
             >
               Refresh
             </button>

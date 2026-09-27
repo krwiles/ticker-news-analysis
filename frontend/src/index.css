@@ -1,1 +1,4 @@
 @import "tailwindcss";
+/* Class-based dark mode (docs/plans/0038-*.md) -- Tailwind v4 defaults dark: to prefers-color-scheme
+   alone, which a manual toggle can't override. This makes dark: key off a .dark class instead. */
+@custom-variant dark (&:where(.dark, .dark *));

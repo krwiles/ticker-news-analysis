@@ -9,9 +9,9 @@ interface SentimentPillProps {
 
 // Colors distinct from CategoryBadge's own -- same "shouldn't blur together" reasoning that badge already uses.
 const COLOR: Record<SentimentEnum, string> = {
-  positive: "bg-emerald-100 text-emerald-700",
-  neutral: "bg-slate-100 text-slate-700",
-  negative: "bg-red-100 text-red-700",
+  positive: "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300",
+  neutral: "bg-slate-100 text-slate-700 dark:bg-slate-800 dark:text-slate-300",
+  negative: "bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-300",
 };
 
 // Shared by HeadlineCard and Story -- one visual language for resolved vs. pending sentiment.
@@ -19,7 +19,7 @@ const COLOR: Record<SentimentEnum, string> = {
 export function SentimentPill({ enumValue, score, gloss }: SentimentPillProps) {
   if (enumValue === null || score === null) {
     return (
-      <span className="inline-block shrink-0 rounded-full bg-slate-100 px-2 py-0.5 text-xs font-medium text-slate-400">
+      <span className="inline-block shrink-0 rounded-full bg-slate-100 px-2 py-0.5 text-xs font-medium text-slate-400 dark:bg-slate-800 dark:text-slate-500">
         Pending
       </span>
     );

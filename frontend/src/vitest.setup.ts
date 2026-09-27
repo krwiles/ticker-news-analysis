@@ -10,3 +10,8 @@ import { afterEach } from "vitest";
 afterEach(() => {
   cleanup();
 });
+
+// jsdom implements no matchMedia at all -- ThemeToggle calls it on every mount, crashing any test
+// rendering Layout without its own stub. Tests needing a real OS preference override per-test.
+window.matchMedia ??= (query: string) =>
+  ({ matches: false, media: query }) as MediaQueryList;
