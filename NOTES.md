@@ -657,8 +657,37 @@ be environment-driven (off for local HTTP dev, on once real HTTPS exists), since
     the four actors, the authorization-code dance, why the client secret and code exchange stay server-side,
     OAuth vs. OpenID Connect (the ID token is OIDC's addition, not bare OAuth's), and why adding a second
     provider later is realistic, not wishful. ✅ built (`lessons/0036-*.html`).
+37. **Building Google Sign-In** — the actual implementation, per `docs/plans/0037-*.md`.
+    ✅ built — new `users` table + `User` model (keyed on Google's `sub`, per ADR 0016); new flat
+    `auth.py` module (injectable `get_token_verifier` FastAPI dependency mirroring `search.py`'s
+    `get_arq_redis`/`get_session_factory`; Redis-backed session `GET`/`SET`/`EXPIRE`/`DELETE` helpers
+    reusing `app.state.arq_redis` directly, no second Redis pool; `User` upsert always overwriting
+    `email`/`name`/`picture_url` from the token's claims); three new routes (`POST /api/auth/google`,
+    `GET /api/auth/me`, `POST /api/auth/logout`) mounted in `main.py`, which also gained
+    `allow_credentials=True` on CORS. Frontend: GIS `<script>` tag in `index.html`, new `auth.ts`
+    (`fetchMe`/`signInWithGoogle`/`signOut`, all `credentials: "include"`), new `AuthControls.tsx`
+    (fetches `/api/auth/me` once on mount, renders GIS's button when signed out or name+picture+sign-out
+    when signed in), mounted once in `Layout` so it's the same control on every route (spec 0006).
+    **Two real gaps found during implementation, neither in the design**: `docker-compose.yml`'s shared
+    `&app-env` anchor never actually listed `GOOGLE_CLIENT_ID` (masked because the malformed-credential
+    test path fails identically with or without a real client ID configured — caught only by explicitly
+    checking `settings.google_client_id` inside the running container); and `google-auth`'s own
+    `verify_oauth2_token` docstring names two distinct exception types for a bad credential
+    (`ValueError` and `google.auth.exceptions.GoogleAuthError`), only the first of which the initial
+    draft caught — found by reading the library's docstring directly, not a tutorial's simplified
+    `try/except`, with a dedicated test patching each exception type in turn. Also found and fixed:
+    spec 0006's own required `CONTEXT.md` "User" glossary entry had never actually been added during the
+    earlier grilling rounds — added now. 103/103 backend tests (9 new, including one deliberate-break
+    check on the upsert-not-duplicate logic), 87/87 frontend tests (4 new), zero regressions. `tsc
+    --noEmit` and `npm run build` both clean. Live-verified against the real running stack: signed-out
+    `/api/auth/me`, a rejected malformed credential (401, no cookie), and a full real session round trip
+    via a directly-seeded Redis key + Postgres row (resolved correctly by `/api/auth/me`, then genuinely
+    revoked by `/api/auth/logout` — confirmed via `redis-cli GET` returning empty, not just the cookie
+    clearing) — plus the existing `/api/health` and `/api/search` both still working unaffected. **Not
+    yet done**: an actual browser sign-in with a real Google account, which needs the user's own browser.
 
-Next: the actual per-lesson implementation plan, now that spec 0006 and ADR 0016 are both settled.
+Next: a real browser sign-in to close out Arc 7's walking skeleton, then revisit the "planned features"
+list above (watchlists, notifications) now that accounts are real.
 
 ## Known issues & ideas
 - **Idea: extract the sentiment system prompt out of a literal string.** `_SENTIMENT_SYSTEM_PROMPT` in

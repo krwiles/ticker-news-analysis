@@ -1,0 +1,195 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 37 — Building Google Sign-In</title>
+<link rel="stylesheet" href="../assets/lesson.css">
+</head>
+<body>
+<div class="lesson">
+
+  <p class="eyebrow">Lesson 37 · ticker-news-analysis stack (user accounts — Arc 7)</p>
+  <h1>Building Google Sign-In</h1>
+  <p class="subtitle">Spec 0006 and ADR 0016 already decided what to build and why. This lesson is the build itself — and two real gaps found only by checking the running container, not by trusting the design.</p>
+
+  <div class="callout">
+    <p>
+      Lessons 35 and 36 covered the concepts this needed first — how one Redis serves both ARQ and sessions
+      without colliding, and how OAuth/OIDC work in general. Spec 0006 (behavior) and ADR 0016 (Google
+      Identity Services, `google-auth`, Redis-backed sessions, the cookie's exact attributes) were both
+      already grilled and written down before any code existed. This lesson doesn't re-argue any of that —
+      it's what actually happened turning those decisions into a working `POST /api/auth/google`, a `GET
+      /api/auth/me`, a `POST /api/auth/logout`, and a button in the corner of every page.
+    </p>
+  </div>
+
+  <h2>The shape: one credential, three routes</h2>
+  <p>
+    The frontend never talks to Google's OAuth servers directly — Google's own GIS script does that. It
+    renders a button; on success, it hands the frontend a signed ID token (a JWT, called a "credential" in
+    GIS's own terminology) through a JS callback. No redirect, no authorization code. From there it's plain
+    HTTP between this app's own frontend and backend:
+  </p>
+  <pre><code>POST /api/auth/google  { "credential": "&lt;GIS JWT&gt;" }
+  → verify it, upsert a User row, create a session, set an HttpOnly cookie
+
+GET /api/auth/me
+  → cookie in, {"user": ...} or {"user": null} out — never an error
+
+POST /api/auth/logout
+  → delete the Redis session key outright, clear the cookie</code></pre>
+  <p>
+    <code>/api/auth/me</code> exists at all because the cookie is <code>HttpOnly</code> by design (ADR 0016)
+    — JavaScript can never read it, so the only way the frontend learns "am I signed in" is asking the
+    backend, once, on every page load.
+  </p>
+
+  <h2>Sessions are just Redis calls — proven, not assumed</h2>
+  <p>
+    ADR 0016 noticed that ARQ's own <code>ArqRedis</code> class is a real subclass of
+    <code>redis.asyncio.Redis</code> — meaning the pool <code>search.py</code> already opens for job
+    enqueueing can also run plain <code>GET</code>/<code>SET</code>/<code>EXPIRE</code>/<code>DELETE</code>
+    calls, no second connection pool needed. <code>auth.py</code> reuses <code>search.py</code>'s existing
+    <code>get_arq_redis</code> dependency directly:
+  </p>
+  <pre><code>async def _create_session(redis: ArqRedis, sub: str) -> str:
+    session_id = secrets.token_urlsafe(32)
+    await redis.set(f"session:{session_id}", sub, ex=SESSION_TTL_SECONDS)
+    return session_id
+
+async def _resolve_session(redis: ArqRedis, session_id: str) -> str | None:
+    sub = await redis.get(f"session:{session_id}")
+    if sub is None:
+        return None
+    await redis.expire(f"session:{session_id}", SESSION_TTL_SECONDS)  # sliding window
+    return sub.decode() if isinstance(sub, bytes) else sub</code></pre>
+  <p>
+    That the class hierarchy makes this possible is a fact about the library; that it actually behaves that
+    way inside this app's own containers is a claim worth checking. So before writing any frontend code, a
+    session key was set directly with <code>redis-cli</code> against the real running Redis, and
+    <code>/api/auth/me</code> resolved a real user from it — then <code>logout</code> deleted it, confirmed
+    by reading the key back and getting nothing. Same discipline as lesson 31's live curl checks: a class
+    hierarchy is a reason to expect something works, not proof that it does.
+  </p>
+
+  <h2>An injectable verifier, so no test ever calls Google</h2>
+  <p>
+    <code>search.py</code> already has this pattern twice — <code>get_arq_redis</code> and
+    <code>get_session_factory</code> are FastAPI dependencies real requests get one way, tests override with
+    a fake. <code>auth.py</code> adds a third:
+  </p>
+  <pre><code>def get_token_verifier():
+    return _verify_google_credential   # real requests get this
+
+# a test does:
+app.dependency_overrides[get_token_verifier] = lambda: fake_verifier_returning({"sub": "...", ...})</code></pre>
+  <p>
+    Every backend test — new user created, existing user's name/picture refreshed without a second row,
+    invalid credential rejected, all three signed-out shapes of <code>/api/auth/me</code>, logout actually
+    deleting the Redis key — runs against a fake Redis and a fake verifier, never a real Google credential or
+    a real network call.
+  </p>
+
+  <h2>Two real gaps, found by checking</h2>
+  <p>
+    <strong>1. The client ID never actually reached the container.</strong>
+    <code>docker-compose.yml</code>'s shared <code>&amp;app-env</code> anchor forwards
+    <code>FINNHUB_API_KEY</code> and <code>OPENAI_API_KEY</code> to every app container — but
+    <code>GOOGLE_CLIENT_ID</code> was missing from that same list entirely. Nothing caught this at first: the
+    "reject a malformed credential" test path fails the same way (a JWT parse error) whether or not
+    <code>settings.google_client_id</code> is even set, so it looked done. It only surfaced by explicitly
+    running <code>settings.google_client_id</code> inside the live container and seeing an empty string.
+    Fixed by adding the line — but the real lesson is that a passing test for the failure path told nothing
+    about whether the success path could ever work.
+  </p>
+  <p>
+    <strong>2. One <code>except</code> clause wasn't enough.</strong> <code>google-auth</code>'s own
+    docstring for <code>verify_oauth2_token</code> says:
+  </p>
+  <pre><code>Raises:
+    exceptions.GoogleAuthError: If the issuer is invalid.
+    ValueError: If token verification fails</code></pre>
+  <p>
+    The first draft only caught <code>ValueError</code> — the more common case (bad signature, expired
+    token), and the one every quick example online shows. A wrong-issuer token would have raised
+    <code>GoogleAuthError</code> straight through as an unhandled 500 instead of a clean 401. Reading the
+    library's own docstring, not a tutorial's simplified <code>try/except</code>, is what caught it — the
+    fix catches both, and a dedicated test patches <code>id_token.verify_oauth2_token</code> to raise each
+    one in turn and confirms both collapse to the same <code>TokenVerificationError</code>.
+  </p>
+
+  <h2>The frontend: one dependency, one component</h2>
+  <p>
+    <code>index.html</code> gets a single <code>&lt;script&gt;</code> tag pointing at Google's own GIS
+    script — no npm package, matching how this project already avoids frontend build-time env injection
+    (<code>config.ts</code>'s <code>API_BASE_URL</code> is hardcoded the same way, and now
+    <code>GOOGLE_CLIENT_ID</code> joins it — not a secret, safe to ship, ADR 0016). GIS has no official
+    TypeScript types, so <code>AuthControls.tsx</code> declares just the two methods it actually calls on
+    <code>window.google.accounts.id</code>, not a full type package for two methods.
+  </p>
+  <p>
+    <code>AuthControls</code> itself is a small state machine: fetch <code>/api/auth/me</code> once on
+    mount to learn the truth (nothing renders until that resolves, avoiding a signed-out flash for someone
+    actually signed in); render GIS's button if signed out; render name, picture, and a sign-out button if
+    signed in. It's mounted once, in <code>Layout</code>, so it's the same control in the same place on
+    every route — literally spec 0006's own wording.
+  </p>
+
+  <h2>Check your understanding</h2>
+
+  <div class="check">
+    <p class="q">Q1. Why does this app need a <code>GET /api/auth/me</code> endpoint at all, instead of just reading the session cookie's value in JavaScript on page load?</p>
+    <details>
+      <summary>Reveal answer</summary>
+      <p class="answer">The cookie is set HttpOnly (ADR 0016) specifically so JavaScript can never read or
+      tamper with it — it only ever travels automatically with a request. Since the frontend has no way to
+      inspect the cookie's contents itself, the only way to learn "who is this session, if anyone" is to ask
+      the backend, which can actually read it and look the session up in Redis.</p>
+    </details>
+  </div>
+
+  <div class="check">
+    <p class="q">Q2. Why didn't the missing <code>GOOGLE_CLIENT_ID</code> in <code>docker-compose.yml</code> get caught by testing the rejected-credential path?</p>
+    <details>
+      <summary>Reveal answer</summary>
+      <p class="answer">A malformed JWT fails to even parse as a token, which happens before the audience
+      (client ID) is ever checked against anything — so that test passes identically whether the real client
+      ID is configured or not. Only a real, well-formed credential's audience check would have exposed the
+      gap, and nothing in the test suite exercises that (tests use an injected fake verifier by design).
+      Catching it required explicitly checking the setting's actual value inside the running container.</p>
+    </details>
+  </div>
+
+  <div class="check">
+    <p class="q">Q3. Why does <code>auth.py</code> import <code>get_arq_redis</code> and <code>get_session_factory</code> from <code>search.py</code> rather than defining its own copies?</p>
+    <details>
+      <summary>Reveal answer</summary>
+      <p class="answer">FastAPI's dependency_overrides work by the exact function object being overridden.
+      Two separate functions that each return the same pool would need two separate overrides kept in sync in
+      every test, and in production they'd still just be two names for the same one real pool — sharing the
+      one dependency is simpler and makes both routers overridable from a single point.</p>
+    </details>
+  </div>
+
+  <div class="source">
+    <p class="label">Primary sources</p>
+    <p>
+      <a href="../docs/specs/0006-user-accounts.md">Spec 0006 — user accounts</a> ·
+      <a href="../docs/adr/0016-user-accounts-technical-approach.md">ADR 0016 — technical approach</a> ·
+      <a href="../docs/plans/0037-user-accounts-google-sign-in.md">Plan 0037 (this lesson's own build log)</a> ·
+      <a href="https://developers.google.com/identity/gsi/web/reference/html-reference">Google Identity Services — HTML reference</a> ·
+      <a href="https://google-auth.readthedocs.io/en/master/reference/google.oauth2.id_token.html">google-auth — verifying ID tokens</a>
+    </p>
+  </div>
+
+  <p class="ask">Anything unclear about the session/cookie split, or want to walk through a real sign-in together
+  in a browser? Ask your teacher (this agent).</p>
+
+  <div class="nav">
+    <a href="0036-oauth-at-a-high-level.html">← Lesson 36: OAuth at a high level</a>
+  </div>
+
+</div>
+</body>
+</html>

@@ -119,3 +119,25 @@ class Story(Base):
             new_count = self.sentiment_score_count + 1
             self.sentiment_average += (score - self.sentiment_average) / new_count
         self.sentiment_score_count += 1
+
+
+class User(Base):
+    """A real person who has signed in with Google -- see CONTEXT.md.
+
+    Keyed on Google's own stable `sub` claim, not email (ADR 0016) --
+    `email`/`name`/`picture_url` are overwritten from the ID token's claims
+    on every sign-in, never edited in-app (spec 0006's read-only,
+    always-mirrors-Google requirement).
+    """
+
+    __tablename__ = "users"
+
+    sub: Mapped[str] = mapped_column(Text, primary_key=True)
+    email: Mapped[str | None] = mapped_column(Text, default=None)
+    name: Mapped[str | None] = mapped_column(Text, default=None)
+    picture_url: Mapped[str | None] = mapped_column(Text, default=None)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    def __repr__(self) -> str:
+        return f"User(sub={self.sub!r}, email={self.email!r})"

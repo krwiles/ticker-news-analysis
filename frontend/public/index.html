@@ -4,6 +4,9 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Ticker News Analysis</title>
+    <!-- GIS's own documented integration method (ADR 0016) -- loads independently of
+         React; AuthControls.tsx checks window.google before using it. -->
+    <script src="https://accounts.google.com/gsi/client" async defer></script>
   </head>
   <body>
     <div id="root"></div>

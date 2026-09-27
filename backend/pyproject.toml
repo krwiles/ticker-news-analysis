@@ -16,6 +16,7 @@ dependencies = [
     # that marker lists Linux's "aarch64" for ARM but not macOS's own
     # "arm64" string, so it silently doesn't install on Apple Silicon Macs
     # otherwise (found running the test suite locally for the first time).
+    "google-auth>=2.58.1",
     "greenlet>=3.1.0",
     "httpx>=0.28.1",
     "pydantic-settings>=2.15.0",

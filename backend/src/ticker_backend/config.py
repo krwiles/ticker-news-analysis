@@ -31,6 +31,10 @@ class Settings(BaseSettings):
     job_timeout_seconds: int = 10
     # Cosine-similarity cutoff for Story matching -- see ADR 0011.
     story_similarity_threshold: float = 0.75
+    # Not a secret -- GIS's credential flow never exchanges a client secret (ADR 0016).
+    google_client_id: str = ""
+    # Environment-driven -- True over plain HTTP makes the browser refuse the cookie (ADR 0016).
+    cookie_secure: bool = False
 
 
 settings = Settings()

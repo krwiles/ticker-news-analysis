@@ -125,4 +125,40 @@ existing components already use, `fetchMe`/`signOut` mocked at the fetch boundar
 
 ## What actually happened during execution
 
-_(filled in after execution)_
+Built largely as planned, with two real gaps found along the way, neither in the design:
+
+- **`docker-compose.yml`'s shared `&app-env` anchor never actually listed `GOOGLE_CLIENT_ID`.** The `api`
+  container started fine and the rejected-credential path (a malformed JWT) worked regardless, which masked
+  it — a real Google credential would have failed the audience check inside the container even though
+  `.env` and the frontend both had the right value. Caught by explicitly checking `settings.google_client_id`
+  inside the running container before declaring this done, not by assuming the anchor was complete. Fixed by
+  adding it alongside `FINNHUB_API_KEY`/`OPENAI_API_KEY`; `.env.example` updated to document it.
+- **CONTEXT.md's `User` glossary entry, called for by spec 0006's own text, had never actually been added**
+  during the earlier grilling rounds — found only by re-reading the file fresh before implementation. Added
+  now, in the same style as the existing entries.
+
+Implementation matched the plan's incremental steps closely: migration + `User` model, then `auth.py`
+(injectable `get_token_verifier`, session helpers reusing `app.state.arq_redis` directly — confirmed live,
+not just assumed from `ArqRedis`'s class hierarchy, by writing and reading a real key through the real Redis
+container), then the three routes + `allow_credentials=True`, then the frontend. `google-auth` added via
+`uv add` rather than a hand-edited `pyproject.toml`, so the lockfile stays correct.
+
+TDD followed with one deliberate-break check (not full strict red-green on every line, given the plan already
+fixed every interface up front): reverted `_upsert_user`'s `session.get` check to always `INSERT`, confirmed
+`test_google_sign_in_overwrites_existing_user_without_a_second_row` failed with a real
+`UniqueViolationError` before reverting the break — proof the test is meaningful, matching this project's
+existing verification discipline (lesson 20, ADR 0011's threshold re-check). 101/101 backend tests (7 new),
+87/87 frontend tests (4 new in `AuthControls.test.tsx`), zero regressions on either side. `tsc --noEmit` and
+`npm run build` both clean.
+
+Live-verified against the real running stack, in order: `/api/auth/me` with no cookie (`{"user": null}`);
+`/api/auth/google` with a malformed credential (`401`, no cookie set); a real session round trip using a
+directly-seeded Redis key and Postgres row (`/api/auth/me` resolved the real user; `/api/auth/logout` then
+returned it to signed-out *and* deleted the Redis key itself, confirmed via `redis-cli GET` returning empty —
+real revocation, not just an expiring cookie); the `ui` container serving the GIS `<script>` tag; `/api/health`
+and a real `/api/search?ticker=AAPL` both still working unaffected, confirming spec 0006's anonymous-access
+Non-goal holds.
+
+**Not yet done, and can't be done from here**: an actual browser sign-in with a real Google account and a
+click through the rendered `AuthControls` button. Everything short of Google's own redirect/credential-issuing
+step has been verified for real; this last piece needs the user's own browser.

@@ -24,6 +24,12 @@
   Official docs for `docker-compose.yml` — services, healthchecks, networking, the YAML anchor (`x-app`) trick used there.
 - [Tailwind CSS v4 docs](https://tailwindcss.com/docs)
   Official docs, v4-specific (CSS-first config, no `tailwind.config.js` by default, the `@tailwindcss/webpack` loader).
+- [Google Identity Services — Sign In With Google, HTML reference](https://developers.google.com/identity/gsi/web/reference/html-reference)
+  Official docs for the frontend button/credential flow `auth.ts`/`AuthControls.tsx` are built against (Arc 7).
+- [google-auth Python — verifying ID tokens](https://google-auth.readthedocs.io/en/master/reference/google.oauth2.id_token.html)
+  Official docs for `verify_oauth2_token`, used in `auth.py`'s `_verify_google_credential` (ADR 0016). The
+  installed package's own docstring was the source that caught both real exception types it can raise —
+  worth checking directly rather than trusting a tutorial's simplified try/except.
 
 ## Wisdom (Communities)
 
