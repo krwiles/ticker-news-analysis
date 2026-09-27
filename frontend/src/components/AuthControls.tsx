@@ -70,8 +70,10 @@ export function AuthControls() {
   }
 
   if (user) {
+    // key differs from the signed-out div below -- without it, React patches this same-type
+    // div in place instead of unmounting it, leaving GIS's own injected button behind.
     return (
-      <div className="flex items-center gap-3">
+      <div key="profile" className="flex items-center gap-3">
         {user.picture_url && (
           <img src={user.picture_url} alt="" referrerPolicy="no-referrer" className="h-8 w-8 rounded-full" />
         )}
@@ -86,5 +88,5 @@ export function AuthControls() {
     );
   }
 
-  return <div ref={buttonRef} />;
+  return <div key="google-button" ref={buttonRef} />;
 }

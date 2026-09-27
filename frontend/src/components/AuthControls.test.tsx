@@ -20,9 +20,33 @@ function stubFetch(currentUser: AuthUser | null) {
   return mockFetch;
 }
 
+// Mimics GIS's own window.google.accounts.id -- crucially, renderButton inserts a real DOM
+// node into the container directly (like GIS's real iframe), invisible to React's own tree.
+function stubGoogleIdentity() {
+  let signInCallback: ((response: { credential: string }) => void) | null = null;
+  window.google = {
+    accounts: {
+      id: {
+        initialize: (config) => {
+          signInCallback = config.callback;
+        },
+        renderButton: (parent) => {
+          const injected = document.createElement("div");
+          injected.textContent = "Sign in with Google (fake)";
+          parent.appendChild(injected);
+        },
+      },
+    },
+  };
+  return {
+    signIn: (credential: string) => signInCallback?.({ credential }),
+  };
+}
+
 describe("AuthControls", () => {
   afterEach(() => {
     vi.unstubAllGlobals();
+    delete window.google;
   });
 
   it("does not show a sign-out control while signed out", async () => {
@@ -76,5 +100,35 @@ describe("AuthControls", () => {
     // Assert: the real logout endpoint was called, and local state flips back to signed-out.
     expect(mockFetch).toHaveBeenCalledWith(expect.stringContaining("/api/auth/logout"), expect.objectContaining({ method: "POST" }));
     await waitFor(() => expect(screen.queryByRole("button", { name: /sign out/i })).not.toBeInTheDocument());
+  });
+
+  it("removes GIS's own injected button once signed in, not just React's own markup", async () => {
+    // Arrange: starts signed out; signing in flips /api/auth/me's later answer to a real user.
+    let signedIn = false;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((url: string, init?: RequestInit) => {
+        if (url.includes("/api/auth/google") && init?.method === "POST") {
+          signedIn = true;
+          return Promise.resolve({ ok: true, json: async () => ({ email: "a@example.com", name: "Ada Lovelace", picture_url: null }) });
+        }
+        if (url.includes("/api/auth/me")) {
+          const user = signedIn ? { email: "a@example.com", name: "Ada Lovelace", picture_url: null } : null;
+          return Promise.resolve({ ok: true, json: async () => ({ user }) });
+        }
+        throw new Error(`unexpected fetch to ${url}`);
+      }),
+    );
+    const gis = stubGoogleIdentity();
+    render(<AuthControls />);
+    await screen.findByText("Sign in with Google (fake)");
+
+    // Act: simulate GIS's real button firing its callback with a credential.
+    await waitFor(() => gis.signIn("fake-jwt"));
+
+    // Assert: the profile view appears, and GIS's own injected node -- inserted directly into
+    // the DOM, outside React's own children -- is actually gone, not left behind underneath it.
+    expect(await screen.findByText("Ada Lovelace")).toBeInTheDocument();
+    expect(screen.queryByText("Sign in with Google (fake)")).not.toBeInTheDocument();
   });
 });
