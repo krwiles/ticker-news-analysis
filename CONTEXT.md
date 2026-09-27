@@ -77,3 +77,12 @@ spec 0005.
 _Avoid_: "Group" as the noun — the `Today` entry above already uses "grouped" as a plain verb for the
 unrelated day-bucketing concept; reusing "Group" here risks exactly the collision that entry's own _Avoid_ is
 meant to prevent elsewhere.
+
+**User**:
+A real person who has signed in at least once, identified by their Google identity (spec 0006, ADR 0016).
+Keyed on Google's own stable `sub` claim, not email — `email`/`name`/`picture_url` are read-only mirrors of
+Google's own data, overwritten on every sign-in, never edited in-app. Distinct from an anonymous visitor: every
+existing feature (search, Stories, sentiment) works identically for both, and nothing is scoped to a User yet —
+that's later, separate specs (watchlists, notifications) that build on this one existing at all.
+_Avoid_: Account (not yet a distinct concept from User — revisit only if a User ever needs to represent
+something broader than one signed-in identity, e.g. a shared team)

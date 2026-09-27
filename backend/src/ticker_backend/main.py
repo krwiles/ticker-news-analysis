@@ -8,6 +8,7 @@ import structlog
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from ticker_backend.auth import router as auth_router
 from ticker_backend.config import settings
 from ticker_backend.health import router as health_router
 from ticker_backend.health import ui_router as ui_health_router
@@ -33,9 +34,11 @@ def create_app() -> FastAPI:
         case "api":
             log.info("app.mode", mode="api")
             # ui fetches this container's /health cross-origin -- only ui's own origin is allowed in (ADR 0002).
+            # allow_credentials -- the session cookie (ADR 0016) needs this; browsers refuse it with a wildcard origin.
             app.add_middleware(
                 CORSMiddleware,
                 allow_origins=[settings.ui_origin],
+                allow_credentials=True,
                 allow_methods=["*"],
                 allow_headers=["*"],
             )
@@ -43,6 +46,8 @@ def create_app() -> FastAPI:
             app.include_router(health_router)
             # /api/search -- fetch, group, and kick off sentiment -- see search.py.
             app.include_router(search_router)
+            # /api/auth/* -- Google sign-in, session, sign-out -- see auth.py.
+            app.include_router(auth_router)
         case "ui":
             log.info("app.mode", mode="ui", static_dir=str(STATIC_DIR))
             # Trivial per-container liveness only -- the full aggregate lives on api, see above.

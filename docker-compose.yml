@@ -8,6 +8,9 @@ x-app: &app
     FINNHUB_API_KEY: ${FINNHUB_API_KEY}
     OPENAI_API_KEY: ${OPENAI_API_KEY}
     SEC_EDGAR_USER_AGENT: ${SEC_EDGAR_USER_AGENT}
+    # Not a secret (ADR 0016) -- shared here anyway since api is the only container that
+    # needs it (token verification), same one-container-needs-it precedent as the two keys above.
+    GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID}
   depends_on:
     &app-depends-on
     db:
