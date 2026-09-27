@@ -754,10 +754,14 @@ see the `nvidia-vulnops-portfolio-stack` project memory for the full reasoning).
   placement highlighted the mismatch. 100/100 frontend tests (12 new), zero regressions. **A real gap found
   during verification**: jsdom implements no `matchMedia` at all, which crashed `App.test.tsx` (mounts
   `Layout` → `ThemeToggle` with no stub of its own) — fixed with a safe default in the shared
-  `vitest.setup.ts`. No browser automation was available this session, so verification went one level more
-  direct than usual: confirmed in the actual compiled bundle running in the rebuilt `ui` container that the
-  `dark:` variant compiles to a real `:where(.dark, .dark *)` class selector, not a media query. A manual
-  click-through in a real browser is still the recommended final check.
+  `vitest.setup.ts`. No browser automation was available at first, so verification went one level more direct
+  than usual in the meantime: confirmed in the actual compiled bundle running in the rebuilt `ui` container
+  that the `dark:` variant compiles to a real `:where(.dark, .dark *)` class selector, not a media query.
+  **Real browser click-through completed once browser tools were enabled**: the app loaded already in dark
+  mode (OS-preference fallback confirmed working — this Mac's own dark mode is on), toggling worked cleanly
+  on both pages, a real ticker search (AAPL) showed correctly-themed badges/sentiment pills across many real
+  cards in both modes with no half-dark artifacts, and the choice persisted across a reload with no flash of
+  the wrong theme.
 - **Idea: extract the sentiment system prompt out of a literal string.** `_SENTIMENT_SYSTEM_PROMPT` in
   `sentiment.py` is hardcoded in the module. Consider `Settings` (env-configurable) or an external file, so
   it can be tuned without a code change/redeploy. Not decided which; revisit when actually needed.

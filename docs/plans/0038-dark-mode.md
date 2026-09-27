@@ -195,10 +195,18 @@ real verification for those is visual, not unit-level.
 100/100 frontend tests (12 new: 8 `theme.ts`, 4 `ThemeToggle`), zero regressions. `tsc --noEmit` and
 `npm run build` both clean.
 
-**No browser automation was available this session** (`claude-in-chrome`'s browser tools weren't enabled) --
-verified instead, more directly than usual: inspected the actual compiled bundle running in the rebuilt `ui`
-container and confirmed `.dark\:bg-slate-950:where(.dark, .dark *) { background-color: ... }` is really
-present (proof the `@custom-variant dark` directive compiled to a class-based selector, not a media query,
-exactly as designed) and that `ThemeToggle`'s "Switch to dark mode"/"Switch to light mode" labels are in the
-shipped JS. A manual click-through in a real browser is still recommended before calling this fully done —
-same honesty this project used for lessons 22 and 29, which hit the identical no-browser-tool situation.
+**No browser automation was available at first** (`claude-in-chrome`'s browser tools weren't enabled) —
+verified in the meantime, more directly than usual: inspected the actual compiled bundle running in the
+rebuilt `ui` container and confirmed `.dark\:bg-slate-950:where(.dark, .dark *) { background-color: ... }` is
+really present (proof the `@custom-variant dark` directive compiled to a class-based selector, not a media
+query, exactly as designed) and that `ThemeToggle`'s "Switch to dark mode"/"Switch to light mode" labels are
+in the shipped JS.
+
+**Real browser click-through completed once browser tools were enabled** (`/chrome`): loaded the real app,
+found it already in dark mode on first visit (confirming the OS-preference fallback actually works — this
+Mac's own dark mode is on), toggled to light and back on both `StatusPage` and `SearchPage`, and searched a
+real ticker (AAPL) to check the full-pass styling against real data — multiple `News` badges and resolved
+`SentimentPill`s (`bullish`/`concerning`/`speculative`/`contrarian` at various scores) all rendered correctly
+themed in both modes, no half-dark artifacts. Reloaded the page and confirmed the choice persisted with no
+flash of the wrong theme (the `setTheme(getInitialTheme())` call in `index.tsx`, applied before first paint,
+working as designed).
