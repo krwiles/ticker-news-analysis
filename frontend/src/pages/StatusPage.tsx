@@ -41,9 +41,9 @@ export function StatusPage() {
   }, []); // empty deps: subscribe once on mount, not on every render
 
   return (
-    <main className="mx-auto max-w-md px-6 py-16">
-      <h1 className="text-2xl font-semibold text-slate-900">Ticker News Analysis</h1>
-      <p className="mt-1 text-sm text-slate-500">Walking-skeleton status</p>
+    <main className="mx-auto max-w-2xl px-6 py-16">
+      <h1 className="text-2xl font-semibold text-slate-900 dark:text-slate-100">Ticker News Analysis</h1>
+      <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">Walking-skeleton status</p>
 
       <div className="mt-8 flex flex-col gap-3">
         <StatusTile name="UI" status="ok" detail="You're looking at it" />
@@ -61,7 +61,7 @@ export function StatusPage() {
         <MilvusStatus milvus={health?.milvus ?? { status: "unknown" }} />
       </div>
 
-      {error && <p className="mt-6 text-sm text-red-600">Couldn&apos;t reach the API: {error}</p>}
+      {error && <p className="mt-6 text-sm text-red-600 dark:text-red-400">Couldn&apos;t reach the API: {error}</p>}
     </main>
   );
 }

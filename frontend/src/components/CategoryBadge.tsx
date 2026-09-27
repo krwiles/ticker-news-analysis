@@ -13,8 +13,8 @@ const LABEL: Record<Headline["category"], string> = {
 
 // Distinct from SearchStatus's colors on purpose -- different visual systems, shouldn't blur together.
 const COLOR: Record<Headline["category"], string> = {
-  news: "bg-blue-100 text-blue-700",
-  filing: "bg-purple-100 text-purple-700",
+  news: "bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300",
+  filing: "bg-purple-100 text-purple-700 dark:bg-purple-900/30 dark:text-purple-300",
 };
 
 export function CategoryBadge({ category }: CategoryBadgeProps) {

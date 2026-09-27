@@ -20,7 +20,7 @@ const DOT_COLOR: Record<SearchResponse["status"], string> = {
 
 export function SearchStatus({ status }: SearchStatusProps) {
   return (
-    <p className="flex items-center gap-2 text-sm text-slate-600">
+    <p className="flex items-center gap-2 text-sm text-slate-600 dark:text-slate-400">
       <span className={`h-2 w-2 shrink-0 rounded-full ${DOT_COLOR[status]}`} />
       {MESSAGE[status]}
     </p>

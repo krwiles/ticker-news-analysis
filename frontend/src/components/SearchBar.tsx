@@ -29,12 +29,12 @@ export function SearchBar({ onSearch, disabled, initialValue }: SearchBarProps) 
         onChange={(event) => setTicker(event.target.value)}
         placeholder="Ticker symbol (e.g. AAPL)"
         disabled={disabled}
-        className="flex-1 rounded-lg border border-slate-200 bg-white px-3 py-2 text-slate-900 shadow-sm focus:border-slate-400 focus:outline-none disabled:opacity-50"
+        className="flex-1 rounded-lg border border-slate-200 bg-white px-3 py-2 text-slate-900 shadow-sm focus:border-slate-400 focus:outline-none disabled:opacity-50 dark:border-slate-800 dark:bg-slate-900 dark:text-slate-100 dark:focus:border-slate-600"
       />
       <button
         type="submit"
         disabled={disabled}
-        className="rounded-lg bg-slate-900 px-4 py-2 font-medium text-white shadow-sm disabled:opacity-50"
+        className="rounded-lg bg-slate-900 px-4 py-2 font-medium text-white shadow-sm disabled:opacity-50 dark:bg-slate-100 dark:text-slate-900"
       >
         Search
       </button>

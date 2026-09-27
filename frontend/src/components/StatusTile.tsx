@@ -25,19 +25,19 @@ interface StatusTileProps {
 
 export function StatusTile({ name, status, detail }: StatusTileProps) {
   return (
-    <div className="flex items-center justify-between rounded-lg border border-slate-200 bg-white px-4 py-3 shadow-sm">
+    <div className="flex items-center justify-between rounded-lg border border-slate-200 bg-white px-4 py-3 shadow-sm dark:border-slate-800 dark:bg-slate-900">
       <div>
-        <p className="font-medium text-slate-900">{name}</p>
+        <p className="font-medium text-slate-900 dark:text-slate-100">{name}</p>
         {/* One line per "\n"-separated part -- e.g. Database's per-table counts (spec 0004) -- rather than one line that wraps. */}
         {detail?.split("\n").map((line) => (
-          <p key={line} className="text-sm text-slate-500">
+          <p key={line} className="text-sm text-slate-500 dark:text-slate-400">
             {line}
           </p>
         ))}
       </div>
       <div className="flex items-center gap-2">
         <span className={`h-2.5 w-2.5 rounded-full ${DOT_COLOR[status]}`} />
-        <span className="text-sm text-slate-600">{LABEL[status]}</span>
+        <span className="text-sm text-slate-600 dark:text-slate-400">{LABEL[status]}</span>
       </div>
     </div>
   );

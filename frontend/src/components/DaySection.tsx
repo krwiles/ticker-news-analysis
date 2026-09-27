@@ -21,10 +21,10 @@ export function DaySection({ day }: DaySectionProps) {
 
   return (
     <section className="mb-8">
-      <h2 className="mb-3 text-sm font-semibold uppercase tracking-wide text-slate-500">{heading}</h2>
+      <h2 className="mb-3 text-sm font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">{heading}</h2>
       {/* No stories this day -> show a placeholder instead of an empty list. */}
       {day.stories.length === 0 ? (
-        <p className="text-sm text-slate-500">No headlines today.</p>
+        <p className="text-sm text-slate-500 dark:text-slate-400">No headlines today.</p>
       ) : (
         // Stories this day -> render one <Story> per entry.
         <ul className="flex flex-col gap-3">

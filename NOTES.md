@@ -689,12 +689,79 @@ be environment-driven (off for local HTTP dev, on once real HTTPS exists), since
 Next: a real browser sign-in to close out Arc 7's walking skeleton, then revisit the "planned features"
 list above (watchlists, notifications) now that accounts are real.
 
+**Update (2026-09-27): Arc 7 fully implemented, merged, and confirmed with a real Google account sign-in in a
+real browser** — `auth.py`, the `users` migration, all three routes, and `AuthControls` are all live on `main`
+(PR #8), plus lesson 37 and a follow-up fix for the sign-in button not disappearing until refresh (a React
+key/reconciliation bug where GIS's own injected DOM node survived because both signed-in/signed-out views
+returned a same-position `<div>`). Arc 7's walking skeleton is genuinely done now.
+
+**Workflow change (2026-09-27):** a permanent `working` branch now sits between feature branches and `main`.
+Feature work branches off `working`, PRs back into `working`; merging `working` into `main` is the user's own
+call, on their own schedule — not automatic. See the roadmap below for what's next.
+
+## Roadmap
+
+What's built (Arcs 1-7 above) vs. what's still ahead, phased by dependency. Reshape this as real work happens,
+same discipline the arc lists above already use — not a fixed contract.
+
+**Done:** Arc 1 (walking skeleton) · Arc 2 (spec 0001, News Search) · Arc 3 (CI) · Arc 4 (spec 0002, Daily
+Story Grouping — Milvus fully built, in continuous production use) · Arc 5 (spec 0005, Headline Sentiment
+Analysis) · Arc 6 (concurrency/multi-user readiness, secret scanner) · Arc 7 (spec 0006, User Accounts).
+
+**Phase 1 — quick, independent wins (no dependencies, any order):**
+- ~~Dark mode~~ — ✅ built (plan: `docs/plans/0038-*.md`), see the completed writeup below.
+- Extract the sentiment system prompt out of its literal string (idea below).
+- Fix `RECENT_HEADLINES_WINDOW`'s day-granularity mismatch (idea below).
+- Wire in Kaizen UI (NVIDIA's design system) — an original stack item never picked up; the app still uses
+  plain Tailwind. Pairs naturally with dark mode, since both touch the same visual layer.
+- Set up the already-decided MCP servers (Docker MCP Gateway + Postgres MCP + Milvus MCP) — the decision was
+  made and the trigger condition met back around lesson 19; it's just never been installed. Pure tooling, no
+  product code involved.
+
+**Phase 2 — secrets management** (recommended before Phase 3 pushes the app further public-facing): the
+2026-09-21 secrets-management idea below already says "something proper should be in place before ... accounts
+go live" — accounts are live now. Start with the no-new-tooling tier (keys only to `worker`, Docker Compose
+`secrets:`, spend-limited provider keys — gitleaks is already done); Vault is the heavier original-stack item,
+deferrable to Phase 4.
+
+**Phase 3 — features that build on accounts** (Arc 7 was the unlocking dependency, now done):
+1. **Watchlists** — a user's tracked tickers, auto-refreshed via `jobs.py`'s existing single-flight machinery
+   (ADR 0015) rather than a new mechanism.
+2. **Notifications** — new news on a watchlist, optionally sentiment-filtered; depends on watchlists existing.
+3. **Admin panel (container logs)** — needs a real admin-role concept, which doesn't exist yet (accounts do,
+   roles don't) — the smallest new spec among these three, but a real one.
+
+**Phase 4 — infrastructure** (independent of the product; original stack items, deliberately deferred):
+- **Kubernetes / OpenShift / ArgoCD** — convert the now-8-service `docker-compose.yml` into a real deployment.
+  Original reasoning still holds: once the app is feature-stable, not before.
+- **Vault** (if not already covered in Phase 2) — dynamic secrets/rotation practice, naturally paired with
+  having a real cluster to deploy against.
+
+**Not on this roadmap, decided against already:** Next.js, GitLab CI/CD (both deliberately dropped early on —
+see the `nvidia-vulnops-portfolio-stack` project memory for the full reasoning).
+
 ## Known issues & ideas
-- **Idea (2026-09-27): dark mode for the frontend.** Not designed or scoped yet. `assets/lesson.css` (the
-  teaching workspace's own stylesheet, not the app) already has a real `@media (prefers-color-scheme: dark)`
-  precedent worth reusing the same instinct for — a CSS custom-property palette swapped per color scheme,
-  rather than a second full stylesheet or a JS-driven theme toggle. Tailwind v4 (already in use, see
-  `RESOURCES.md`) has its own `dark:` variant support, which would be the natural mechanism if picked up.
+- **Dark mode for the frontend** — ✅ built (2026-09-27, plan `docs/plans/0038-*.md`), scoped via `/grill-me`:
+  a two-state (light/dark) toggle in `Layout`'s nav, defaulting to the OS preference on a first-ever visit
+  and remembered via `localStorage` after that. Tailwind v4 switched from its default media-query-only
+  `dark:` variant to a class-based one (`@custom-variant dark (&:where(.dark, .dark *));` in `index.css`) so
+  the manual toggle can override the OS setting. New `theme.ts` (the storage read/write, deliberately isolated
+  so a future account-synced preference — the user's actual long-term intent — only needs to change this one
+  module, not every call site or the `users` schema today) and `ThemeToggle.tsx` (inline SVG sun/moon icon, no
+  new dependency). Full pass across every component with hardcoded colors (~13 files), not just the page
+  shell — a half-dark app was judged worse than the extra file count. The nav and `StatusPage` both widened
+  `max-w-md` → `max-w-2xl` to match `SearchPage`'s own card width, at the user's request once the toggle's
+  placement highlighted the mismatch. 100/100 frontend tests (12 new), zero regressions. **A real gap found
+  during verification**: jsdom implements no `matchMedia` at all, which crashed `App.test.tsx` (mounts
+  `Layout` → `ThemeToggle` with no stub of its own) — fixed with a safe default in the shared
+  `vitest.setup.ts`. No browser automation was available at first, so verification went one level more direct
+  than usual in the meantime: confirmed in the actual compiled bundle running in the rebuilt `ui` container
+  that the `dark:` variant compiles to a real `:where(.dark, .dark *)` class selector, not a media query.
+  **Real browser click-through completed once browser tools were enabled**: the app loaded already in dark
+  mode (OS-preference fallback confirmed working — this Mac's own dark mode is on), toggling worked cleanly
+  on both pages, a real ticker search (AAPL) showed correctly-themed badges/sentiment pills across many real
+  cards in both modes with no half-dark artifacts, and the choice persisted across a reload with no flash of
+  the wrong theme.
 - **Idea: extract the sentiment system prompt out of a literal string.** `_SENTIMENT_SYSTEM_PROMPT` in
   `sentiment.py` is hardcoded in the module. Consider `Settings` (env-configurable) or an external file, so
   it can be tuned without a code change/redeploy. Not decided which; revisit when actually needed.
