@@ -17,5 +17,5 @@ Build genuine, hands-on fluency with a specific tech stack (Python/FastAPI/SQLAl
 ## Out of scope (for now)
 - Kubernetes, OpenShift, ArgoCD, Vault — deferred project-wide, see `nvidia-vulnops-portfolio-stack` project memory
 - Milvus / vector search — no container for it yet, comes with the embedding-dedup feature later
-- Kaizen UI (NVIDIA's design system) — not wired in yet, skeleton uses plain Tailwind
+- Kaizen UI (NVIDIA's design system) — decided against (2026-09-28): it's internal to NVIDIA and not realistically usable from outside NVIDIA. Skeleton keeps plain Tailwind.
 - The actual news/ticker domain model (entities, workflows) — the `grill-with-docs` domain-modeling round for that hasn't happened yet; this workspace teaches the *technology*, not the *product*

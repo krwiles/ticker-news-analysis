@@ -712,8 +712,6 @@ Analysis) · Arc 6 (concurrency/multi-user readiness, secret scanner) · Arc 7 (
 - ~~Dark mode~~ — ✅ built (plan: `docs/plans/0038-*.md`), see the completed writeup below.
 - Extract the sentiment system prompt out of its literal string (idea below).
 - ~~Fix `RECENT_HEADLINES_WINDOW`'s day-granularity mismatch~~ — ✅ fixed (plan: `docs/plans/0039-*.md`).
-- Wire in Kaizen UI (NVIDIA's design system) — an original stack item never picked up; the app still uses
-  plain Tailwind. Pairs naturally with dark mode, since both touch the same visual layer.
 - Set up the already-decided MCP servers (Docker MCP Gateway + Postgres MCP + Milvus MCP) — the decision was
   made and the trigger condition met back around lesson 19; it's just never been installed. Pure tooling, no
   product code involved.
@@ -798,7 +796,9 @@ mounted) then a real search + sentiment pass; fix the stale session-signing-key 
   having a real cluster to deploy against.
 
 **Not on this roadmap, decided against already:** Next.js, GitLab CI/CD (both deliberately dropped early on —
-see the `nvidia-vulnops-portfolio-stack` project memory for the full reasoning).
+see the `nvidia-vulnops-portfolio-stack` project memory for the full reasoning); **Kaizen UI** (2026-09-28 —
+NVIDIA's own internal design system, not realistically usable from outside NVIDIA; the app keeps plain
+Tailwind v4).
 
 ## Known issues & ideas
 - **Dark mode for the frontend** — ✅ built (2026-09-27, plan `docs/plans/0038-*.md`), scoped via `/grill-me`:
