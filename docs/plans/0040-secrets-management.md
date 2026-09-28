@@ -14,6 +14,7 @@ locally. Vault stays deferred to Phase 4.
 | `main.py`, `worker.py` | `create_app()` and ARQ's `on_startup` call `require_secrets()`. |
 | `search.py` | `_compute_sentiment_status` reads `sentiment_configured`, not the OpenAI key. |
 | `scripts/init-secrets.sh` | New: hidden prompts, mode-600 files, idempotent, `--from-env`, `--rotate NAME`. |
+| `providers.py`, `logging.py` | Finnhub key moves from a `?token=` URL param to an `X-Finnhub-Token` header; `httpx` logger raised to WARNING (found during verification — see below). |
 | `.gitignore`, `.env.example`, `README.md`, CI | `secrets/` ignored; keys removed from `.env.example`; runbook + provider checklist; CI runs `docker compose config -q` with dummy secrets. |
 
 ## Order of work (TDD at each code seam)
@@ -33,6 +34,7 @@ locally. Vault stays deferred to Phase 4.
 - `test_init_secrets.py`: `--from-env` moves keys, strips `.env`, keeps other lines, prints no value; re-run never
   overwrites; OpenAI optional flips `SENTIMENT_CONFIGURED`; `--rotate` touches one file; a required secret can't
   be empty.
+- `test_providers.py` / `test_logging.py`: the Finnhub key is in a header and never in the URL; `httpx` INFO logging is off.
 - `test_search_endpoint.py`: the four sentiment-status tests now drive `sentiment_configured`.
 - Deliberate-break checks: disabled `require_secrets`' check and the script's `.env` stripping; confirmed the
   relevant tests failed, then reverted.
@@ -63,5 +65,12 @@ Built as planned, with these deviations and findings:
   "failing" run was really passing until I redid it in Python.
 - **Existing Postgres volumes don't re-read the password file.** The live stack's `db` never exercised
   `POSTGRES_PASSWORD_FILE`, hence the scratch-container check — and the ALTER USER step in the rotation runbook.
+- **The Finnhub key was being printed in the worker logs.** Reading `providers.py` while writing lesson 39 showed
+  the key sent as `?token=`; `docker compose logs worker` confirmed `httpx` logged the full URL, key included, on
+  every fetch. File-based storage doesn't touch that path. Fixed test-first (header, not URL) plus a logging
+  guard; the first version of the logging test passed even with the fix removed (pytest leaves the root logger
+  at WARNING), caught by the deliberate-break check and rewritten. Verified live: zero occurrences of the key or
+  `HTTP Request` lines in the rebuilt worker's logs, Finnhub still `ok`. The key sat in local container logs
+  until those containers were recreated; consider rotating it (README runbook) if the machine is shared.
 - **Not done, recorded in ADR 0017:** MinIO/Milvus shared credentials, Redis `requirepass`, non-default dev
   passwords.

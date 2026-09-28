@@ -43,6 +43,15 @@ therefore strips moved keys out of `.env`, and warns if one is left behind.
 no per-service scoping); Docker Swarm secrets (rejected: requires Swarm mode for no gain here); Vault now
 (deferred, Phase 4: a large tool to learn for four secrets, and the file interface keeps the door open).
 
+## Secrets must also stay out of logs
+
+Where a secret is *stored* is only half of it — it must not be *printed*. Found while verifying this work:
+`providers.py` sent the Finnhub key as a `?token=` query parameter, and `httpx` logs every request URL at INFO,
+so the worker printed the live key on every fetch. Finnhub also accepts an `X-Finnhub-Token` header (verified
+against the live API, including that a wrong value is rejected), so the key now travels in the header, and
+`configure_logging()` raises `httpx`'s logger to WARNING as a second layer. Moving a key to a file would not
+have fixed this: it was the *use* of the key that leaked it.
+
 ## Missing secrets fail fast; OpenAI stays optional
 
 The Finnhub key and Postgres password are required in the modes that use them. `require_secrets()` runs from
