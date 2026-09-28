@@ -724,6 +724,57 @@ go live" — accounts are live now. Start with the no-new-tooling tier (keys onl
 `secrets:`, spend-limited provider keys — gitleaks is already done); Vault is the heavier original-stack item,
 deferrable to Phase 4.
 
+**→ Phase 2 status (2026-09-28): fully grilled, decisions settled below, NOT yet planned or implemented.**
+Next step is writing plan 0040 + ADR 0017 and building it; the user's go-ahead on that was pending when
+context was compacted, so confirm before starting.
+
+*Goal (user's own framing): learn how secrets management is used in a production, publicly-deployed system —
+build it production-shaped even though it runs locally.* Vault stays Phase 4, but the mechanism is chosen so
+Phase 4 only swaps the secret's *source* (files at a path), not the interface the app reads.
+
+*Facts established by reading the code (2026-09-28):* only `worker` actually uses `FINNHUB_API_KEY`/
+`OPENAI_API_KEY` (`providers.py`, `sentiment.py`); `api` only checks whether the OpenAI key is *set*
+(`search.py:_compute_sentiment_status`); `ui` uses neither — yet the shared `&app-env` anchor gives all three
+services both. The "session-signing key"/"Google client secret" concerns in the 2026-09-21 idea below are
+**void**: ADR 0016 chose Redis-backed sessions (no signing key) and GIS never uses a client secret. The real
+secret set is just Finnhub key, OpenAI key, Postgres password, MinIO creds. Redis (now holding live session
+IDs) has no password and every service's port is published on all host interfaces. `settings = Settings()` runs
+at import time and tests import with no secrets present, so a fail-fast check can't live in `Settings` itself.
+`pydantic-settings` ranks env vars *above* `secrets_dir`, so a stale key left in `.env` would silently override
+a secrets file.
+
+*Decisions (all agreed):*
+1. **Least-privilege per service, still ONE image / three modes (`APP_MODE` untouched)** — split `&app-env`
+   into a shared non-secret base + per-service extras. `worker`: Finnhub, OpenAI, Postgres password, SEC user
+   agent, DB, Redis, Milvus. `api`: Postgres password, Redis, `GOOGLE_CLIENT_ID`, and a derived boolean
+   `sentiment_configured` (Compose `${OPENAI_API_KEY:+true}`) instead of the real key — `search.py` reads that
+   setting, not `bool(settings.openai_api_key)`. `ui`: no app secrets at all.
+2. **Compose file-based `secrets:` (`/run/secrets/...`) read via `pydantic-settings` `secrets_dir`** for the
+   Finnhub key, OpenAI key, and Postgres password. `.env` keeps only non-secret config. `db` uses
+   `POSTGRES_PASSWORD_FILE`; `api`/`worker` build the DSN from parts (user/host/db/password).
+3. **Host tooling keeps a dev URL in `.env`** — `dbmate` and pytest can't read `/run/secrets`; `DATABASE_URL`/
+   `TEST_DATABASE_URL` stay as documented local-only dev credentials (`ticker/ticker`) that must match the secret.
+4. **Missing-secret behavior:** OpenAI stays *optional* (designed feature, spec 0005). Finnhub key and Postgres
+   password are *required* in the modes that use them — fail fast at `create_app()`/worker startup with a clear
+   error (not in `Settings`, per the import-time fact above).
+5. **Every published port binds to `127.0.0.1`** (5432, 6379, 9000/9001, 19530/9091). Redis `requirepass` and
+   non-default Postgres/MinIO passwords are deferred to real-deployment time.
+6. **Bootstrap:** committed, idempotent `scripts/init-secrets.sh` — hidden prompts, files at mode 600, plus a
+   `--from-env` flag that moves the user's existing keys out of `.env` (and strips them from it) without ever
+   printing them. Secrets live in a gitignored `./secrets/` directory.
+7. **MinIO/Milvus shared `minioadmin` credentials: deferred, recorded plainly as a known remaining item** —
+   changing them means coordinated changes in two services (lesson 16's MinIO breakage is the precedent) and
+   loopback binding removes the exposure meanwhile.
+8. **Docs:** short **ADR 0017** (per-service least-privilege, file over env, Vault deferred with a compatible
+   interface, loopback binding, partial MinIO coverage) + plan 0040 + a README rotation runbook and
+   provider-dashboard checklist (OpenAI project budget cap + restricted key, Finnhub key check — plain
+   checklist, not a wizard). No lesson HTML unless asked.
+
+*Defaults I said I'd apply unless the user objected (they didn't):* branch off `working`, PR into `working`;
+CI's `docker-build` job also runs `docker compose config -q` with dummy secret files; live verification via
+`docker compose exec` on each service (`ui` has no keys, `api` has no OpenAI key, `worker` has the files
+mounted) then a real search + sentiment pass; fix the stale session-signing-key bullet below.
+
 **Phase 3 — features that build on accounts** (Arc 7 was the unlocking dependency, now done):
 1. **Watchlists** — a user's tracked tickers, auto-refreshed via `jobs.py`'s existing single-flight machinery
    (ADR 0015) rather than a new mechanism.
@@ -852,7 +903,9 @@ see the `nvidia-vulnops-portfolio-stack` project memory for the full reasoning).
     by hand.
   - **More secrets are coming:** the Google OAuth client secret and a session-signing key (both more sensitive
     than a news API key), any notification-provider credentials, and the Postgres credentials, which are the
-    dev defaults `ticker/ticker` today.
+    dev defaults `ticker/ticker` today. **Correction (2026-09-28): the first two never materialized** — ADR 0016
+    chose Redis-backed sessions (no signing key) and GIS's credential flow uses no client secret. See the
+    Roadmap's Phase 2 status for the decisions that replace this section's open questions.
   - **Options, cheapest first:**
     - *No new tooling:* pass keys only to `worker` (giving `api` a plain "sentiment configured" flag instead of
       the key); use Docker Compose's file-based `secrets:` instead of env vars; add a secret scanner such as
