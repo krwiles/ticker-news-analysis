@@ -26,15 +26,7 @@ log = structlog.get_logger()
 OPENAI_SENTIMENT_MODEL = "gpt-5-nano"
 
 # Structured Outputs schema (spec 0005) guarantees this exact shape back, not free text to parse.
-# gloss must never restate the enum itself ("positive") -- the prompt below is what prevents that.
-_SENTIMENT_SYSTEM_PROMPT = (
-    "Score this stock news headline from 0 (most negative) to 100 (most positive). "
-    "Give a concise, natural one-word gloss describing the specific character of the "
-    "news, such as bullish, reassuring, routine, speculative, operational, regulatory, "
-    "concerning, or alarming. This list is illustrative, not a fixed vocabulary. "
-    "Choose a different word when it is more precise, and never use positive, neutral, "
-    "or negative as the gloss. Give a one-sentence rationale for the score."
-)
+# The system prompt itself lives in Settings, not here -- see config.py's sentiment_system_prompt.
 _SENTIMENT_SCHEMA = {
     "type": "object",
     "properties": {
@@ -58,7 +50,7 @@ async def get_sentiment(text: str, client: httpx.AsyncClient) -> dict:
             json={
                 "model": OPENAI_SENTIMENT_MODEL,
                 "messages": [
-                    {"role": "system", "content": _SENTIMENT_SYSTEM_PROMPT},
+                    {"role": "system", "content": settings.sentiment_system_prompt},
                     {"role": "user", "content": text},
                 ],
                 "response_format": {

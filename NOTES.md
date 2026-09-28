@@ -708,10 +708,11 @@ same discipline the arc lists above already use — not a fixed contract.
 Story Grouping — Milvus fully built, in continuous production use) · Arc 5 (spec 0005, Headline Sentiment
 Analysis) · Arc 6 (concurrency/multi-user readiness, secret scanner) · Arc 7 (spec 0006, User Accounts).
 
-**Phase 1 — quick, independent wins (no dependencies, any order):**
+**Phase 1 — quick, independent wins — ✅ all done:**
 - ~~Dark mode~~ — ✅ built (plan: `docs/plans/0038-*.md`), see the completed writeup below.
-- Extract the sentiment system prompt out of its literal string (idea below).
 - ~~Fix `RECENT_HEADLINES_WINDOW`'s day-granularity mismatch~~ — ✅ fixed (plan: `docs/plans/0039-*.md`).
+- ~~Extract the sentiment system prompt~~ — ✅ done (plan: `docs/plans/0041-*.md`), see the completed writeup below.
+- ~~Kaizen UI~~ / ~~Postgres+Milvus MCP servers~~ — decided against, see "Not on this roadmap" below.
 
 **Phase 2 — secrets management** (recommended before Phase 3 pushes the app further public-facing): the
 2026-09-21 secrets-management idea below already says "something proper should be in place before ... accounts
@@ -822,9 +823,10 @@ close for this project, so not pursued).
   on both pages, a real ticker search (AAPL) showed correctly-themed badges/sentiment pills across many real
   cards in both modes with no half-dark artifacts, and the choice persisted across a reload with no flash of
   the wrong theme.
-- **Idea: extract the sentiment system prompt out of a literal string.** `_SENTIMENT_SYSTEM_PROMPT` in
-  `sentiment.py` is hardcoded in the module. Consider `Settings` (env-configurable) or an external file, so
-  it can be tuned without a code change/redeploy. Not decided which; revisit when actually needed.
+- **Extract the sentiment system prompt out of a literal string** — ✅ done (2026-09-28, plan
+  `docs/plans/0041-*.md`), the idea first noted 2026-09-21. Moved to `Settings.sentiment_system_prompt`
+  (env-configurable), not an external file, for consistency with the rest of this project's config. Verified
+  live: overriding `SENTIMENT_SYSTEM_PROMPT` changes worker behavior with no code change or image rebuild.
 - **`RECENT_HEADLINES_WINDOW`'s exact-timestamp cutoff vs. Finnhub's day-granularity fetch** — ✅ fixed
   (2026-09-27, plan `docs/plans/0039-*.md`), the idea first noted 2026-09-23 while re-verifying plan 0036.
   Confirmed by reading the actual code (not re-guessed from the idea's own text): `sentiment.py`'s
