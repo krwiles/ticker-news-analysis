@@ -174,11 +174,12 @@ async def fetch_finnhub_news(client: httpx.AsyncClient, ticker: str) -> list[dic
         "symbol": ticker,
         "from": from_date.isoformat(),
         "to": to_date.isoformat(),
-        "token": settings.finnhub_api_key,
     }
+    # The key goes in a header, not a query param -- httpx logs full URLs, which would print it (ADR 0017).
+    headers = {"X-Finnhub-Token": settings.finnhub_api_key}
     # Call Finnhub's company-news endpoint.
     try:
-        response = await client.get("https://finnhub.io/api/v1/company-news", params=params)
+        response = await client.get("https://finnhub.io/api/v1/company-news", params=params, headers=headers)
         response.raise_for_status()
         articles = response.json()
     except (httpx.HTTPError, ValueError) as exc:

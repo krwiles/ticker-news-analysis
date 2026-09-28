@@ -13,6 +13,10 @@ import pytest
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+# Settings() builds at import time and create_app() now refuses to start without the DB password (ADR 0017);
+# seeded here, before any ticker_backend import, with the same local-only dev value TEST_DATABASE_URL uses.
+os.environ.setdefault("POSTGRES_PASSWORD", "ticker")
+
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 
 # dbmate's own scheme, reused below for the asyncpg engine by swapping the scheme and dropping the query string.

@@ -57,13 +57,13 @@ sidecars), which is the heavy part — if containers get killed or Milvus never 
 memory allocation (Docker Desktop → Settings → Resources) to around 4 GB or more.
 
 These ports must be free on your machine: `3000` (UI), `8000` (API), `5432` (Postgres), `6379` (Redis),
-`9000`/`9001` (MinIO), `19530`/`9091` (Milvus).
+`9000`/`9001` (MinIO), `19530`/`9091` (Milvus). The data-store ports bind to `127.0.0.1` only.
 
 **Only if you want to run the test suites or the frontend dev server on your host** (not needed to run the app):
 [`uv`](https://docs.astral.sh/uv/getting-started/installation/) (which manages Python 3.12+ for you) and
 Node 24 + npm.
 
-### 2. Get API keys and configure `.env`
+### 2. Configure `.env` and create your secrets
 
 ```bash
 git clone <this repo's URL> ticker-news-analysis
@@ -71,24 +71,66 @@ cd ticker-news-analysis
 cp .env.example .env
 ```
 
-Then edit `.env`. Most values in `.env.example` work as-is for local development; these need your input:
+Edit `.env` for the non-secret settings — most defaults work as-is for local development:
 
 | Variable | Required? | What to put there |
 | --- | --- | --- |
-| `FINNHUB_API_KEY` | **Yes** | Free key from [finnhub.io](https://finnhub.io) — sign up and copy it from your dashboard. Without it, news fetching from Finnhub fails. |
 | `SEC_EDGAR_USER_AGENT` | **Yes** | Not a secret — a descriptive string with your app name and a contact email, e.g. `TickerNewsAnalysis you@example.com`. The SEC requires this on every EDGAR request. |
-| `OPENAI_API_KEY` | Optional | Key from [platform.openai.com](https://platform.openai.com). Powers story grouping (embeddings) and headline sentiment. Costs a fraction of a cent at this project's volume. If left blank, search still works — grouping and sentiment are skipped rather than failing. |
+| `GOOGLE_CLIENT_ID` | For sign-in | Not a secret — see `docs/plans/0037-*.md` step 1. |
 
 The rest can stay at their defaults:
 
-- `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB` — the local Postgres container's credentials.
+- `POSTGRES_USER` / `POSTGRES_DB` — the local Postgres container's user and database name.
 - `MILVUS_MINIO_ACCESS_KEY` / `MILVUS_MINIO_SECRET_KEY` — MinIO's well-known local-dev defaults (`minioadmin`).
-- `DATABASE_URL` — used by `dbmate` on your host, so it points at `localhost:5432`. If you change the
-  `POSTGRES_*` values above, change this to match. (The containers get their own connection string from
-  `docker-compose.yml`, not from this line.)
+  Known remaining item: see ADR 0017.
+- `DATABASE_URL` — used by `dbmate` on your host, so it points at `localhost:5432`. Its password must match
+  the Postgres secret below (`ticker` by default).
 - `TEST_DATABASE_URL` — a separate `ticker_test` database, only used by the backend test suite.
 
-`.env` is gitignored — never commit it.
+**Secrets do not go in `.env`.** They live as files in `./secrets/` (gitignored) that Docker Compose mounts into
+only the containers that need them (ADR 0017). Create them with:
+
+```bash
+scripts/init-secrets.sh
+```
+
+It prompts (hidden input) for three values:
+
+| Secret | Required? | Where to get it |
+| --- | --- | --- |
+| Postgres password | **Yes** | Press Enter for the local-dev default (`ticker`), which must match `DATABASE_URL` in `.env`. |
+| Finnhub API key | **Yes** | Free key from [finnhub.io](https://finnhub.io) — sign up and copy it from your dashboard. Without it, the `worker` refuses to start. |
+| OpenAI API key | Optional | Key from [platform.openai.com](https://platform.openai.com). Powers story grouping (embeddings) and headline sentiment. If skipped, search still works — grouping and sentiment are skipped rather than failing. |
+
+Already have keys in an older `.env`? `scripts/init-secrets.sh --from-env` moves them into `./secrets/` and
+removes them from `.env` without printing them. The script is safe to re-run; it never overwrites an existing
+secret.
+
+**Before a real deployment**, do the provider-side hardening the script can't do for you:
+
+- [ ] **OpenAI:** create a dedicated project for this app, set a monthly budget cap on it, and use a key
+      restricted to the embeddings and chat endpoints only.
+- [ ] **Finnhub:** confirm the key in your dashboard is the one in use, and regenerate it if it was ever pasted
+      somewhere public.
+- [ ] Set a Redis password and non-default Postgres and MinIO passwords (ADR 0017's "accepted, not fixed").
+
+#### Rotating a secret
+
+```bash
+scripts/init-secrets.sh --rotate finnhub_api_key   # or openai_api_key; prompts for the new value
+docker compose up -d --force-recreate worker       # secrets are read at container start
+```
+
+Rotating `openai_api_key` also refreshes the `SENTIMENT_CONFIGURED` flag, so recreate `api` too. Rotating
+`postgres_password` additionally needs the database's own password changed, because an existing Postgres volume
+keeps the password it was first created with (edit `DATABASE_URL` in `.env` to match afterwards):
+
+```bash
+docker compose exec db psql -U ticker -c "ALTER USER ticker PASSWORD '<new password>'"
+docker compose up -d --force-recreate api worker
+```
+
+If you ever suspect a key leaked, revoke it at the provider first, then rotate.
 
 ### 3. Build and start the stack
 

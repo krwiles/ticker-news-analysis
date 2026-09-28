@@ -187,7 +187,7 @@ def _headline_with_status(status):
 def test_sentiment_status_skipped_when_not_configured(monkeypatch):
     from ticker_backend.config import settings
 
-    monkeypatch.setattr(settings, "openai_api_key", "")
+    monkeypatch.setattr(settings, "sentiment_configured", False)
     # Even a headline with a real score doesn't override "skipped" -- the
     # config check runs first, before any headline row is even considered.
     assert _compute_sentiment_status([_headline_with_status("ok")]) == "skipped"
@@ -196,7 +196,7 @@ def test_sentiment_status_skipped_when_not_configured(monkeypatch):
 def test_sentiment_status_error_even_while_others_are_still_pending(monkeypatch):
     from ticker_backend.config import settings
 
-    monkeypatch.setattr(settings, "openai_api_key", "test-key-not-real")
+    monkeypatch.setattr(settings, "sentiment_configured", True)
     # Error takes priority over "processing" -- it must surface, not be masked by a pending headline.
     assert _compute_sentiment_status([_headline_with_status("error"), _headline_with_status(None)]) == "error"
 
@@ -204,7 +204,7 @@ def test_sentiment_status_error_even_while_others_are_still_pending(monkeypatch)
 def test_sentiment_status_processing_when_any_headline_still_pending(monkeypatch):
     from ticker_backend.config import settings
 
-    monkeypatch.setattr(settings, "openai_api_key", "test-key-not-real")
+    monkeypatch.setattr(settings, "sentiment_configured", True)
     # One headline still unresolved (NULL status) is enough to keep the page "processing".
     assert _compute_sentiment_status([_headline_with_status("ok"), _headline_with_status(None)]) == "processing"
 
@@ -212,7 +212,7 @@ def test_sentiment_status_processing_when_any_headline_still_pending(monkeypatch
 def test_sentiment_status_ok_when_everything_resolved(monkeypatch):
     from ticker_backend.config import settings
 
-    monkeypatch.setattr(settings, "openai_api_key", "test-key-not-real")
+    monkeypatch.setattr(settings, "sentiment_configured", True)
     # Every headline resolved to a real score -- nothing left pending or failed.
     assert _compute_sentiment_status([_headline_with_status("ok"), _headline_with_status("ok")]) == "ok"
 

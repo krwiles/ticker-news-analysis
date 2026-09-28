@@ -107,6 +107,22 @@ async def test_finnhub_maps_source_and_summary(test_session_factory):
 
 
 @respx.mock
+async def test_finnhub_key_travels_in_a_header_never_the_url(monkeypatch):
+    # Arrange: a known fake key, and a mocked Finnhub that records the request it receives.
+    monkeypatch.setattr("ticker_backend.providers.settings.finnhub_api_key", "fake-finnhub-key")
+    route = respx.get("https://finnhub.io/api/v1/company-news").mock(return_value=httpx.Response(200, json=[]))
+
+    # Act.
+    async with httpx.AsyncClient() as client:
+        await fetch_finnhub_news(client, ticker="AAPL")
+
+    # Assert: the key is in the header, and absent from the URL -- httpx logs URLs, so a key there hits the logs.
+    request = route.calls.last.request
+    assert request.headers["X-Finnhub-Token"] == "fake-finnhub-key"
+    assert "fake-finnhub-key" not in str(request.url)
+
+
+@respx.mock
 async def test_finnhub_403_raises_typed_error(test_session_factory):
     # Mock an auth failure.
     respx.get("https://finnhub.io/api/v1/company-news").mock(
