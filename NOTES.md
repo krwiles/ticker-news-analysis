@@ -724,9 +724,18 @@ go live" — accounts are live now. Start with the no-new-tooling tier (keys onl
 `secrets:`, spend-limited provider keys — gitleaks is already done); Vault is the heavier original-stack item,
 deferrable to Phase 4.
 
-**→ Phase 2 status (2026-09-28): fully grilled, decisions settled below, NOT yet planned or implemented.**
-Next step is writing plan 0040 + ADR 0017 and building it; the user's go-ahead on that was pending when
-context was compacted, so confirm before starting.
+**→ Phase 2 status (2026-09-28): ✅ built** (plan `docs/plans/0040-*.md`, ADR `docs/adr/0017-*.md`, lessons 38-39,
+`reference/secrets-management.html`) on branch `secrets-management`. The decisions below were built as agreed,
+with these changes found during execution — see plan 0040's "What actually happened" for detail:
+`api`'s `SENTIMENT_CONFIGURED` is an explicit flag written by `init-secrets.sh` (the `${OPENAI_API_KEY:+true}`
+idea couldn't work once the key left `.env`); `database_url` is now a property returning a SQLAlchemy `URL`; and
+**the Finnhub key was being printed in worker logs** via a `?token=` URL param that `httpx` logs at INFO — now sent
+as an `X-Finnhub-Token` header, with `httpx` logging silenced. **Still open (ADR 0017):** MinIO/Milvus share
+`minioadmin`, Redis has no password, Postgres/MinIO passwords are weak dev values — all required before a real
+deployment; Vault (rungs 3-4) is Phase 4. The user may want to rotate the Finnhub key, since it sat in local
+container logs (README runbook has the steps).
+
+*Original grilled record, kept for the reasoning:*
 
 *Goal (user's own framing): learn how secrets management is used in a production, publicly-deployed system —
 build it production-shaped even though it runs locally.* Vault stays Phase 4, but the mechanism is chosen so

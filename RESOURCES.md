@@ -30,6 +30,18 @@
   Official docs for `verify_oauth2_token`, used in `auth.py`'s `_verify_google_credential` (ADR 0016). The
   installed package's own docstring was the source that caught both real exception types it can raise —
   worth checking directly rather than trusting a tutorial's simplified try/except.
+- [OWASP Secrets Management Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Secrets_Management_Cheat_Sheet.html)
+  The primary source for lessons 38-39: lifecycle (create/rotate/revoke/expire), least privilege, container injection, CI/CD hardening, and the revoke-rotate-clean-investigate incident order. Use for: the "why" behind every secrets decision in ADR 0017.
+- [Docker Compose — use secrets](https://docs.docker.com/compose/how-tos/use-secrets/)
+  Official docs for the top-level `secrets:` block and per-service grants; states the env-var exposure rationale directly. Use for: `docker-compose.yml`'s secrets wiring.
+- [pydantic-settings — settings sources and secrets](https://pydantic.dev/docs/validation/latest/concepts/pydantic_settings/)
+  Source-priority order (env and dotenv outrank `secrets_dir`) and file-name-to-field mapping. The old `docs.pydantic.dev` URL 301-redirects here. Use for: `config.py`'s `secrets_dir`.
+- [The Twelve-Factor App — Config](https://12factor.net/config)
+  The "could you open-source it today?" litmus test for separating config from code. Use for: deciding secret vs. plain config.
+- [Kubernetes — Secrets](https://kubernetes.io/docs/concepts/configuration/secret/)
+  Documents that Secrets are stored unencrypted in etcd by default. Use for: Phase 4 (Kubernetes) planning.
+- [HashiCorp Vault — what is Vault](https://developer.hashicorp.com/vault/docs/what-is-vault) and [dynamic database credentials](https://developer.hashicorp.com/vault/docs/secrets/databases)
+  Official docs for the deferred Phase 4 item. Use for: rungs 3-4 of lesson 38's ladder.
 
 ## Wisdom (Communities)
 
