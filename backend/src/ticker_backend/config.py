@@ -52,6 +52,15 @@ class Settings(BaseSettings):
     google_client_id: str = ""
     # Environment-driven -- True over plain HTTP makes the browser refuse the cookie (ADR 0016).
     cookie_secure: bool = False
+    # Env-configurable so it can be tuned without a code change or image rebuild (idea noted 2026-09-21).
+    sentiment_system_prompt: str = (
+        "Score this stock news headline from 0 (most negative) to 100 (most positive). "
+        "Give a concise, natural one-word gloss describing the specific character of the "
+        "news, such as bullish, reassuring, routine, speculative, operational, regulatory, "
+        "concerning, or alarming. This list is illustrative, not a fixed vocabulary. "
+        "Choose a different word when it is more precise, and never use positive, neutral, "
+        "or negative as the gloss. Give a one-sentence rationale for the score."
+    )
 
     @property
     def database_url(self) -> URL:

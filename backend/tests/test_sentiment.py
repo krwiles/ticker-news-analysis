@@ -1,6 +1,7 @@
 """Sentiment tests, mocked at the HTTP layer with respx -- same discipline as
 test_providers.py. See docs/plans/0023-*.md through 0026-*.md and ADR 0014."""
 
+import json
 from datetime import datetime, timedelta, timezone
 
 import httpx
@@ -93,6 +94,27 @@ async def test_get_sentiment_raises_typed_error_on_failure(test_session_factory)
     async with httpx.AsyncClient() as client:
         with pytest.raises(ProviderFetchError):
             await get_sentiment("A real headline", client)
+
+
+@respx.mock
+async def test_get_sentiment_sends_the_configurable_system_prompt(monkeypatch):
+    # Arrange: a distinct prompt, set via Settings rather than the hardcoded module string.
+    monkeypatch.setattr(sentiment_module.settings, "sentiment_system_prompt", "TEST PROMPT MARKER")
+    route = respx.post("https://api.openai.com/v1/chat/completions").mock(
+        return_value=httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": '{"score": 50, "gloss": "routine", "rationale": "x"}'}}]},
+        )
+    )
+
+    # Act.
+    async with httpx.AsyncClient() as client:
+        await get_sentiment("A real headline", client)
+
+    # Assert: the request sent to OpenAI carries Settings' value, not a hardcoded module constant.
+    request_body = json.loads(route.calls.last.request.content)
+    system_message = next(m for m in request_body["messages"] if m["role"] == "system")
+    assert system_message["content"] == "TEST PROMPT MARKER"
 
 
 def test_strip_html_to_text_removes_tags():
