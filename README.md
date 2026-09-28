@@ -10,9 +10,9 @@ This is a real, working application, but it's also deliberately serving two othe
 
 - **Learning a specific tech stack hands-on**, by actually building something with it end to end rather than
   following boilerplate tutorials: Python/FastAPI/SQLAlchemy (async ORM)/Postgres, Redis + ARQ (background jobs),
-  React/TypeScript/React Router/Tailwind/Webpack, and Docker. The goal is real fluency — being able to write a
-  new endpoint, model, and migration from scratch, or add a new background job, or build a new page, without
-  copy-pasting from what's already here.
+  React/TypeScript/React Router/Tailwind/Webpack, Milvus (vector search), and Docker. The goal is real fluency —
+  being able to write a new endpoint, model, and migration from scratch, or add a new background job, or build
+  a new page, without copy-pasting from what's already here.
 - **Practicing spec-driven development and AI-assisted coding as disciplines.** Every non-trivial feature
   starts as a written spec and a domain model before any code, architectural decisions get written down as ADRs
   before they're implemented, and the whole thing is built collaboratively with an AI coding assistant acting as
@@ -62,6 +62,11 @@ These ports must be free on your machine: `3000` (UI), `8000` (API), `5432` (Pos
 **Only if you want to run the test suites or the frontend dev server on your host** (not needed to run the app):
 [`uv`](https://docs.astral.sh/uv/getting-started/installation/) (which manages Python 3.12+ for you) and
 Node 24 + npm.
+
+> **Upgrading an existing checkout past the secrets-management change (ADR 0017)?** `docker-compose.yml` now
+> requires `./secrets/{postgres_password,finnhub_api_key,openai_api_key}` to exist — `api` and `worker` refuse
+> to start without them, with an error naming what's missing. Run `scripts/init-secrets.sh --from-env` once to
+> migrate your existing `.env` keys into `./secrets/` before your next `docker compose up`.
 
 ### 2. Configure `.env` and create your secrets
 
@@ -199,6 +204,11 @@ One image runs in three modes (`ui`/`api`/`worker`, picked by `APP_MODE`) — se
 
 ## Current state
 
-The backend is complete for the first real feature (ticker search — see `docs/specs/0001-first-feature.md`) and
-tested. The frontend is in progress, being built lesson by lesson alongside the teaching curriculum in
-`lessons/`.
+The core product is built and live-verified end to end: ticker search across Finnhub and SEC EDGAR
+(`docs/specs/0001-*.md`), Milvus-backed story grouping to dedupe the same story across sources
+(`docs/specs/0002-*.md`), headline sentiment scoring (`docs/specs/0005-*.md`, degrades gracefully without an
+OpenAI key), and Google Sign-In accounts with Redis-backed sessions (`docs/specs/0006-*.md`). The frontend has
+a light/dark theme toggle. Secrets are managed as per-service Compose files with fail-fast startup checks
+(`docs/adr/0017-*.md`), not shared plain environment variables. `NOTES.md` tracks the phased roadmap of what's
+still ahead (watchlists, notifications, an admin panel, Kubernetes/Vault); the teaching curriculum in `lessons/`
+runs alongside the real feature work, not behind it.
