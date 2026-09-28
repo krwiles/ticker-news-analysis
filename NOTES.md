@@ -712,9 +712,6 @@ Analysis) · Arc 6 (concurrency/multi-user readiness, secret scanner) · Arc 7 (
 - ~~Dark mode~~ — ✅ built (plan: `docs/plans/0038-*.md`), see the completed writeup below.
 - Extract the sentiment system prompt out of its literal string (idea below).
 - ~~Fix `RECENT_HEADLINES_WINDOW`'s day-granularity mismatch~~ — ✅ fixed (plan: `docs/plans/0039-*.md`).
-- Set up the already-decided MCP servers (Docker MCP Gateway + Postgres MCP + Milvus MCP) — the decision was
-  made and the trigger condition met back around lesson 19; it's just never been installed. Pure tooling, no
-  product code involved.
 
 **Phase 2 — secrets management** (recommended before Phase 3 pushes the app further public-facing): the
 2026-09-21 secrets-management idea below already says "something proper should be in place before ... accounts
@@ -798,7 +795,10 @@ mounted) then a real search + sentiment pass; fix the stale session-signing-key 
 **Not on this roadmap, decided against already:** Next.js, GitLab CI/CD (both deliberately dropped early on —
 see the `nvidia-vulnops-portfolio-stack` project memory for the full reasoning); **Kaizen UI** (2026-09-28 —
 NVIDIA's own internal design system, not realistically usable from outside NVIDIA; the app keeps plain
-Tailwind v4).
+Tailwind v4); **Postgres MCP / Milvus MCP / Docker MCP Gateway** (2026-09-28 — reassessed rather than installed
+on the old trigger condition: Bash already gives ad-hoc Postgres (`docker compose exec db psql`) and Milvus
+(REST health endpoint, `pymilvus`) access, which is what these would mostly formalize; no capability gap they'd
+close for this project, so not pursued).
 
 ## Known issues & ideas
 - **Dark mode for the frontend** — ✅ built (2026-09-27, plan `docs/plans/0038-*.md`), scoped via `/grill-me`:
