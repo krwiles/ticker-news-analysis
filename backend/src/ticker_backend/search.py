@@ -157,7 +157,8 @@ def _compute_sentiment_status(headlines: list[Headline]) -> str:
     already-queried headline rows, never stored anywhere (spec 0005/ADR 0014). Checked in this
     priority order deliberately: an error surfaces even while other headlines are still pending,
     rather than being masked by "processing"."""
-    if not settings.openai_api_key:
+    # api never holds the OpenAI key itself (ADR 0017) -- it reads the non-secret mirror instead.
+    if not settings.sentiment_configured:
         return "skipped"
     if any(h.sentiment_status == "error" for h in headlines):
         return "error"

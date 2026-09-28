@@ -11,7 +11,7 @@ import structlog
 from arq import cron, func
 from arq.connections import RedisSettings
 
-from ticker_backend.config import settings
+from ticker_backend.config import require_secrets, settings
 from ticker_backend.health import WORKER_HEARTBEAT_KEY
 from ticker_backend.jobs import FETCH_RESULT_TTL_SECONDS, enqueue_sentiment_after_fetch
 from ticker_backend.logging import configure_logging
@@ -51,6 +51,11 @@ async def sentiment_job(ctx: dict, ticker: str) -> dict:
     return await compute_and_persist_sentiment(ticker)
 
 
+async def startup(ctx: dict) -> None:
+    """ARQ's on_startup hook -- refuses to run without this mode's required secrets (ADR 0017)."""
+    require_secrets(settings)
+
+
 class WorkerSettings:
     """ARQ discovers this class by name (`arq ticker_backend.worker.WorkerSettings`,
     see docker-compose.yml's worker command) -- not imported and called
@@ -58,6 +63,7 @@ class WorkerSettings:
 
     # Enqueue-able job functions -- what /api/search's `enqueue_job(...)` is dispatching to (ADR 0004).
     # func() wraps each to set how long ARQ keeps its result: brief for fetch, none for sentiment (ADR 0015).
+    on_startup = startup
     functions = [
         func(fetch_headlines_job, keep_result=FETCH_RESULT_TTL_SECONDS),
         func(sentiment_job, keep_result=0),

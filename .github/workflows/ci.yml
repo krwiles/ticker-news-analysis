@@ -69,6 +69,13 @@ jobs:
       # Validates the real multi-stage build (ADR 0001) still succeeds --
       # not pushed anywhere, no registry target exists yet.
       - run: docker build .
+      # Validates docker-compose.yml itself (anchors, secrets blocks) with throwaway secret files (ADR 0017).
+      - name: Validate docker-compose.yml
+        run: |
+          cp .env.example .env
+          mkdir secrets
+          for name in postgres_password finnhub_api_key openai_api_key; do echo dummy > "secrets/$name"; done
+          docker compose config -q
 
   secret-scan:
     runs-on: ubuntu-latest

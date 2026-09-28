@@ -2,7 +2,10 @@
 existed for these before; fetch_headlines_job gained real logic (triggering sentiment) worth
 covering directly, rather than only through the framework-agnostic functions it wraps."""
 
-from ticker_backend.worker import fetch_headlines_job
+import pytest
+
+from ticker_backend.config import settings
+from ticker_backend.worker import WorkerSettings, fetch_headlines_job
 
 
 async def test_fetch_headlines_job_triggers_sentiment_after_fetch_finishes(monkeypatch):
@@ -29,3 +32,13 @@ async def test_fetch_headlines_job_triggers_sentiment_after_fetch_finishes(monke
     # and the fetch job's own result is returned unchanged.
     assert calls == [("fetch", "AAPL"), ("sentiment", "the-real-redis-pool", "AAPL")]
     assert result == {"status": "success", "providers": {}, "grouping": "ok"}
+
+
+async def test_worker_startup_refuses_to_run_without_its_required_secrets(monkeypatch):
+    # Arrange: a worker whose Finnhub key never arrived (ADR 0017).
+    monkeypatch.setattr(settings, "app_mode", "worker")
+    monkeypatch.setattr(settings, "finnhub_api_key", "")
+
+    # Act + Assert: ARQ's on_startup hook raises, so the container exits instead of failing on the first job.
+    with pytest.raises(RuntimeError, match="finnhub_api_key"):
+        await WorkerSettings.on_startup({})
