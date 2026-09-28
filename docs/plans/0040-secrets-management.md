@@ -72,5 +72,15 @@ Built as planned, with these deviations and findings:
   at WARNING), caught by the deliberate-break check and rewritten. Verified live: zero occurrences of the key or
   `HTTP Request` lines in the rebuilt worker's logs, Finnhub still `ok`. The key sat in local container logs
   until those containers were recreated; consider rotating it (README runbook) if the machine is shared.
+- **Code review found two real gaps and a style violation, all fixed:** `require_secrets()` silently allowed an
+  unrecognized `APP_MODE` (the `.get(mode, [])` default), which only `main.py`'s own `match/case` would have caught
+  for `api`/`ui` — `worker` has no such guard, so a typo'd mode would have booted with no secrets required. Now
+  rejected explicitly, test-first. `api`'s `/api/health` calls `check_milvus`, but `MILVUS_URI` wasn't in its
+  environment — it happened to work only because the code default matches the compose service name; moved into
+  the shared `&data-env` so both `api` and `worker` get it explicitly, and ADR 0017's table corrected.
+  `init-secrets.sh`'s 5-line header comment violated this repo's comment-length convention; trimmed, with the
+  usage detail it held living only in the README (no duplication). A fourth finding — `.env`'s `DATABASE_URL` and
+  `./secrets/postgres_password` are two sources of truth for one password with nothing checking they match — was
+  already covered by the README's rotation runbook, so no further change.
 - **Not done, recorded in ADR 0017:** MinIO/Milvus shared credentials, Redis `requirepass`, non-default dev
   passwords.

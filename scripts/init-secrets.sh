@@ -1,9 +1,6 @@
 #!/usr/bin/env bash
-# Creates the file-based secrets Docker Compose mounts at /run/secrets (docs/adr/0017-*.md).
-# Usage: scripts/init-secrets.sh [--from-env] [--rotate NAME]
-#   --from-env     move FINNHUB_API_KEY / OPENAI_API_KEY / POSTGRES_PASSWORD out of .env into files
-#   --rotate NAME  re-prompt for one secret (finnhub_api_key | openai_api_key | postgres_password)
-# Safe to re-run: an existing secret file is never overwritten. Values are never printed.
+# Creates the file-based secrets Compose mounts at /run/secrets (docs/adr/0017-*.md); see README for usage.
+# Safe to re-run -- an existing secret file is never overwritten, and no value is ever printed.
 
 set -euo pipefail
 

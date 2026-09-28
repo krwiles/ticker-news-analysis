@@ -13,6 +13,8 @@ x-data-env: &data-env
   POSTGRES_USER: ${POSTGRES_USER}
   POSTGRES_DB: ${POSTGRES_DB}
   REDIS_URL: redis://redis:6379/0
+  # api's own /api/health aggregate check calls Milvus too (health.py), not just worker's own usage.
+  MILVUS_URI: http://milvus:19530
 
 # File-based secrets, mounted read-only at /run/secrets/<name> in only the services that list them
 # (ADR 0017). Created by scripts/init-secrets.sh; ./secrets/ is gitignored.
@@ -162,7 +164,6 @@ services:
     environment:
       <<: *data-env
       APP_MODE: worker
-      MILVUS_URI: http://milvus:19530
       SEC_EDGAR_USER_AGENT: ${SEC_EDGAR_USER_AGENT}
     secrets:
       - postgres_password

@@ -116,6 +116,16 @@ def test_worker_mode_requires_the_finnhub_key_too(tmp_path):
         require_secrets(cfg)
 
 
+def test_an_unrecognized_app_mode_is_rejected_not_silently_allowed(tmp_path):
+    # Arrange: a typo'd APP_MODE -- worker.py's on_startup calls require_secrets with no other guard,
+    # unlike main.py's own match/case, so this is the only thing that can catch it for worker.
+    cfg = _settings(tmp_path, app_mode="Worker")
+
+    # Act + Assert: refuses rather than silently requiring zero secrets (REQUIRED_SECRETS_BY_MODE.get default).
+    with pytest.raises(RuntimeError, match="Worker"):
+        require_secrets(cfg)
+
+
 def test_openai_key_stays_optional_and_ui_needs_nothing(tmp_path):
     # Arrange: worker with both required secrets but no OpenAI key (spec 0005's designed degradation).
     (tmp_path / "postgres_password").write_text("pw")

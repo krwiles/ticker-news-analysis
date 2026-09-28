@@ -79,8 +79,11 @@ REQUIRED_SECRETS_BY_MODE = {
 def require_secrets(cfg: Settings) -> None:
     """Fail fast at startup, naming what's missing (never its value). Called from create_app() and the
     worker's startup hook, not Settings itself -- Settings() builds at import time, and tests import with no secrets."""
+    # An unrecognized mode must not silently pass as "needs nothing" -- worker has no other guard like this.
+    if cfg.app_mode not in REQUIRED_SECRETS_BY_MODE:
+        raise RuntimeError(f"Unrecognized APP_MODE {cfg.app_mode!r} -- expected one of {list(REQUIRED_SECRETS_BY_MODE)}.")
     # Collect every required secret for this mode that is empty.
-    missing = [name for name in REQUIRED_SECRETS_BY_MODE.get(cfg.app_mode, []) if not getattr(cfg, name)]
+    missing = [name for name in REQUIRED_SECRETS_BY_MODE[cfg.app_mode] if not getattr(cfg, name)]
     # Refuse to start with a clear, actionable message instead of failing later on an opaque auth error.
     if missing:
         raise RuntimeError(

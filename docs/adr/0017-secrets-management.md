@@ -17,7 +17,7 @@ what Compose *gives* each container, not in what is built.
 | Service | Secrets mounted | Non-secret config |
 | --- | --- | --- |
 | `worker` | Postgres password, Finnhub key, OpenAI key | DB/Redis/Milvus, SEC user agent |
-| `api` | Postgres password | DB/Redis, Google client ID, `SENTIMENT_CONFIGURED` |
+| `api` | Postgres password | DB/Redis/Milvus, Google client ID, `SENTIMENT_CONFIGURED` |
 | `ui` | none | none |
 
 `api` needs one fact about the OpenAI key — *is sentiment on?* (`search.py` reports `skipped` when it isn't).
