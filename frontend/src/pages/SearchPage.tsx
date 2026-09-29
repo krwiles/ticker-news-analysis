@@ -2,20 +2,24 @@ import { useEffect, useState } from "react";
 import { useSearchParams } from "react-router";
 import { DaySection } from "../components/DaySection";
 import { GroupingStatus } from "../components/GroupingStatus";
+import { RefreshIndicator } from "../components/RefreshIndicator";
 import { SearchBar } from "../components/SearchBar";
 import { SearchStatus } from "../components/SearchStatus";
 import { SentimentStatus } from "../components/SentimentStatus";
-import { fetchSearch, fetchSearchStatus, hasPendingSentiment, type SearchResponse } from "../search";
+import { fetchSearch, fetchSearchStatus, type SearchResponse } from "../search";
 
 // Same cadence as StatusPage's own health poll -- no evidence sentiment resolves at a
 // meaningfully different pace, so no reason to invent a different number.
-const SENTIMENT_POLL_INTERVAL_MS = 5000;
+const STATUS_POLL_INTERVAL_MS = 5000;
 
 export function SearchPage() {
   const [searchParams, setSearchParams] = useSearchParams();
   const [results, setResults] = useState<SearchResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Timestamp of the last successful check with the backend (initial load counts) -- drives the
+  // "last refresh Ns ago" indicator (spec 0007). null before any search has ever succeeded.
+  const [lastRefreshAt, setLastRefreshAt] = useState<number | null>(null);
 
   // The URL is the actual source of truth for "what's being searched" --
   // not a mirror of some separate piece of component state.
@@ -29,6 +33,7 @@ export function SearchPage() {
       // Fetch and store the results on success.
       const result = await fetchSearch(ticker);
       setResults(result);
+      setLastRefreshAt(Date.now());
     } catch (err) {
       // Store a human-readable error message and drop any stale results.
       setError(err instanceof Error ? err.message : "unknown error");
@@ -47,49 +52,76 @@ export function SearchPage() {
     }
   }, [urlTicker]);
 
-  // Polls /api/search/status while any Headline still lacks sentiment, stopping once all do.
-  // Keyed on the whole `results` object so a Refresh restarts polling even at the same status.
+  // Live-refresh (spec 0007): polls /api/search/status whenever results exist, not just while
+  // sentiment is pending. Keyed on the ticker alone so each poll's own setResults doesn't restart this.
   useEffect(() => {
-    // Nothing to poll for yet, or everything already has a real sentiment -- skip.
-    if (!results || !hasPendingSentiment(results.days)) {
+    if (!results) {
       return;
     }
 
     let cancelled = false;
     const ticker = results.ticker;
+    // The refocus-immediate-check can overlap a poll already in flight (stopPolling only clears
+    // the timer, not an in-flight fetch) -- this discards any response that isn't the latest call.
+    let latestRequestId = 0;
 
     async function poll() {
+      const requestId = ++latestRequestId;
       try {
         const status = await fetchSearchStatus(ticker);
         // Merge only sentiment + days -- /api/search/status doesn't return
         // ticker/status/providers/grouping, so a full replace would drop them.
-        if (!cancelled) {
+        if (!cancelled && requestId === latestRequestId) {
           setResults((prev) => (prev ? { ...prev, sentiment: status.sentiment, days: status.days } : prev));
+          setLastRefreshAt(Date.now());
         }
       } catch {
-        // A transient poll failure shouldn't blow away results already on screen -- just try again next tick.
+        // Silent, on purpose (spec 0007) -- a transient failure never changes what's on screen;
+        // the next scheduled check tries again as if nothing happened.
       }
     }
 
-    const id = setInterval(poll, SENTIMENT_POLL_INTERVAL_MS);
-    // Cleanup: stop the timer and flag any still-in-flight poll's result as stale.
+    let intervalId: ReturnType<typeof setInterval> | undefined;
+
+    function startPolling() {
+      if (intervalId === undefined) {
+        intervalId = setInterval(poll, STATUS_POLL_INTERVAL_MS);
+      }
+    }
+
+    function stopPolling() {
+      if (intervalId !== undefined) {
+        clearInterval(intervalId);
+        intervalId = undefined;
+      }
+    }
+
+    // Only runs while the tab is actually visible -- refocusing checks immediately rather than
+    // waiting for the next tick, so a long-backgrounded tab doesn't look stale for a full interval.
+    function handleVisibilityChange() {
+      if (document.visibilityState === "visible") {
+        poll();
+        startPolling();
+      } else {
+        stopPolling();
+      }
+    }
+
+    if (document.visibilityState === "visible") {
+      startPolling();
+    }
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+
     return () => {
       cancelled = true;
-      clearInterval(id);
+      stopPolling();
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
     };
-  }, [results]);
+  }, [results?.ticker]);
 
   // Writes the URL; the effect above reacts to that change and does the actual fetch.
   function handleSearch(ticker: string) {
     setSearchParams({ ticker: ticker.toUpperCase() });
-  }
-
-  // Bypasses the URL and calls runSearch directly -- resubmitting the same ticker wouldn't
-  // change the URL, so the effect above wouldn't re-fire on its own.
-  function handleRefresh() {
-    if (urlTicker) {
-      runSearch(urlTicker);
-    }
   }
 
   return (
@@ -112,8 +144,7 @@ export function SearchPage() {
 
       {/* Hiding results while loading (rather than showing stale ones
           underneath a spinner) is deliberate, not a gap -- spec 0001's own
-          Non-goals rule out stale-then-fresh loading for v1. This applies
-          identically whether it's the first search or a Refresh. */}
+          Non-goals rule out stale-then-fresh loading for v1. */}
       {loading && <p className="mt-6 text-sm text-slate-500 dark:text-slate-400">Searching…</p>}
       {error && <p className="mt-6 text-sm text-red-600 dark:text-red-400">Couldn&apos;t reach the API: {error}</p>}
 
@@ -121,14 +152,9 @@ export function SearchPage() {
         <div className="mt-6">
           <div className="mb-1 flex items-center justify-between gap-3">
             <SearchStatus status={results.status} />
-            <button
-              type="button"
-              onClick={handleRefresh}
-              disabled={loading}
-              className="shrink-0 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-sm font-medium text-slate-700 shadow-sm hover:bg-slate-50 disabled:opacity-50 dark:border-slate-800 dark:bg-slate-900 dark:text-slate-300 dark:hover:bg-slate-800"
-            >
-              Refresh
-            </button>
+            {/* Replaces the old manual Refresh button (spec 0007) -- purely informational, isolated
+                into its own component so its once-a-second tick doesn't re-render this whole page. */}
+            {lastRefreshAt !== null && <RefreshIndicator lastRefreshAt={lastRefreshAt} />}
           </div>
           <div className="mb-1">
             <GroupingStatus grouping={results.grouping} />

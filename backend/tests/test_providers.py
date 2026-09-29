@@ -9,6 +9,7 @@ import pytest
 import respx
 from sqlalchemy import select
 
+from fakes import FakeRedisKV
 from ticker_backend.config import derive_sentiment_enum
 from ticker_backend.models import Company, Headline, Story
 from ticker_backend.providers import (
@@ -120,6 +121,33 @@ async def test_finnhub_key_travels_in_a_header_never_the_url(monkeypatch):
     request = route.calls.last.request
     assert request.headers["X-Finnhub-Token"] == "fake-finnhub-key"
     assert "fake-finnhub-key" not in str(request.url)
+
+
+
+@respx.mock
+async def test_finnhub_call_records_a_fetch_for_the_rate_limiter():
+    # Arrange: a fake redis, standing in for the shared rate-limit connection (ADR 0018).
+    respx.get("https://finnhub.io/api/v1/company-news").mock(return_value=httpx.Response(200, json=[]))
+    redis = FakeRedisKV()
+
+    # Act.
+    async with httpx.AsyncClient() as client:
+        await fetch_finnhub_news(client, ticker="AAPL", redis=redis)
+
+    # Assert: the shared window counter and this ticker's own cooldown timestamp both got recorded.
+    assert redis.kv["finnhub_calls:" + datetime.now(timezone.utc).strftime("%Y%m%dT%H%M")] == b"1"
+    assert "last_fetch:AAPL" in redis.kv
+
+
+@respx.mock
+async def test_finnhub_call_with_no_redis_still_works_unchanged():
+    # Arrange: the default call shape every existing test already uses -- no rate-limit tracking at all.
+    respx.get("https://finnhub.io/api/v1/company-news").mock(return_value=httpx.Response(200, json=[]))
+
+    # Act + Assert: no redis argument is required, and nothing raises.
+    async with httpx.AsyncClient() as client:
+        articles = await fetch_finnhub_news(client, ticker="AAPL")
+    assert articles == []
 
 
 @respx.mock

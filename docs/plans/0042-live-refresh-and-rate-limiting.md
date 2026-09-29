@@ -47,4 +47,67 @@ and the existing fetch job.
 
 ## What actually happened during execution
 
-(Filled in after building.)
+Built as scoped, with two deviations found only by testing/verifying for real, not by re-reading the design:
+
+- **A real bug, caught only by live verification: `redis.get()` returns `bytes`, not `str`.** Every fake
+  Redis in this codebase's own tests (including the new ones written for this plan) stored and returned
+  plain Python strings, so `rate_limit.py`'s `datetime.fromisoformat(last_fetch_raw)` passed every unit test
+  cleanly -- then threw `TypeError: fromisoformat: argument must be str` on the very first real request in
+  the browser, a 503 every time. This is the exact "redis-py hands back bytes unless decode_responses is set"
+  fact `auth.py`'s `_resolve_session` already had to account for (ADR 0016) -- missed here because nothing in
+  the design or the ADR's own grilling surfaced it, and no fake modeled it. Fixed by decoding bytes the same
+  way `auth.py` does, then updated *every* fake Redis across `test_rate_limit.py`, `test_jobs.py`,
+  `test_search_endpoint.py`, and `test_providers.py` to return `bytes` from `get()`, so this exact class of
+  bug is caught by the unit suite from now on, not just by re-discovering it live each time.
+- **`test_search_status_endpoint_never_touches_arq`'s own premise became false and had to be replaced, not
+  patched.** That test existed specifically to prove `/api/search/status` was structurally incapable of
+  enqueueing a job (ADR 0014) -- exactly the invariant ADR 0018 deliberately breaks. Rewrote it as
+  `test_search_status_triggers_a_background_check_but_never_awaits_its_result`, proving the *new* invariant
+  (a background check does fire, but its result is never awaited) with the same rigor the old one had for the
+  opposite claim.
+- The frontend's old "only poll while sentiment is pending" gate (`hasPendingSentiment`) became entirely
+  unused once live-refresh polls unconditionally whenever results exist -- deleted rather than left as dead
+  code, along with the four `sentiment polling` tests whose premise (starts/stops based on pending sentiment)
+  no longer holds; replaced with a `live refresh` describe block covering the new unconditional/pause/resume/
+  counter behavior.
+
+Live-verified against the real running stack, including the deferred-job path specifically, not just success
+cases: forced the shared Finnhub window to look fully exhausted via a real Redis connection inside the worker
+container, confirmed `enqueue_background_fetch` returned a job in `JobStatus.deferred`, confirmed a real
+`/api/search` call for that ticker returned in 56ms with existing data (`complete_failure`/empty providers,
+never a hang), and then polled the same job's status for real until it actually transitioned to
+`in_progress` → `complete` roughly a minute later with a genuine successful fetch -- proving the "guaranteed to
+actually run later" claim in ADR 0018, not just asserting it. Confirmed live in a real browser (after finding
+and fixing the bytes bug): the manual Refresh button is gone, "last refresh Ns ago" ticks up and resets to 0 on
+each real successful poll, and pausing while the tab is genuinely backgrounded (confirmed via
+`document.visibilityState`/`hasFocus()`, not assumed) stops polling until it's brought back into focus.
+
+136/136 backend tests (13 new: 6 rate_limit, 3 jobs, 2 providers, 1 replaced + 1 net-new in search_endpoint),
+102/102 frontend tests, zero regressions. Deliberate-break checks passed on: both `should_defer_fetch` gates,
+`enqueue_background_fetch`'s `_defer_by` wiring, the Finnhub-call recording, the `job.status()` branch in
+`/api/search`, `/api/search/status`'s background trigger, the frontend visibility-pause logic, and the
+refresh-counter reset logic.
+
+### Code review fixes
+
+A background review of the diff found five real issues, all fixed, TDD'd, and deliberate-break checked where
+correctness was at stake:
+
+- **`search_status()`'s background trigger had no exception handling.** A Redis blip during the rate-limit
+  check would have turned a healthy poll into a 500 -- exactly the "never causes visible errors" promise spec
+  0007 makes. Wrapped in the same swallow-and-log pattern `jobs.py`'s own `enqueue_sentiment_after_fetch`
+  already established, with a new regression test (`test_search_status_survives_a_background_check_that_blows_up`).
+- **A real frontend race: an overlapping refocus check could apply a stale response.** `stopPolling()` only
+  clears the timer, never an already-in-flight fetch, so backgrounding then quickly refocusing could let an
+  older poll's response resolve *after* a newer one and silently overwrite it. Fixed with a `latestRequestId`
+  guard (discard any response that isn't from the most recently started call), proven with a new test that
+  resolves two controlled promises out of order.
+- **`enqueue_background_fetch` had no inline step comments**, unlike its near-identical sibling
+  `enqueue_or_join_fetch` two lines above it. Added, matching the existing convention.
+- **The "last refresh" ticker re-rendered the whole results tree every second** for a one-line string. Extracted
+  into its own `RefreshIndicator` component (with its own small test file) so only that line re-renders.
+- **Four test files each reimplemented the same fake-Redis bytes-encoding logic.** Extracted into a shared
+  `tests/fakes.py::FakeRedisKV`, with the ARQ-flavored fakes in `test_jobs.py`/`test_search_endpoint.py`
+  inheriting from it instead of duplicating it.
+
+137/137 backend tests, 106/106 frontend tests after these fixes.

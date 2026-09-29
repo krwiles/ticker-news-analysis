@@ -781,8 +781,19 @@ CI's `docker-build` job also runs `docker compose config -q` with dummy secret f
 mounted) then a real search + sentiment pass; fix the stale session-signing-key bullet below.
 
 **Phase 3 — features that build on accounts** (Arc 7 was the unlocking dependency, now done):
-1. **Watchlists** — a user's tracked tickers, auto-refreshed via `jobs.py`'s existing single-flight machinery
-   (ADR 0015) rather than a new mechanism.
+0. **Live-refreshing search results** — ✅ done (2026-09-29, spec `docs/specs/0007-*.md`, ADR `docs/adr/0018-*.md`,
+   plan `docs/plans/0042-*.md`). Split out during grilling from the original "Watchlists" idea below, since it
+   applies to every ticker page for every visitor, not just signed-in users, and needed its own real design for
+   a shared Finnhub rate limit (60/min free tier). `/api/search/status` now also triggers a rate-limited
+   background fetch (ARQ's native `_defer_by`, gating the whole job rather than just the Finnhub call inside
+   it — a deferred job is guaranteed to actually run later); the manual Refresh button is gone, replaced by a
+   silently-updating page and a "last refresh Ns ago" counter. Watchlists (below) builds its own per-ticker
+   counts on top of this mechanism, not a new one.
+1. **Watchlists** — a user's single, implicit list of tracked tickers (max 10), shown in the currently-empty
+   left sidebar with a per-ticker "new headlines since last viewed" count; added via an "Add SYMBOL to
+   watchlist" button on the search page itself (so only real, already-resolved tickers can be added — no
+   separate validation path needed); hidden entirely when signed out. Grilled through the live-refresh split
+   above; not yet spec'd as its own doc (would be spec 0008) or planned.
 2. **Notifications** — new news on a watchlist, optionally sentiment-filtered; depends on watchlists existing.
 3. **Admin panel (container logs)** — needs a real admin-role concept, which doesn't exist yet (accounts do,
    roles don't) — the smallest new spec among these three, but a real one.
