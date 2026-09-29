@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { useSearchParams } from "react-router";
 import { DaySection } from "../components/DaySection";
 import { GroupingStatus } from "../components/GroupingStatus";
+import { RefreshIndicator } from "../components/RefreshIndicator";
 import { SearchBar } from "../components/SearchBar";
 import { SearchStatus } from "../components/SearchStatus";
 import { SentimentStatus } from "../components/SentimentStatus";
@@ -19,9 +20,6 @@ export function SearchPage() {
   // Timestamp of the last successful check with the backend (initial load counts) -- drives the
   // "last refresh Ns ago" indicator (spec 0007). null before any search has ever succeeded.
   const [lastRefreshAt, setLastRefreshAt] = useState<number | null>(null);
-  // Forces a re-render once a second so the indicator's displayed value stays current -- the
-  // actual elapsed time is always computed fresh from lastRefreshAt, never stored separately.
-  const [, forceTick] = useState(0);
 
   // The URL is the actual source of truth for "what's being searched" --
   // not a mirror of some separate piece of component state.
@@ -63,13 +61,17 @@ export function SearchPage() {
 
     let cancelled = false;
     const ticker = results.ticker;
+    // The refocus-immediate-check can overlap a poll already in flight (stopPolling only clears
+    // the timer, not an in-flight fetch) -- this discards any response that isn't the latest call.
+    let latestRequestId = 0;
 
     async function poll() {
+      const requestId = ++latestRequestId;
       try {
         const status = await fetchSearchStatus(ticker);
         // Merge only sentiment + days -- /api/search/status doesn't return
         // ticker/status/providers/grouping, so a full replace would drop them.
-        if (!cancelled) {
+        if (!cancelled && requestId === latestRequestId) {
           setResults((prev) => (prev ? { ...prev, sentiment: status.sentiment, days: status.days } : prev));
           setLastRefreshAt(Date.now());
         }
@@ -117,19 +119,10 @@ export function SearchPage() {
     };
   }, [results?.ticker]);
 
-  // Drives the "last refresh Ns ago" display -- a plain 1-second UI ticker, independent of the
-  // actual poll interval above; the displayed value is always derived fresh from lastRefreshAt.
-  useEffect(() => {
-    const id = setInterval(() => forceTick((n) => n + 1), 1000);
-    return () => clearInterval(id);
-  }, []);
-
   // Writes the URL; the effect above reacts to that change and does the actual fetch.
   function handleSearch(ticker: string) {
     setSearchParams({ ticker: ticker.toUpperCase() });
   }
-
-  const secondsSinceRefresh = lastRefreshAt === null ? null : Math.max(0, Math.floor((Date.now() - lastRefreshAt) / 1000));
 
   return (
     <main className="mx-auto max-w-2xl px-6 py-16">
@@ -159,11 +152,9 @@ export function SearchPage() {
         <div className="mt-6">
           <div className="mb-1 flex items-center justify-between gap-3">
             <SearchStatus status={results.status} />
-            {/* Replaces the old manual Refresh button (spec 0007) -- purely informational, no
-                control of any kind; the page refreshes itself in the background. */}
-            {secondsSinceRefresh !== null && (
-              <p className="shrink-0 text-xs text-slate-400 dark:text-slate-500">last refresh {secondsSinceRefresh}s ago</p>
-            )}
+            {/* Replaces the old manual Refresh button (spec 0007) -- purely informational, isolated
+                into its own component so its once-a-second tick doesn't re-render this whole page. */}
+            {lastRefreshAt !== null && <RefreshIndicator lastRefreshAt={lastRefreshAt} />}
           </div>
           <div className="mb-1">
             <GroupingStatus grouping={results.grouping} />

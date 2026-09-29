@@ -541,5 +541,45 @@ describe("SearchPage", () => {
       expect(screen.getByRole("link", { name: "Still here" })).toBeInTheDocument();
       expect(screen.getByText("last refresh 5s ago")).toBeInTheDocument();
     });
+
+    it("discards a stale poll response that resolves after a newer one -- refocus racing an in-flight check", async () => {
+      // Arrange: two controlled promises, so the test decides which one resolves first.
+      vi.useFakeTimers({ shouldAdvanceTime: true });
+      fetchSearch.mockResolvedValue(response({ days: dayWith(headline()) }));
+      let resolveFirst!: (v: searchModule.SearchStatusResponse) => void;
+      let resolveSecond!: (v: searchModule.SearchStatusResponse) => void;
+      fetchSearchStatus
+        .mockImplementationOnce(() => new Promise((resolve) => (resolveFirst = resolve)))
+        .mockImplementationOnce(() => new Promise((resolve) => (resolveSecond = resolve)));
+
+      renderSearchPage(["/search?ticker=AAPL"]);
+      await waitFor(() => {
+        expect(screen.getByText(/analysis complete/i)).toBeInTheDocument();
+      });
+
+      // Act: the regular 5s poll starts (call #1, left in flight), then a background+refocus
+      // cycle fires an immediate second check (call #2) before call #1 has resolved.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(5000);
+      });
+      expect(fetchSearchStatus).toHaveBeenCalledTimes(1);
+      setVisibility("hidden");
+      await act(async () => {
+        setVisibility("visible");
+      });
+      expect(fetchSearchStatus).toHaveBeenCalledTimes(2);
+
+      // Act: the newer call (#2) resolves first, the older one (#1) resolves after it.
+      await act(async () => {
+        resolveSecond({ sentiment: "ok", days: dayWith(headline({ title: "Newer", url: "https://example.com/newer" })) });
+      });
+      await act(async () => {
+        resolveFirst({ sentiment: "ok", days: dayWith(headline({ title: "Stale", url: "https://example.com/stale" })) });
+      });
+
+      // Assert: the stale, later-resolving response never overwrites the newer one already applied.
+      expect(screen.getByRole("link", { name: "Newer" })).toBeInTheDocument();
+      expect(screen.queryByRole("link", { name: "Stale" })).not.toBeInTheDocument();
+    });
   });
 });

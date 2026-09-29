@@ -10,6 +10,8 @@ from httpx import ASGITransport, AsyncClient
 
 from arq.jobs import JobStatus
 
+from fakes import FakeRedisKV
+
 from ticker_backend.main import app
 from ticker_backend.models import Company, Headline, Story
 from ticker_backend.search import _compute_sentiment_status, get_arq_redis, get_session_factory
@@ -32,33 +34,19 @@ class _FakeJob:
         return self._status
 
 
-class _FakeArqRedis:
-    # Stands in for a real ArqRedis pool -- records every enqueue_job() call, and (ADR 0016/0018)
-    # a real in-memory dict for get/set/incr/expire, since the rate-limit gate uses the same connection.
+class _FakeArqRedis(FakeRedisKV):
+    # Stands in for a real ArqRedis pool -- records every enqueue_job() call; FakeRedisKV supplies
+    # get/set/incr/expire (ADR 0016/0018: the rate-limit gate runs on the same connection).
     def __init__(self, job: _FakeJob):
+        super().__init__()
         self._job = job
         self.enqueued_job_names: list[str] = []
         self.enqueued_job_ids: list[str | None] = []
-        self.kv: dict[str, str] = {}
 
     async def enqueue_job(self, name, *args, _job_id=None, **kwargs):
         self.enqueued_job_names.append(name)
         self.enqueued_job_ids.append(_job_id)
         return self._job
-
-    async def get(self, key):
-        return self.kv.get(key)
-
-    async def set(self, key, value, ex=None):
-        # bytes, not str -- matching the real redis-py client (see rate_limit.py's own bug this caught).
-        self.kv[key] = str(value).encode()
-
-    async def incr(self, key):
-        self.kv[key] = str(int(self.kv.get(key, b"0")) + 1).encode()
-        return int(self.kv[key])
-
-    async def expire(self, key, seconds):
-        pass
 
 
 async def _seed_headline(
@@ -328,6 +316,31 @@ async def test_search_status_triggers_a_background_check_but_never_awaits_its_re
     assert today["stories"][0]["primary"]["title"] == "Polled headline"
     assert result_calls == []  # never awaited
     assert redis.enqueued_job_names == ["fetch_headlines_job"]  # but a background check did fire
+
+
+async def test_search_status_survives_a_background_check_that_blows_up(test_session_factory):
+    """ADR 0018/spec 0007 -- a hiccup in the rate-limit check (a Redis blip, say) must never turn
+    an otherwise-healthy poll into a 500; same swallow-and-log discipline as jobs.py's own
+    enqueue_sentiment_after_fetch."""
+    await _seed_headline(test_session_factory, "TSLA", "Still here", "https://example.com/poll-2")
+
+    class _BrokenRedis(_FakeArqRedis):
+        async def enqueue_job(self, *args, **kwargs):
+            raise ConnectionError("redis hiccup")
+
+    app.dependency_overrides[get_session_factory] = lambda: test_session_factory
+    app.dependency_overrides[get_arq_redis] = lambda: _BrokenRedis(_FakeJob())
+    try:
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            response = await client.get("/api/search/status", params={"ticker": "TSLA"})
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    body = response.json()
+    today = next(d for d in body["days"] if d["is_today"])
+    assert today["stories"][0]["primary"]["title"] == "Still here"
 
 
 async def test_search_status_includes_per_headline_and_story_sentiment(test_session_factory):

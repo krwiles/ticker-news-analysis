@@ -8,6 +8,8 @@ from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import select
 
+from fakes import FakeRedisKV
+
 from ticker_backend.jobs import (
     FETCH_RESULT_TTL_SECONDS,
     enqueue_background_fetch,
@@ -17,8 +19,8 @@ from ticker_backend.jobs import (
     fetch_job_id,
     sentiment_job_id,
 )
-from ticker_backend.rate_limit import record_finnhub_fetch
 from ticker_backend.models import Company, Headline
+from ticker_backend.rate_limit import record_finnhub_fetch
 from ticker_backend.worker import WorkerSettings
 
 
@@ -57,11 +59,12 @@ class _FakeJob:
         return self._result
 
 
-class _FakeArqRedis:
+class _FakeArqRedis(FakeRedisKV):
     """Mimics ArqRedis.enqueue_job()'s uniqueness rule: the first enqueue of a job ID claims it
     and returns a Job; any later enqueue of the same ID returns None."""
 
     def __init__(self, taken_ids: set[str] | None = None):
+        super().__init__()
         self.taken_ids = set(taken_ids or ())
         # Every enqueue attempt (name, args, job ID), and just the IDs that were actually accepted.
         self.attempts: list[tuple[str, tuple, str | None]] = []
@@ -69,9 +72,6 @@ class _FakeArqRedis:
         # Every _defer_by an enqueue attempt was made with, alongside the job ID -- additive, kept
         # separate from `attempts` so its existing exact-tuple assertions stay unaffected.
         self.defer_by_seen: list[tuple[str | None, float | None]] = []
-        # A real in-memory dict -- ArqRedis is also a plain redis.asyncio.Redis (ADR 0016), so the
-        # rate-limit gate's get/set/incr/expire calls run against the same fake connection.
-        self.kv: dict[str, str] = {}
 
     async def enqueue_job(self, name, *args, _job_id=None, _defer_by=None, **kwargs):
         self.attempts.append((name, args, _job_id))
@@ -83,20 +83,6 @@ class _FakeArqRedis:
         self.taken_ids.add(_job_id)
         self.accepted_ids.append(_job_id)
         return _FakeJob(_job_id, result="own result")
-
-    async def get(self, key):
-        return self.kv.get(key)
-
-    async def set(self, key, value, ex=None):
-        # bytes, not str -- matching the real redis-py client (see rate_limit.py's own bug this caught).
-        self.kv[key] = str(value).encode()
-
-    async def incr(self, key):
-        self.kv[key] = str(int(self.kv.get(key, b"0")) + 1).encode()
-        return int(self.kv[key])
-
-    async def expire(self, key, seconds):
-        pass
 
 
 def _join_factory(shared_result):

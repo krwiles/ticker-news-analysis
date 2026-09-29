@@ -262,7 +262,12 @@ async def search_status(
     # Same case-normalization as search() above.
     ticker = ticker.upper()
     # Trigger a background refresh check -- its enqueue call itself is awaited (a quick Redis
-    # round trip), but never its eventual result (ADR 0018). Never blocks or slows this response.
-    await enqueue_background_fetch(arq_redis, ticker, datetime.now(timezone.utc))
+    # round trip), but never its eventual result (ADR 0018).
+    try:
+        await enqueue_background_fetch(arq_redis, ticker, datetime.now(timezone.utc))
+    except Exception as exc:  # noqa: BLE001 - logged and swallowed, same discipline as jobs.py's own
+        # A hiccup here (a Redis blip, say) must never turn an otherwise-healthy poll into a 500 --
+        # spec 0007's "never causes visible errors" promise applies to this trigger too.
+        log.warning("search_status.background_check_failed", ticker=ticker, error=f"{type(exc).__name__}: {exc}")
     days, sentiment_status = await _load_search_results(ticker, session_factory)
     return {"sentiment": sentiment_status, "days": days}

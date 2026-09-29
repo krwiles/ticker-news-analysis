@@ -6,6 +6,7 @@ in, never read internally, matching recent_headlines_cutoff's own testable-purit
 
 from datetime import datetime, timedelta, timezone
 
+from fakes import FakeRedisKV
 from ticker_backend.rate_limit import (
     FETCH_COOLDOWN_SECONDS,
     FINNHUB_RATE_LIMIT_PER_MINUTE,
@@ -14,32 +15,9 @@ from ticker_backend.rate_limit import (
 )
 
 
-class _FakeRedis:
-    """get() returns bytes, not str -- matching the real redis-py client (ADR 0016's own
-    established fact, and the exact bug this exposed live: datetime.fromisoformat() rejects
-    bytes, and every fake in this codebase returning plain str missed it)."""
-
-    def __init__(self):
-        self.store: dict[str, bytes] = {}
-
-    async def get(self, key):
-        return self.store.get(key)
-
-    async def set(self, key, value, ex=None):
-        self.store[key] = str(value).encode()
-
-    async def incr(self, key):
-        self.store[key] = str(int(self.store.get(key, b"0")) + 1).encode()
-        return int(self.store[key])
-
-    async def expire(self, key, seconds):
-        # TTL isn't modeled -- these tests only care about the counted value, same as test_auth.py.
-        pass
-
-
 async def test_first_check_for_a_ticker_never_defers():
     # Arrange: nothing recorded yet for this ticker or this window.
-    redis = _FakeRedis()
+    redis = FakeRedisKV()
     now = datetime(2026, 9, 29, 12, 0, 0, tzinfo=timezone.utc)
 
     # Act.
@@ -52,7 +30,7 @@ async def test_first_check_for_a_ticker_never_defers():
 
 async def test_defers_when_the_shared_window_is_at_capacity():
     # Arrange: the shared Finnhub window already has 60 recorded calls this minute.
-    redis = _FakeRedis()
+    redis = FakeRedisKV()
     now = datetime(2026, 9, 29, 12, 0, 10, tzinfo=timezone.utc)
     for _ in range(FINNHUB_RATE_LIMIT_PER_MINUTE):
         await record_finnhub_fetch(redis, "MSFT", now)
@@ -67,7 +45,7 @@ async def test_defers_when_the_shared_window_is_at_capacity():
 
 async def test_a_fresh_window_is_not_capped_by_the_previous_one():
     # Arrange: the window a minute ago was maxed out.
-    redis = _FakeRedis()
+    redis = FakeRedisKV()
     earlier = datetime(2026, 9, 29, 12, 0, 30, tzinfo=timezone.utc)
     for _ in range(FINNHUB_RATE_LIMIT_PER_MINUTE):
         await record_finnhub_fetch(redis, "MSFT", earlier)
@@ -83,7 +61,7 @@ async def test_a_fresh_window_is_not_capped_by_the_previous_one():
 
 async def test_defers_a_ticker_fetched_too_recently_even_with_budget_free():
     # Arrange: AAPL was just fetched a second ago; the shared window has plenty of room.
-    redis = _FakeRedis()
+    redis = FakeRedisKV()
     now = datetime(2026, 9, 29, 12, 0, 0, tzinfo=timezone.utc)
     await record_finnhub_fetch(redis, "AAPL", now)
 
@@ -97,7 +75,7 @@ async def test_defers_a_ticker_fetched_too_recently_even_with_budget_free():
 
 async def test_cooldown_expiring_lets_the_ticker_run_again():
     # Arrange: AAPL was fetched exactly at the cooldown boundary.
-    redis = _FakeRedis()
+    redis = FakeRedisKV()
     now = datetime(2026, 9, 29, 12, 0, 0, tzinfo=timezone.utc)
     await record_finnhub_fetch(redis, "AAPL", now)
 
@@ -113,7 +91,7 @@ async def test_cooldown_expiring_lets_the_ticker_run_again():
 
 async def test_one_tickers_calls_dont_affect_another_tickers_cooldown():
     # Arrange: AAPL fetched just now; MSFT has never been fetched.
-    redis = _FakeRedis()
+    redis = FakeRedisKV()
     now = datetime(2026, 9, 29, 12, 0, 0, tzinfo=timezone.utc)
     await record_finnhub_fetch(redis, "AAPL", now)
 

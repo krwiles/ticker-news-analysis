@@ -9,6 +9,7 @@ import pytest
 import respx
 from sqlalchemy import select
 
+from fakes import FakeRedisKV
 from ticker_backend.config import derive_sentiment_enum
 from ticker_backend.models import Company, Headline, Story
 from ticker_backend.providers import (
@@ -122,38 +123,20 @@ async def test_finnhub_key_travels_in_a_header_never_the_url(monkeypatch):
     assert "fake-finnhub-key" not in str(request.url)
 
 
-class _FakeRedis:
-    # bytes, not str -- matching the real redis-py client (see rate_limit.py's own bug this caught).
-    def __init__(self):
-        self.store: dict[str, bytes] = {}
-
-    async def get(self, key):
-        return self.store.get(key)
-
-    async def set(self, key, value, ex=None):
-        self.store[key] = str(value).encode()
-
-    async def incr(self, key):
-        self.store[key] = str(int(self.store.get(key, b"0")) + 1).encode()
-        return int(self.store[key])
-
-    async def expire(self, key, seconds):
-        pass
-
 
 @respx.mock
 async def test_finnhub_call_records_a_fetch_for_the_rate_limiter():
     # Arrange: a fake redis, standing in for the shared rate-limit connection (ADR 0018).
     respx.get("https://finnhub.io/api/v1/company-news").mock(return_value=httpx.Response(200, json=[]))
-    redis = _FakeRedis()
+    redis = FakeRedisKV()
 
     # Act.
     async with httpx.AsyncClient() as client:
         await fetch_finnhub_news(client, ticker="AAPL", redis=redis)
 
     # Assert: the shared window counter and this ticker's own cooldown timestamp both got recorded.
-    assert redis.store["finnhub_calls:" + datetime.now(timezone.utc).strftime("%Y%m%dT%H%M")] == b"1"
-    assert "last_fetch:AAPL" in redis.store
+    assert redis.kv["finnhub_calls:" + datetime.now(timezone.utc).strftime("%Y%m%dT%H%M")] == b"1"
+    assert "last_fetch:AAPL" in redis.kv
 
 
 @respx.mock

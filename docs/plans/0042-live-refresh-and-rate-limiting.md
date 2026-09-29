@@ -87,3 +87,27 @@ each real successful poll, and pausing while the tab is genuinely backgrounded (
 `enqueue_background_fetch`'s `_defer_by` wiring, the Finnhub-call recording, the `job.status()` branch in
 `/api/search`, `/api/search/status`'s background trigger, the frontend visibility-pause logic, and the
 refresh-counter reset logic.
+
+### Code review fixes
+
+A background review of the diff found five real issues, all fixed, TDD'd, and deliberate-break checked where
+correctness was at stake:
+
+- **`search_status()`'s background trigger had no exception handling.** A Redis blip during the rate-limit
+  check would have turned a healthy poll into a 500 -- exactly the "never causes visible errors" promise spec
+  0007 makes. Wrapped in the same swallow-and-log pattern `jobs.py`'s own `enqueue_sentiment_after_fetch`
+  already established, with a new regression test (`test_search_status_survives_a_background_check_that_blows_up`).
+- **A real frontend race: an overlapping refocus check could apply a stale response.** `stopPolling()` only
+  clears the timer, never an already-in-flight fetch, so backgrounding then quickly refocusing could let an
+  older poll's response resolve *after* a newer one and silently overwrite it. Fixed with a `latestRequestId`
+  guard (discard any response that isn't from the most recently started call), proven with a new test that
+  resolves two controlled promises out of order.
+- **`enqueue_background_fetch` had no inline step comments**, unlike its near-identical sibling
+  `enqueue_or_join_fetch` two lines above it. Added, matching the existing convention.
+- **The "last refresh" ticker re-rendered the whole results tree every second** for a one-line string. Extracted
+  into its own `RefreshIndicator` component (with its own small test file) so only that line re-renders.
+- **Four test files each reimplemented the same fake-Redis bytes-encoding logic.** Extracted into a shared
+  `tests/fakes.py::FakeRedisKV`, with the ARQ-flavored fakes in `test_jobs.py`/`test_search_endpoint.py`
+  inheriting from it instead of duplicating it.
+
+137/137 backend tests, 106/106 frontend tests after these fixes.

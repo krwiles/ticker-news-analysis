@@ -54,15 +54,16 @@ async def enqueue_background_fetch(
 ) -> Job:
     """Like enqueue_or_join_fetch, but for a background-refresh check only (search.py's
     /api/search/status) -- /api/search itself never calls this, so an explicit search is never
-    subject to the defer below (ADR 0018). Defers the *whole* job via ARQ's native _defer_by when
-    this ticker is on cooldown or the shared Finnhub window is full, rather than letting it run and
-    skipping just the Finnhub call inside it -- a deferred job is guaranteed to actually run later,
-    on the same deterministic ID, so a concurrent caller still joins it exactly as ADR 0015 describes."""
+    subject to the defer below (ADR 0018)."""
+    # Check the shared Finnhub budget and this ticker's own cooldown before enqueuing at all.
     should_defer, defer_by = await should_defer_fetch(arq_redis, ticker, now)
+    # Same deterministic ID fetch jobs always use, so ADR 0015's join behavior applies whether
+    # deferred or not -- defers the *whole* job, never just the Finnhub call inside it.
     job_id = fetch_job_id(ticker)
     job = await arq_redis.enqueue_job(
         "fetch_headlines_job", ticker, _job_id=job_id, _defer_by=defer_by if should_defer else None
     )
+    # ID already taken -- another caller's fetch (running or already deferred) is in flight, so join it.
     if job is None:
         job = job_factory(job_id, redis=arq_redis)
     return job
