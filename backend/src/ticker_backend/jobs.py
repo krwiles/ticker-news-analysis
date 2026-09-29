@@ -15,6 +15,7 @@ from sqlalchemy import update
 from ticker_backend.config import recent_headlines_cutoff, settings
 from ticker_backend.db import async_session_factory
 from ticker_backend.models import Headline
+from ticker_backend.rate_limit import should_defer_fetch
 
 log = structlog.get_logger()
 
@@ -43,6 +44,25 @@ async def enqueue_or_join_fetch(arq_redis: ArqRedis, ticker: str, job_factory=Jo
     job = await arq_redis.enqueue_job("fetch_headlines_job", ticker, _job_id=job_id)
 
     # ID already taken -- another caller's fetch is in flight, so join it rather than start a second.
+    if job is None:
+        job = job_factory(job_id, redis=arq_redis)
+    return job
+
+
+async def enqueue_background_fetch(
+    arq_redis: ArqRedis, ticker: str, now: datetime, job_factory=Job
+) -> Job:
+    """Like enqueue_or_join_fetch, but for a background-refresh check only (search.py's
+    /api/search/status) -- /api/search itself never calls this, so an explicit search is never
+    subject to the defer below (ADR 0018). Defers the *whole* job via ARQ's native _defer_by when
+    this ticker is on cooldown or the shared Finnhub window is full, rather than letting it run and
+    skipping just the Finnhub call inside it -- a deferred job is guaranteed to actually run later,
+    on the same deterministic ID, so a concurrent caller still joins it exactly as ADR 0015 describes."""
+    should_defer, defer_by = await should_defer_fetch(arq_redis, ticker, now)
+    job_id = fetch_job_id(ticker)
+    job = await arq_redis.enqueue_job(
+        "fetch_headlines_job", ticker, _job_id=job_id, _defer_by=defer_by if should_defer else None
+    )
     if job is None:
         job = job_factory(job_id, redis=arq_redis)
     return job

@@ -36,7 +36,8 @@ async def fetch_headlines_job(ctx: dict, ticker: str) -> dict:
     """Thin ARQ wrapper — the actual logic stays framework-agnostic in
     providers.py so it's callable directly from a test (lesson 9) or, later,
     from a cron_jobs entry for the future watchlist feature."""
-    result = await fetch_and_persist_headlines(ticker)
+    # ctx["redis"] threads through to the shared Finnhub rate limit (ADR 0018).
+    result = await fetch_and_persist_headlines(ticker, redis=ctx["redis"])
     # Sentiment starts only once this job's own fetch+grouping is truly done (plan 0036) --
     # never from search(), which can't know when a background-run job finishes.
     await enqueue_sentiment_after_fetch(ctx["redis"], ticker)

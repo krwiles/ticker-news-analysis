@@ -13,12 +13,13 @@ from zoneinfo import ZoneInfo
 import structlog
 from arq import ArqRedis, create_pool
 from arq.connections import RedisSettings
+from arq.jobs import JobStatus
 from fastapi import APIRouter, Depends, FastAPI, Request
 from sqlalchemy import select
 
 from ticker_backend.config import derive_sentiment_enum, recent_headlines_cutoff, settings
 from ticker_backend.db import async_session_factory
-from ticker_backend.jobs import enqueue_or_join_fetch
+from ticker_backend.jobs import enqueue_background_fetch, enqueue_or_join_fetch
 from ticker_backend.models import Headline, Story
 
 log = structlog.get_logger()
@@ -214,11 +215,16 @@ async def search(
     try:
         # Start lesson 7's fetch job -- or join the one already running for this ticker (ADR 0015) -- and wait for it.
         job = await enqueue_or_join_fetch(arq_redis, ticker)
-        result = await job.result(timeout=settings.job_timeout_seconds)
-        # Pull the job's own status, per-provider detail, and grouping outcome out of its result.
-        status = result["status"]
-        providers_status = result["providers"]
-        grouping_status = result["grouping"]
+        # A background check may have deferred this job's ID (ADR 0018) -- never wait on that,
+        # fall straight to the existing-data fallback below, same as a failure.
+        if await job.status() == JobStatus.deferred:
+            status = "complete_failure"
+        else:
+            result = await job.result(timeout=settings.job_timeout_seconds)
+            # Pull the job's own status, per-provider detail, and grouping outcome out of its result.
+            status = result["status"]
+            providers_status = result["providers"]
+            grouping_status = result["grouping"]
     except Exception as exc:  # noqa: BLE001 - timeout or unexpected job failure both surface the same way
         # asyncio.TimeoutError carries no message (str(exc) is empty) -- the
         # exception's own type is the only thing that says what happened.
@@ -244,13 +250,19 @@ async def search(
 
 
 @router.get("/api/search/status")
-async def search_status(ticker: str, session_factory=Depends(get_session_factory)) -> dict:
-    """Read-only -- no fetch_headlines_job or sentiment_job enqueue, just current Postgres state
-    (lesson 26/ADR 0014). The frontend's poll loop calls this, not /api/search itself, so polling
-    for sentiment doesn't re-trigger a full EDGAR/Finnhub/embeddings/grouping pass on every tick.
-    No status/providers/grouping in the response -- those only ever exist as the fetch job's own
-    return value, never persisted, so there's nothing here to report them from."""
+async def search_status(
+    ticker: str, session_factory=Depends(get_session_factory), arq_redis: ArqRedis = Depends(get_arq_redis)
+) -> dict:
+    """Never *awaits* a fetch -- the response always comes from current Postgres state (lesson
+    26/ADR 0014) -- but it does now *trigger* one in the background (ADR 0018), rate-limited via
+    jobs.py's enqueue_background_fetch. This is what live-refresh (spec 0007) polls, not
+    /api/search itself, so a tick never re-triggers a full EDGAR/Finnhub/embeddings/grouping pass
+    synchronously. No status/providers/grouping in the response -- those only ever exist as the
+    fetch job's own return value, never persisted, so there's nothing here to report them from."""
     # Same case-normalization as search() above.
     ticker = ticker.upper()
+    # Trigger a background refresh check -- its enqueue call itself is awaited (a quick Redis
+    # round trip), but never its eventual result (ADR 0018). Never blocks or slows this response.
+    await enqueue_background_fetch(arq_redis, ticker, datetime.now(timezone.utc))
     days, sentiment_status = await _load_search_results(ticker, session_factory)
     return {"sentiment": sentiment_status, "days": days}

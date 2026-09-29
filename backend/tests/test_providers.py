@@ -122,6 +122,51 @@ async def test_finnhub_key_travels_in_a_header_never_the_url(monkeypatch):
     assert "fake-finnhub-key" not in str(request.url)
 
 
+class _FakeRedis:
+    # bytes, not str -- matching the real redis-py client (see rate_limit.py's own bug this caught).
+    def __init__(self):
+        self.store: dict[str, bytes] = {}
+
+    async def get(self, key):
+        return self.store.get(key)
+
+    async def set(self, key, value, ex=None):
+        self.store[key] = str(value).encode()
+
+    async def incr(self, key):
+        self.store[key] = str(int(self.store.get(key, b"0")) + 1).encode()
+        return int(self.store[key])
+
+    async def expire(self, key, seconds):
+        pass
+
+
+@respx.mock
+async def test_finnhub_call_records_a_fetch_for_the_rate_limiter():
+    # Arrange: a fake redis, standing in for the shared rate-limit connection (ADR 0018).
+    respx.get("https://finnhub.io/api/v1/company-news").mock(return_value=httpx.Response(200, json=[]))
+    redis = _FakeRedis()
+
+    # Act.
+    async with httpx.AsyncClient() as client:
+        await fetch_finnhub_news(client, ticker="AAPL", redis=redis)
+
+    # Assert: the shared window counter and this ticker's own cooldown timestamp both got recorded.
+    assert redis.store["finnhub_calls:" + datetime.now(timezone.utc).strftime("%Y%m%dT%H%M")] == b"1"
+    assert "last_fetch:AAPL" in redis.store
+
+
+@respx.mock
+async def test_finnhub_call_with_no_redis_still_works_unchanged():
+    # Arrange: the default call shape every existing test already uses -- no rate-limit tracking at all.
+    respx.get("https://finnhub.io/api/v1/company-news").mock(return_value=httpx.Response(200, json=[]))
+
+    # Act + Assert: no redis argument is required, and nothing raises.
+    async with httpx.AsyncClient() as client:
+        articles = await fetch_finnhub_news(client, ticker="AAPL")
+    assert articles == []
+
+
 @respx.mock
 async def test_finnhub_403_raises_typed_error(test_session_factory):
     # Mock an auth failure.

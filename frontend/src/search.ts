@@ -64,15 +64,6 @@ export interface SearchStatusResponse {
   days: DayGroup[];
 }
 
-// True while any Headline still has sentiment_status === null -- the real "more coming" signal, not
-// the coarse `sentiment` status (which reports "error" on one failure while others still resolve).
-export function hasPendingSentiment(days: DayGroup[]): boolean {
-  return days.some((day) =>
-    day.stories.some(
-      (story) => story.primary.sentiment_status === null || story.other_members.some((h) => h.sentiment_status === null),
-    ),
-  );
-}
 
 export async function fetchSearch(ticker: string): Promise<SearchResponse> {
   // Same cross-origin shape as fetchHealth -- api's CORS config (main.py) already allows this origin.

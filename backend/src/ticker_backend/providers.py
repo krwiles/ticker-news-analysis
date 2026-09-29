@@ -21,6 +21,7 @@ from ticker_backend.config import settings
 from ticker_backend.db import async_session_factory
 from ticker_backend.milvus_client import STORY_PRIMARIES_COLLECTION, ensure_story_primaries_collection, get_milvus_client
 from ticker_backend.models import Company, Headline, Story
+from ticker_backend.rate_limit import record_finnhub_fetch
 
 # Must come after the ticker_backend imports above -- pymilvus's own import unconditionally
 # loads this repo's root .env, corrupting DATABASE_URL. Same landmine as health.py's, verified live.
@@ -161,11 +162,13 @@ async def fetch_edgar_filings(client: httpx.AsyncClient, cik: str | None, ticker
     return filings
 
 
-async def fetch_finnhub_news(client: httpx.AsyncClient, ticker: str) -> list[dict]:
+async def fetch_finnhub_news(client: httpx.AsyncClient, ticker: str, redis=None) -> list[dict]:
     """Finnhub's real /company-news response, verified live: `source` is the
     original outlet (e.g. "Yahoo"), `summary` is a ready-made blurb. The
     `related` field is NOT used to filter -- verified it isn't a reliable
-    "genuinely about this ticker" signal (see spec 0001's Non-goals)."""
+    "genuinely about this ticker" signal (see spec 0001's Non-goals).
+    `redis` is optional -- omitted, this records nothing for the shared rate
+    limit (ADR 0018); the real worker always passes it (ctx["redis"])."""
     # Same trailing 7-day window as EDGAR's.
     to_date = datetime.now(timezone.utc).date()
     from_date = to_date - timedelta(days=7)
@@ -177,6 +180,10 @@ async def fetch_finnhub_news(client: httpx.AsyncClient, ticker: str) -> list[dic
     }
     # The key goes in a header, not a query param -- httpx logs full URLs, which would print it (ADR 0017).
     headers = {"X-Finnhub-Token": settings.finnhub_api_key}
+    # Record the attempt itself, before knowing the outcome -- a failed call still counts
+    # against the shared budget and this ticker's cooldown (ADR 0018).
+    if redis is not None:
+        await record_finnhub_fetch(redis, ticker, datetime.now(timezone.utc))
     # Call Finnhub's company-news endpoint.
     try:
         response = await client.get("https://finnhub.io/api/v1/company-news", params=params, headers=headers)
@@ -346,10 +353,13 @@ async def _assign_stories(
     return "ok"
 
 
-async def fetch_and_persist_headlines(ticker: str, session_factory=async_session_factory, milvus=None) -> dict:
+async def fetch_and_persist_headlines(
+    ticker: str, session_factory=async_session_factory, milvus=None, redis=None
+) -> dict:
     """Fetch EDGAR + Finnhub concurrently, persist the results, report what
     happened. Framework-agnostic (ADR 0004) so tests can call it directly.
-    `milvus` threads through to _assign_stories, injectable same as `session_factory`."""
+    `milvus` threads through to _assign_stories, injectable same as `session_factory`.
+    `redis` threads through to fetch_finnhub_news for the shared rate limit (ADR 0018)."""
     # Normalize so every downstream lookup/write uses the same casing.
     ticker = ticker.upper()
 
@@ -368,7 +378,7 @@ async def fetch_and_persist_headlines(ticker: str, session_factory=async_session
         # one provider failing doesn't cancel the other's in-flight request.
         edgar_result, finnhub_result = await asyncio.gather(
             fetch_edgar_filings(client, company.cik, ticker),
-            fetch_finnhub_news(client, ticker),
+            fetch_finnhub_news(client, ticker, redis=redis),
             return_exceptions=True,
         )
 
