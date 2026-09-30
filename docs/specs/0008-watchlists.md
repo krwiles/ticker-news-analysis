@@ -13,9 +13,9 @@ live count of headlines published since they last viewed that ticker's own page.
 ## Problem / motivation
 
 Today there's no way to keep tabs on a ticker without repeatedly re-searching it, and no signal for whether
-anything new has shown up on a ticker someone cares about. The left sidebar, present on every page, is currently
-empty and reserved for exactly this. This spec gives signed-in users a lightweight way to track a small set of
-tickers and see, at a glance, which of them have something new to look at.
+anything new has shown up on a ticker someone cares about. This spec gives signed-in users a lightweight way to
+track a small set of tickers, in a new left sidebar present on every page, and see at a glance which of them
+have something new to look at.
 
 ## Goals
 
