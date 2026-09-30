@@ -30,6 +30,12 @@
   Official docs for `verify_oauth2_token`, used in `auth.py`'s `_verify_google_credential` (ADR 0016). The
   installed package's own docstring was the source that caught both real exception types it can raise —
   worth checking directly rather than trusting a tutorial's simplified try/except.
+- [Roy Fielding's dissertation — Chapter 5, §5.1.3 "Stateless"](https://ics.uci.edu/~fielding/pubs/dissertation/rest_arch_style.htm)
+  The original source defining REST's stateless constraint. Verified directly (2026-09-30) rather than trusted from memory — the exact quote ("each request... cannot take advantage of any stored context on the server") is what lesson 40 builds its "stateless ≠ sessionless" distinction on.
+- [OWASP Session Management Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Session_Management_Cheat_Sheet.html)
+  Session-ID-in-cookie pattern (never store session data in the cookie itself) and the HttpOnly/Secure/SameSite attribute rationale. Use for: `auth.py`'s session cookie design (ADR 0016), lesson 40.
+- [MDN — `RequestInit.credentials`](https://developer.mozilla.org/en-US/docs/Web/API/RequestInit#credentials)
+  Confirmed directly (2026-09-30): the fetch spec's default is `"same-origin"`, not `"omit"` — cookies ride automatically same-origin, cross-origin needs `"include"` explicitly. Use for: why `auth.ts`/`search.ts` pass `credentials: "include"`.
 - [OWASP Secrets Management Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Secrets_Management_Cheat_Sheet.html)
   The primary source for lessons 38-39: lifecycle (create/rotate/revoke/expire), least privilege, container injection, CI/CD hardening, and the revoke-rotate-clean-investigate incident order. Use for: the "why" behind every secrets decision in ADR 0017.
 - [Docker Compose — use secrets](https://docs.docker.com/compose/how-tos/use-secrets/)

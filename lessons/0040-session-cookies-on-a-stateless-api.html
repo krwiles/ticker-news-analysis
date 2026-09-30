@@ -1,0 +1,186 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 40 — Session Cookies on a Stateless API</title>
+<link rel="stylesheet" href="../assets/lesson.css">
+</head>
+<body>
+<div class="lesson">
+
+  <p class="eyebrow">Lesson 40 · ticker-news-analysis stack (session auth — Arc 7, prompted by ADR 0019's watchlists design)</p>
+  <h1>Session cookies on a stateless API: how a REST endpoint knows who's asking</h1>
+  <p class="subtitle">The question that stopped the watchlists design cold: "our endpoints are REST, doesn't that mean they're stateless? How can <code>/api/search</code> know I'm signed in?" This is the answer — general enough to carry into any REST API, then grounded in exactly how this app does it.</p>
+
+  <div class="callout">
+    <p>
+      <strong>Stateless does not mean sessionless.</strong> It means the <em>server</em> keeps no memory of a
+      client between requests. It says nothing about whether a request can carry identity — it says every
+      request must carry everything the server needs, because the server won't remember it from last time.
+      A cookie riding on every request is exactly that: identity the client brings, not state the server
+      recalls.
+    </p>
+  </div>
+
+  <h2>What "stateless" actually says — from the source that coined it</h2>
+  <p>
+    REST's stateless constraint comes from Roy Fielding's 2000 dissertation, the original source every later
+    description of REST ultimately traces back to. Its own words:
+  </p>
+  <blockquote>
+    "Each request from client to server must contain all of the information necessary to understand the
+    request, and cannot take advantage of any stored context on the server. Session state is therefore kept
+    entirely on the client."
+  </blockquote>
+  <p>
+    Read literally, that sounds like it rules out sessions entirely — "session state... kept entirely on the
+    client" sounds like no server-side session store is allowed. But look at what the constraint is actually
+    protecting against: a server that remembers something from request #1 and silently uses it to interpret
+    request #2, without request #2 saying so itself. That's the failure mode statelessness exists to prevent —
+    not "no identity," but "hidden, unstated context." A request that explicitly says "here is my session
+    cookie, go look up what it means" states its own context in full. Nothing is hidden; nothing is assumed
+    from a prior request. The server doing a fresh lookup on every single request, rather than remembering who
+    you are from the last one, <em>is</em> the stateless behavior — not a violation of it.
+  </p>
+
+  <h2>How this app actually does it</h2>
+  <p>
+    ADR 0016 picked a server-side session store over the other common option (a self-contained signed token,
+    e.g. a JWT) — and the reason is worth sitting with, because it's the actual trade-off every REST API
+    authentication scheme makes:
+  </p>
+  <blockquote>
+    "A signed cookie needs no server-side storage but can never be revoked early — the only lever is rotating
+    the signing secret, which logs out everyone at once. Redis is already running here for ARQ; a session
+    lookup is one cheap Redis round-trip, and it buys real per-session revocation."
+  </blockquote>
+  <p>
+    A signed JWT is the purer expression of Fielding's ideal: the token itself carries everything (who you
+    are, when it expires, a signature proving nobody tampered with it), so the server needs zero storage to
+    trust it. But that purity has a cost — a valid-looking signature stays valid until it expires, full stop.
+    Revoking one early means maintaining a server-side blocklist, which quietly reintroduces the exact
+    server-side state a "stateless token" was supposed to avoid. This app instead stores an opaque, meaningless
+    session ID in the cookie and keeps the meaning in Redis — a `session:{id}` key pointing at the signed-in
+    user's `sub`, with a sliding TTL refreshed on every authenticated request:
+  </p>
+  <pre><code>async def _resolve_session(redis, session_id: str) -> str | None:
+    sub = await redis.get(f"session:{session_id}")
+    if sub is None:
+        return None
+    await redis.expire(f"session:{session_id}", SESSION_TTL_SECONDS)  # sliding window
+    return sub.decode() if isinstance(sub, bytes) else sub</code></pre>
+  <p>
+    Every one of this app's authenticated requests pays the cost of exactly one Redis <code>GET</code> — that's
+    the whole price of "stateless," done right: cheap, explicit, and never dependent on the server remembering
+    anything from a previous request.
+  </p>
+
+  <h2>Why a cross-origin fetch needs <code>credentials: "include"</code></h2>
+  <p>
+    This app's UI (<code>localhost:3000</code>) and API (<code>localhost:8000</code>) are different
+    <strong>origins</strong> (ADR 0002) — but the same <strong>site</strong>, since <code>SameSite</code>'s
+    definition ignores port entirely. Those are two separate concepts a fetch call has to satisfy, not one:
+  </p>
+  <ul>
+    <li><strong>Site</strong> governs whether the cookie is sent <em>at all</em> under its
+      <code>SameSite</code> attribute — same-site here, so <code>SameSite=Lax</code> already permits it.</li>
+    <li><strong>Origin</strong> governs whether the browser's <code>fetch()</code> call itself is even allowed
+      to attach cookies, independent of the cookie's own attributes. Per the Fetch spec's own default,
+      <code>fetch()</code>'s <code>credentials</code> option defaults to <code>"same-origin"</code> — cookies
+      ride along for same-origin requests automatically, but a cross-origin call sends none unless the caller
+      explicitly opts in with <code>credentials: "include"</code>.</li>
+  </ul>
+  <p>
+    So even though the cookie itself is perfectly willing to travel (same-site), the browser still won't attach
+    it to a cross-origin request unless asked. That's why <code>frontend/src/auth.ts</code> passes
+    <code>credentials: "include"</code> explicitly on every call — and why, on the server side,
+    <code>main.py</code>'s CORS config has to answer in kind with <code>allow_credentials=True</code> and a
+    specific origin (never a wildcard — browsers refuse credentialed requests to <code>*</code>). Both sides
+    have to agree, or the cookie never makes the trip in either direction.
+  </p>
+
+  <h2>Hands-on: two dependencies, not one</h2>
+  <p>
+    Watchlists (ADR 0019, built right after this lesson was requested) needed "who's signed in" in two
+    genuinely different shapes. Four endpoints (add/remove/list a watchlist entry) must outright refuse a
+    signed-out caller. But <code>/api/search</code> wanted to <em>optionally</em> record a view for a
+    signed-in visitor, without ever blocking an anonymous one — this app's search has always worked for
+    everyone, watchlists or not. One dependency can't do both, so this ADR factors the existing
+    <code>/api/auth/me</code> lookup into two:
+  </p>
+  <pre><code>async def require_user(request, session_factory, arq_redis) -> User:
+    """401s if there's no valid session -- for endpoints that need a signed-in caller."""
+    ...
+
+async def optional_user(request, session_factory, arq_redis) -> User | None:
+    """None if there's no valid session, never raises -- for callers that work either way."""
+    ...</code></pre>
+  <p>
+    Both do the exact same stateless-per-request lookup underneath — read the cookie, ask Redis, done. The
+    only difference is what happens when that lookup comes back empty: one treats it as an error, the other
+    treats it as a perfectly normal, expected outcome. That split — same lookup, different failure handling —
+    generalizes to any REST API with both "must be signed in" and "better if signed in" endpoints side by
+    side.
+  </p>
+
+  <h2>Check your understanding</h2>
+
+  <div class="mcq">
+    <p class="q">Q1. A junior developer says: "REST is stateless, so a session-cookie-based API isn't really REST." What's the best response?</p>
+    <button class="opt" data-correct="false" data-why="Statelessness is about what the server remembers between requests, not about whether cookies exist at all.">Correct — any cookie violates the stateless constraint by definition.</button>
+    <button class="opt" data-correct="true" data-why="Fielding's constraint targets hidden server-side memory between requests, not the presence of client-carried identity. A cookie the client sends on every request, resolved fresh each time, states its own context in full.">Not quite — statelessness means the server remembers nothing between requests; a cookie sent every time and resolved fresh each time doesn't violate that.</button>
+    <button class="opt" data-correct="false" data-why="The API is still stateless in Fielding's sense even with sessions -- the fix isn't switching to JWTs, it's understanding what the constraint actually forbids.">Correct, but only a switch to JWTs would fix it.</button>
+  </div>
+
+  <div class="mcq">
+    <p class="q">Q2. Why does resolving a session via a Redis lookup on every request count as "stateless," while the server caching "who's signed in" in a plain Python dict across requests would not?</p>
+    <button class="opt" data-correct="false" data-why="Speed isn't the distinguishing factor -- a slow lookup done the stateless way is still stateless; a fast in-memory cache done the stateful way still isn't.">A Redis lookup is faster, so it doesn't count as real server state.</button>
+    <button class="opt" data-correct="true" data-why="Redis here plays the role of an external, request-independent lookup the client's own request explicitly triggers by presenting its cookie -- nothing is assumed carried over from handling a previous specific request. An in-memory dict keyed by nothing the request provides would be exactly the implicit, unstated context Fielding's constraint targets.">Both requests still explicitly present the session id; Redis is looked up fresh each time rather than assumed from a prior request, unlike an in-memory cache that implicitly remembers.</button>
+    <button class="opt" data-correct="false" data-why="Redis being a separate process from the API server isn't what makes this stateless -- an in-memory dict inside a second separate process would have the identical problem.">Redis runs in a separate process from the API, so it doesn't count as the server's own state.</button>
+  </div>
+
+  <div class="mcq">
+    <p class="q">Q3. <code>frontend/src/auth.ts</code> passes <code>credentials: "include"</code> on every call. What would happen if it were simply omitted?</p>
+    <button class="opt" data-correct="false" data-why="fetch()'s current spec default is \"same-origin\", not \"omit\" -- omitting the option doesn't block same-origin cookies, only cross-origin ones.">Nothing -- "include" has been the default in browsers for years.</button>
+    <button class="opt" data-correct="true" data-why="The default is \"same-origin\": cookies travel automatically for same-origin calls, but a cross-origin call (ui:3000 to api:8000) sends none unless credentials is explicitly set to \"include\".">Since ui and api are different origins, the session cookie would silently stop being sent, and every call would look signed-out.</button>
+    <button class="opt" data-correct="false" data-why="SameSite governs whether the cookie is willing to travel at all based on site, not origin -- fetch's own credentials option is a separate, origin-based gate on top of that, and it's the one that would actually block this.">The request would be rejected outright by the SameSite=Lax attribute on the cookie.</button>
+  </div>
+
+  <div class="mcq">
+    <p class="q">Q4. Why did ADR 0019 introduce <em>two</em> dependencies (<code>require_user</code>, <code>optional_user</code>) instead of one that always returns a nullable <code>User | None</code>?</p>
+    <button class="opt" data-correct="false" data-why="A single nullable-returning dependency is a real, workable alternative -- the actual reason for two is about what each endpoint needs to happen automatically on failure, not about the Redis/session work itself.">Because looking up an optional user requires different Redis calls than looking up a required one.</button>
+    <button class="opt" data-correct="true" data-why="POST/DELETE/GET on a watchlist must 401 immediately when signed out; /api/search must keep working for anonymous visitors exactly as it always has. A single nullable dependency would push that branching into every caller; two dependencies push it into FastAPI's own automatic 401 instead, for the endpoints that want it.">So each endpoint gets the right default for free -- one dependency 401s automatically for endpoints that require sign-in, the other just returns None for endpoints that work either way, without every caller re-implementing that branch.</button>
+    <button class="opt" data-correct="false" data-why="Both dependencies are plain async functions with the exact same signature shape FastAPI already uses elsewhere in this codebase -- there's no framework limitation here.">FastAPI can't inject a nullable dependency, so a second function was structurally required.</button>
+  </div>
+
+  <div class="mcq">
+    <p class="q">Q5. A different app authenticates with a signed JWT bearer token instead of a session cookie, with no server-side session store at all. What capability does it give up compared to this app's approach?</p>
+    <button class="opt" data-correct="false" data-why="A signed JWT is fully stateless by Fielding's own definition -- it's actually the purer expression of the constraint, not a violation of it.">It's no longer a stateless API, since the token has to be verified somehow.</button>
+    <button class="opt" data-correct="true" data-why="A signed token stays valid until it expires, full stop -- there's no server-side record to delete. Real early revocation (a 'log out everywhere' button, an admin forcing someone out) needs either a server-side blocklist (which reintroduces the state a stateless token was meant to avoid) or waiting out a short expiry.">Early, explicit revocation -- a valid JWT can't be un-signed, so "log out this one session right now" needs a blocklist (server-side state again) rather than a single key delete.</button>
+    <button class="opt" data-correct="false" data-why="Cross-origin behavior is governed by how the token is transmitted (a header vs. a cookie) and CORS config, not by whether the server stores session state.">It can no longer work across different origins at all.</button>
+  </div>
+
+  <div class="source">
+    <p class="label">Primary sources</p>
+    <p>
+      <a href="https://ics.uci.edu/~fielding/pubs/dissertation/rest_arch_style.htm">Fielding's dissertation — Chapter 5, §5.1.3 "Stateless"</a> (read this one first — it's short, and it's the actual origin of the term) ·
+      <a href="https://cheatsheetseries.owasp.org/cheatsheets/Session_Management_Cheat_Sheet.html">OWASP — Session Management Cheat Sheet</a> ·
+      <a href="https://developer.mozilla.org/en-US/docs/Web/API/RequestInit#credentials">MDN — <code>RequestInit.credentials</code></a> ·
+      <a href="../docs/adr/0016-user-accounts-technical-approach.md">ADR 0016 — session storage rationale</a> ·
+      <a href="../docs/adr/0019-watchlists.md">ADR 0019 — the require_user/optional_user split</a>
+    </p>
+  </div>
+
+  <p class="ask">Want to walk through a real request in the browser's network tab and watch the cookie actually
+  (not) attach depending on <code>credentials</code>? Or curious how this compares to API-key auth, the other
+  common REST pattern? Ask your teacher (this agent).</p>
+
+  <div class="nav">
+    <a href="0039-building-secrets-management.html">← Lesson 39: building secrets management</a>
+  </div>
+
+</div>
+<script src="../assets/quiz.js"></script>
+</body>
+</html>
