@@ -3,18 +3,24 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { App } from "./App";
 
-// Rendering App also mounts StatusPage, whose real fetchHealth() call needs stubbing too.
+// Rendering App also mounts StatusPage (fetchHealth) and Layout (fetchMe, ADR 0019) --
+// each needs its own real-shaped stub, not one blanket response (a shared shape let a real bug through).
 beforeEach(() => {
   vi.stubGlobal(
     "fetch",
-    vi.fn().mockResolvedValue({
-      ok: true,
-      json: async () => ({
-        api: { status: "ok" },
-        db: { status: "ok" },
-        redis: { status: "ok" },
-        worker: { status: "ok" },
-      }),
+    vi.fn((url: string) => {
+      if (url.includes("/api/auth/me")) {
+        return Promise.resolve({ ok: true, json: async () => ({ user: null }) });
+      }
+      return Promise.resolve({
+        ok: true,
+        json: async () => ({
+          api: { status: "ok" },
+          db: { status: "ok" },
+          redis: { status: "ok" },
+          worker: { status: "ok" },
+        }),
+      });
     }),
   );
 });

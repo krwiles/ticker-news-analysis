@@ -14,13 +14,14 @@ import structlog
 from arq import ArqRedis, create_pool
 from arq.connections import RedisSettings
 from arq.jobs import JobStatus
-from fastapi import APIRouter, Depends, FastAPI, Request
+from fastapi import APIRouter, Depends, FastAPI
 from sqlalchemy import select
 
+from ticker_backend.auth import optional_user
 from ticker_backend.config import derive_sentiment_enum, recent_headlines_cutoff, settings
-from ticker_backend.db import async_session_factory
+from ticker_backend.deps import get_arq_redis, get_session_factory
 from ticker_backend.jobs import enqueue_background_fetch, enqueue_or_join_fetch
-from ticker_backend.models import Headline, Story
+from ticker_backend.models import Headline, Story, User, WatchlistEntry
 
 log = structlog.get_logger()
 router = APIRouter()
@@ -40,19 +41,6 @@ async def api_lifespan(app: FastAPI):
     yield
     await app.state.arq_redis.aclose()
 
-
-async def get_arq_redis(request: Request) -> ArqRedis:
-    """FastAPI dependency — real requests get api_lifespan's pool; lesson
-    10's tests override this to avoid needing a real Redis connection for
-    endpoint tests that don't care about the job layer."""
-    return request.app.state.arq_redis
-
-
-def get_session_factory():
-    """FastAPI dependency, not a plain default -- FastAPI introspects path
-    operation parameters, and a bare async_sessionmaker breaks that.
-    Depends() injects it without being treated as request data."""
-    return async_session_factory
 
 
 def _headline_to_dict(headline: Headline) -> dict:
@@ -197,16 +185,38 @@ async def _load_search_results(ticker: str, session_factory) -> tuple[list[dict]
     return days, sentiment_status
 
 
+async def _record_view_if_watchlisted(session_factory, user: User | None, ticker: str) -> None:
+    """Upserts last_viewed_at on a signed-in user's existing watchlist entry for this
+    ticker -- never creates one (ADR 0019: only a ticker already on the watchlist has its
+    count affected by a view). Swallowed/logged on failure, same discipline as jobs.py's
+    enqueue_sentiment_after_fetch -- a hiccup here must never turn a healthy search into an
+    error."""
+    if user is None:
+        return
+    try:
+        async with session_factory() as session:
+            entry = await session.get(WatchlistEntry, (user.sub, ticker))
+            if entry is not None:
+                entry.last_viewed_at = datetime.now(timezone.utc)
+                await session.commit()
+    except Exception as exc:  # noqa: BLE001 - swallowed and logged, see docstring
+        log.warning("search.view_record_failed", ticker=ticker, error=f"{type(exc).__name__}: {exc}")
+
+
 @router.get("/api/search")
 async def search(
     ticker: str,
     arq_redis: ArqRedis = Depends(get_arq_redis),
     session_factory=Depends(get_session_factory),
+    user: User | None = Depends(optional_user),
 ) -> dict:
     """See the module docstring for the two-step shape. Ticker
     case-normalization happens here, once -- the frontend deliberately
     doesn't uppercase before calling this."""
     ticker = ticker.upper()
+    # Watchlists (ADR 0019): a signed-in visitor's own view of this ticker resets their
+    # watchlist entry's count, if they have one -- never gates or slows the search itself.
+    await _record_view_if_watchlisted(session_factory, user, ticker)
 
     # Default in case the job below never returns a real result at all.
     providers_status: dict[str, str] = {}

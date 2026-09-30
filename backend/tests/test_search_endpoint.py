@@ -12,8 +12,9 @@ from arq.jobs import JobStatus
 
 from fakes import FakeRedisKV
 
+from ticker_backend.auth import SESSION_COOKIE_NAME
 from ticker_backend.main import app
-from ticker_backend.models import Company, Headline, Story
+from ticker_backend.models import Company, Headline, Story, User, WatchlistEntry
 from ticker_backend.search import _compute_sentiment_status, get_arq_redis, get_session_factory
 
 
@@ -383,4 +384,126 @@ async def test_search_status_includes_per_headline_and_story_sentiment(test_sess
 
     assert story_dict["sentiment_average"] == 64.0
     assert story_dict["sentiment_enum"] == "neutral"
+
+
+async def _sign_in(client: AsyncClient, redis: FakeRedisKV, sub: str) -> None:
+    # A direct Redis write, matching auth.py's own session:{id} -> sub shape -- not a full
+    # Google sign-in round trip, which is already covered by test_auth.py.
+    session_id = f"test-session-{sub}"
+    await redis.set(f"session:{session_id}", sub)
+    client.cookies.set(SESSION_COOKIE_NAME, session_id)
+
+
+def _success_job() -> _FakeJob:
+    return _FakeJob(result={"status": "success", "providers": {}, "grouping": "skipped"})
+
+
+async def test_search_records_a_view_for_a_signed_in_user_with_a_matching_watchlist_entry(test_session_factory):
+    """ADR 0019: a signed-in user's own view of a watchlisted ticker resets that entry's
+    last_viewed_at, which is what its "new since last viewed" count is computed from."""
+    await _seed_headline(test_session_factory, "MSFT", "A headline", "https://example.com/wl-1")
+    async with test_session_factory() as session:
+        await session.merge(User(sub="user-1"))
+        old = datetime(2020, 1, 1, tzinfo=timezone.utc)
+        session.add(WatchlistEntry(user_sub="user-1", ticker="MSFT", added_at=old, last_viewed_at=old))
+        await session.commit()
+
+    redis = _FakeArqRedis(_success_job())
+    app.dependency_overrides[get_session_factory] = lambda: test_session_factory
+    app.dependency_overrides[get_arq_redis] = lambda: redis
+    try:
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            await _sign_in(client, redis, "user-1")
+            response = await client.get("/api/search", params={"ticker": "MSFT"})
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    async with test_session_factory() as session:
+        entry = await session.get(WatchlistEntry, ("user-1", "MSFT"))
+    assert entry.last_viewed_at > old
+
+
+async def test_search_does_not_create_an_entry_for_a_ticker_not_on_the_watchlist(test_session_factory):
+    """A signed-in user searching a ticker they haven't watchlisted must not gain a
+    watchlist entry as a side effect -- only an existing entry's view is ever recorded.
+    A real companies row exists for MSFT (it's been searched before, just never
+    watchlisted) so a broken auto-create wouldn't be accidentally masked by the ticker FK
+    rejecting the insert outright -- caught by a deliberate break that a companies-less
+    ticker let through silently."""
+    await _seed_headline(test_session_factory, "MSFT", "A headline", "https://example.com/wl-3")
+    async with test_session_factory() as session:
+        await session.merge(User(sub="user-1"))
+        await session.commit()
+
+    redis = _FakeArqRedis(_success_job())
+    app.dependency_overrides[get_session_factory] = lambda: test_session_factory
+    app.dependency_overrides[get_arq_redis] = lambda: redis
+    try:
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            await _sign_in(client, redis, "user-1")
+            response = await client.get("/api/search", params={"ticker": "MSFT"})
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    async with test_session_factory() as session:
+        entry = await session.get(WatchlistEntry, ("user-1", "MSFT"))
+    assert entry is None
+
+
+async def test_search_view_recording_survives_a_broken_session_factory(test_session_factory):
+    """ADR 0019: a hiccup recording the view must never turn an otherwise-healthy search
+    into a failure -- same swallow-and-log discipline as jobs.py's own
+    enqueue_sentiment_after_fetch. Forced by handing the view-recording step a session
+    factory that raises, while the endpoint's own data load still uses the real one."""
+    await _seed_headline(test_session_factory, "MSFT", "A headline", "https://example.com/wl-2")
+    async with test_session_factory() as session:
+        await session.merge(User(sub="user-1"))
+        old = datetime(2020, 1, 1, tzinfo=timezone.utc)
+        session.add(WatchlistEntry(user_sub="user-1", ticker="MSFT", added_at=old, last_viewed_at=old))
+        await session.commit()
+
+    class _BrokenSessionFactory:
+        def __call__(self):
+            return self
+
+        async def __aenter__(self):
+            raise RuntimeError("db hiccup")
+
+        async def __aexit__(self, *args):
+            return False
+
+    from ticker_backend import search as search_module
+
+    original_record = search_module._record_view_if_watchlisted
+
+    async def _broken_record(session_factory, user, ticker):
+        # Exercises the real function's own try/except with a factory engineered to raise,
+        # rather than swapping in a fake that skips the function's own error handling.
+        return await original_record(_BrokenSessionFactory(), user, ticker)
+
+    redis = _FakeArqRedis(_success_job())
+    app.dependency_overrides[get_session_factory] = lambda: test_session_factory
+    app.dependency_overrides[get_arq_redis] = lambda: redis
+    try:
+        search_module._record_view_if_watchlisted = _broken_record
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            await _sign_in(client, redis, "user-1")
+            response = await client.get("/api/search", params={"ticker": "MSFT"})
+    finally:
+        search_module._record_view_if_watchlisted = original_record
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    body = response.json()
+    today = next(d for d in body["days"] if d["is_today"])
+    assert today["stories"][0]["primary"]["title"] == "A headline"
+    # The broken factory means the view was never actually recorded -- still 200, not 500.
+    async with test_session_factory() as session:
+        entry = await session.get(WatchlistEntry, ("user-1", "MSFT"))
+    assert entry.last_viewed_at == old
 

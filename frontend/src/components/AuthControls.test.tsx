@@ -4,15 +4,18 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { AuthControls } from "./AuthControls";
 import type { AuthUser } from "../auth";
 
-// Stubs the fetch boundary for both endpoints AuthControls calls -- same shape as
-// search.test.ts's per-URL fetch stub, one level below the module it's testing.
-function stubFetch(currentUser: AuthUser | null) {
+// Stubs the fetch boundary for endpoints AuthControls calls directly (re-fetching /api/auth/me
+// after sign-in, and signOut) -- the initial signed-in/out state is now passed in as a prop.
+function stubFetch(meUser: AuthUser | null) {
   const mockFetch = vi.fn((url: string, init?: RequestInit) => {
     if (url.includes("/api/auth/me")) {
-      return Promise.resolve({ ok: true, json: async () => ({ user: currentUser }) });
+      return Promise.resolve({ ok: true, json: async () => ({ user: meUser }) });
     }
     if (url.includes("/api/auth/logout") && init?.method === "POST") {
       return Promise.resolve({ ok: true, json: async () => ({ ok: true }) });
+    }
+    if (url.includes("/api/auth/google") && init?.method === "POST") {
+      return Promise.resolve({ ok: true, json: async () => meUser });
     }
     throw new Error(`unexpected fetch to ${url}`);
   });
@@ -49,86 +52,88 @@ describe("AuthControls", () => {
     delete window.google;
   });
 
-  it("does not show a sign-out control while signed out", async () => {
-    // Arrange: the initial /api/auth/me check reports signed-out.
-    stubFetch(null);
+  it("does not show a sign-out control while signed out", () => {
+    // Act: rendered with user=null, as Layout would once its own check resolves signed-out.
+    render(<AuthControls user={null} onSignedIn={vi.fn()} onSignedOut={vi.fn()} />);
 
-    // Act.
-    render(<AuthControls />);
-
-    // Assert: settles into the signed-out view -- window.google isn't defined in jsdom, so
-    // GIS's own button never renders either, just an empty container, not a crash.
-    await waitFor(() => expect(screen.queryByRole("button", { name: /sign out/i })).not.toBeInTheDocument());
+    // Assert: window.google isn't defined in jsdom, so GIS's own button never renders
+    // either, just an empty container, not a crash.
+    expect(screen.queryByRole("button", { name: /sign out/i })).not.toBeInTheDocument();
   });
 
-  it("shows the signed-in user's name and a sign-out control", async () => {
-    // Arrange: a real signed-in user comes back from /api/auth/me.
-    stubFetch({ email: "a@example.com", name: "Ada Lovelace", picture_url: "https://img/a.png" });
+  it("shows the signed-in user's name and a sign-out control", () => {
+    // Arrange: rendered with a real signed-in user, as Layout would pass it down.
+    const user: AuthUser = { email: "a@example.com", name: "Ada Lovelace", picture_url: "https://img/a.png" };
 
     // Act.
-    const { container } = render(<AuthControls />);
+    const { container } = render(<AuthControls user={user} onSignedIn={vi.fn()} onSignedOut={vi.fn()} />);
 
     // Assert: name and sign-out button both appear. Queried via the container, not
     // getByRole("img") -- alt="" deliberately removes it from the accessibility tree.
-    expect(await screen.findByText("Ada Lovelace")).toBeInTheDocument();
+    expect(screen.getByText("Ada Lovelace")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /sign out/i })).toBeInTheDocument();
     expect(container.querySelector("img")).toHaveAttribute("src", "https://img/a.png");
   });
 
-  it("omits the profile picture when picture_url is null", async () => {
+  it("omits the profile picture when picture_url is null", () => {
     // Arrange: a signed-in user with no picture (a real, valid Google response shape).
-    stubFetch({ email: "a@example.com", name: "Ada Lovelace", picture_url: null });
+    const user: AuthUser = { email: "a@example.com", name: "Ada Lovelace", picture_url: null };
 
     // Act.
-    const { container } = render(<AuthControls />);
+    const { container } = render(<AuthControls user={user} onSignedIn={vi.fn()} onSignedOut={vi.fn()} />);
 
     // Assert: name still renders, but there's no broken/empty <img>.
-    expect(await screen.findByText("Ada Lovelace")).toBeInTheDocument();
+    expect(screen.getByText("Ada Lovelace")).toBeInTheDocument();
     expect(container.querySelector("img")).not.toBeInTheDocument();
   });
 
-  it("returns to the signed-out view after clicking Sign out", async () => {
+  it("calls onSignedOut after a real sign-out request succeeds", async () => {
     // Arrange: starts signed in.
-    const mockFetch = stubFetch({ email: "a@example.com", name: "Ada Lovelace", picture_url: null });
+    const mockFetch = stubFetch(null);
+    const onSignedOut = vi.fn();
     const user = userEvent.setup();
-    render(<AuthControls />);
-    await screen.findByRole("button", { name: /sign out/i });
+    const authUser: AuthUser = { email: "a@example.com", name: "Ada Lovelace", picture_url: null };
+    render(<AuthControls user={authUser} onSignedIn={vi.fn()} onSignedOut={onSignedOut} />);
 
     // Act: click Sign out.
     await user.click(screen.getByRole("button", { name: /sign out/i }));
 
-    // Assert: the real logout endpoint was called, and local state flips back to signed-out.
+    // Assert: the real logout endpoint was called, and the parent was told to clear its state.
     expect(mockFetch).toHaveBeenCalledWith(expect.stringContaining("/api/auth/logout"), expect.objectContaining({ method: "POST" }));
-    await waitFor(() => expect(screen.queryByRole("button", { name: /sign out/i })).not.toBeInTheDocument());
+    await waitFor(() => expect(onSignedOut).toHaveBeenCalledTimes(1));
   });
 
-  it("removes GIS's own injected button once signed in, not just React's own markup", async () => {
-    // Arrange: starts signed out; signing in flips /api/auth/me's later answer to a real user.
-    let signedIn = false;
-    vi.stubGlobal(
-      "fetch",
-      vi.fn((url: string, init?: RequestInit) => {
-        if (url.includes("/api/auth/google") && init?.method === "POST") {
-          signedIn = true;
-          return Promise.resolve({ ok: true, json: async () => ({ email: "a@example.com", name: "Ada Lovelace", picture_url: null }) });
-        }
-        if (url.includes("/api/auth/me")) {
-          const user = signedIn ? { email: "a@example.com", name: "Ada Lovelace", picture_url: null } : null;
-          return Promise.resolve({ ok: true, json: async () => ({ user }) });
-        }
-        throw new Error(`unexpected fetch to ${url}`);
-      }),
-    );
+  it("calls onSignedIn with the re-fetched user once GIS's own button fires", async () => {
+    // Arrange: rendered signed-out; GIS's button fires a credential once clicked.
+    const signedInUser: AuthUser = { email: "a@example.com", name: "Ada Lovelace", picture_url: null };
+    stubFetch(signedInUser);
+    const onSignedIn = vi.fn();
     const gis = stubGoogleIdentity();
-    render(<AuthControls />);
+    render(<AuthControls user={null} onSignedIn={onSignedIn} onSignedOut={vi.fn()} />);
     await screen.findByText("Sign in with Google (fake)");
 
     // Act: simulate GIS's real button firing its callback with a credential.
     await waitFor(() => gis.signIn("fake-jwt"));
 
+    // Assert: the parent is told about the newly signed-in user -- re-fetched from
+    // /api/auth/me, not trusted directly from the sign-in response (ADR 0016's own reasoning).
+    await waitFor(() => expect(onSignedIn).toHaveBeenCalledWith(signedInUser));
+  });
+
+  it("removes GIS's own injected button once the parent re-renders with a signed-in user", () => {
+    // Arrange: starts signed out.
+    const { rerender } = render(<AuthControls user={null} onSignedIn={vi.fn()} onSignedOut={vi.fn()} />);
+    stubGoogleIdentity();
+    rerender(<AuthControls user={null} onSignedIn={vi.fn()} onSignedOut={vi.fn()} />);
+
+    // Act: the parent (Layout) learns the user signed in and passes the new prop down --
+    // this component itself never causes this transition, it only reacts to it.
+    const signedInUser: AuthUser = { email: "a@example.com", name: "Ada Lovelace", picture_url: null };
+    rerender(<AuthControls user={signedInUser} onSignedIn={vi.fn()} onSignedOut={vi.fn()} />);
+
     // Assert: the profile view appears, and GIS's own injected node -- inserted directly into
     // the DOM, outside React's own children -- is actually gone, not left behind underneath it.
-    expect(await screen.findByText("Ada Lovelace")).toBeInTheDocument();
+    expect(screen.getByText("Ada Lovelace")).toBeInTheDocument();
     expect(screen.queryByText("Sign in with Google (fake)")).not.toBeInTheDocument();
   });
 });

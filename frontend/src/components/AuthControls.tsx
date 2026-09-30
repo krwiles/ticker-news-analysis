@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef } from "react";
 import { fetchMe, signInWithGoogle, signOut, type AuthUser } from "../auth";
 import { GOOGLE_CLIENT_ID } from "../config";
 
@@ -15,35 +15,21 @@ declare global {
   }
 }
 
-export function AuthControls() {
-  const [user, setUser] = useState<AuthUser | null>(null);
-  const [loaded, setLoaded] = useState(false);
+interface AuthControlsProps {
+  // Lifted up to Layout (ADR 0019) -- the watchlist sidebar needs this same state, so this
+  // component no longer fetches or stores it itself.
+  user: AuthUser | null;
+  onSignedIn: (user: AuthUser) => void;
+  onSignedOut: () => void;
+}
+
+export function AuthControls({ user, onSignedIn, onSignedOut }: AuthControlsProps) {
   const buttonRef = useRef<HTMLDivElement>(null);
 
-  // Establishes initial signed-in/signed-out state -- the cookie is HttpOnly, so a real
-  // request is the only way the frontend can know (spec 0006, ADR 0016).
+  // Renders GIS's own button whenever signed out -- its script tag (index.html) loads
+  // independently of React, so it simply doesn't render if not ready yet.
   useEffect(() => {
-    let cancelled = false;
-    fetchMe()
-      .then((res) => {
-        if (!cancelled) setUser(res.user);
-      })
-      .catch(() => {
-        // A failed check is treated the same as signed-out, never a broken page (spec 0006).
-        if (!cancelled) setUser(null);
-      })
-      .finally(() => {
-        if (!cancelled) setLoaded(true);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  // Renders GIS's own button once the initial check resolves signed-out -- its script tag
-  // (index.html) loads independently of React, so it simply doesn't render if not ready yet.
-  useEffect(() => {
-    if (loaded && user === null && buttonRef.current && window.google) {
+    if (user === null && buttonRef.current && window.google) {
       window.google.accounts.id.initialize({
         client_id: GOOGLE_CLIENT_ID,
         callback: async (response) => {
@@ -51,22 +37,18 @@ export function AuthControls() {
           // /api/auth/me as the one source of truth rather than trusting this response.
           await signInWithGoogle(response.credential);
           const me = await fetchMe();
-          setUser(me.user);
+          if (me.user) {
+            onSignedIn(me.user);
+          }
         },
       });
       window.google.accounts.id.renderButton(buttonRef.current, { theme: "outline", size: "medium" });
     }
-  }, [loaded, user]);
+  }, [user, onSignedIn]);
 
   async function handleSignOut() {
     await signOut();
-    setUser(null);
-  }
-
-  // Nothing renders until the initial check resolves -- avoids a signed-out flash for an
-  // actually-signed-in user, since this shows on every page (spec 0006).
-  if (!loaded) {
-    return null;
+    onSignedOut();
   }
 
   if (user) {
