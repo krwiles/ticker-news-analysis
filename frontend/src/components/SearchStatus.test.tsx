@@ -18,6 +18,12 @@ describe("SearchStatus", () => {
     expect(screen.getByText(/showing previously saved data/i)).toBeInTheDocument();
   });
 
+  it("shows a distinct, non-error message for deferred -- a postponement, not a failure", () => {
+    render(<SearchStatus status="deferred" />);
+    expect(screen.getByText(/waiting for the next scheduled check/i)).toBeInTheDocument();
+    expect(screen.queryByText(/couldn't fetch/i)).not.toBeInTheDocument();
+  });
+
   it("never renders the raw status value itself", () => {
     render(<SearchStatus status="partial_failure" />);
     expect(screen.queryByText("partial_failure")).not.toBeInTheDocument();

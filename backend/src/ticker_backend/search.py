@@ -215,10 +215,10 @@ async def search(
     try:
         # Start lesson 7's fetch job -- or join the one already running for this ticker (ADR 0015) -- and wait for it.
         job = await enqueue_or_join_fetch(arq_redis, ticker)
-        # A background check may have deferred this job's ID (ADR 0018) -- never wait on that,
-        # fall straight to the existing-data fallback below, same as a failure.
+        # A background check may have deferred this job's ID (ADR 0018) -- never wait on that.
+        # Distinct from a real failure: nothing went wrong, it'll run later on its own.
         if await job.status() == JobStatus.deferred:
-            status = "complete_failure"
+            status = "deferred"
         else:
             result = await job.result(timeout=settings.job_timeout_seconds)
             # Pull the job's own status, per-provider detail, and grouping outcome out of its result.
@@ -253,21 +253,41 @@ async def search(
 async def search_status(
     ticker: str, session_factory=Depends(get_session_factory), arq_redis: ArqRedis = Depends(get_arq_redis)
 ) -> dict:
-    """Never *awaits* a fetch -- the response always comes from current Postgres state (lesson
-    26/ADR 0014) -- but it does now *trigger* one in the background (ADR 0018), rate-limited via
-    jobs.py's enqueue_background_fetch. This is what live-refresh (spec 0007) polls, not
-    /api/search itself, so a tick never re-triggers a full EDGAR/Finnhub/embeddings/grouping pass
-    synchronously. No status/providers/grouping in the response -- those only ever exist as the
-    fetch job's own return value, never persisted, so there's nothing here to report them from."""
+    """Never *waits* on a pending fetch -- but it does now *trigger* one in the background (ADR
+    0018), rate-limited via jobs.py's enqueue_background_fetch, and reports that job's real
+    outcome once it's actually complete. Fixes a real bug hit live: /api/search's own
+    "deferred" label used to be the page's last word on status/providers/grouping forever,
+    since this endpoint never refreshed them -- a page could stay stuck looking like a
+    permanent failure even after the deferred fetch went on to succeed. This is what
+    live-refresh (spec 0007) polls, not /api/search itself, so a tick never re-triggers a full
+    EDGAR/Finnhub/embeddings/grouping pass synchronously."""
     # Same case-normalization as search() above.
     ticker = ticker.upper()
-    # Trigger a background refresh check -- its enqueue call itself is awaited (a quick Redis
-    # round trip), but never its eventual result (ADR 0018).
+    # Defaults for when there's nothing fresh to report yet (still pending, or the trigger
+    # itself failed) -- "deferred", not "complete_failure": nothing went wrong.
+    status = "deferred"
+    providers_status: dict[str, str] = {}
+    grouping_status = "unknown"
     try:
-        await enqueue_background_fetch(arq_redis, ticker, datetime.now(timezone.utc))
+        # Trigger a background refresh check -- the enqueue call itself is awaited (a quick
+        # Redis round trip); a still-pending job's eventual result is not (ADR 0018).
+        job = await enqueue_background_fetch(arq_redis, ticker, datetime.now(timezone.utc))
+        if await job.status() == JobStatus.complete:
+            # Already finished (may have settled since an earlier poll) -- bounded, not
+            # unawaited, since the result should already be sitting there, not still running.
+            result = await job.result(timeout=2)
+            status = result["status"]
+            providers_status = result["providers"]
+            grouping_status = result["grouping"]
     except Exception as exc:  # noqa: BLE001 - logged and swallowed, same discipline as jobs.py's own
         # A hiccup here (a Redis blip, say) must never turn an otherwise-healthy poll into a 500 --
         # spec 0007's "never causes visible errors" promise applies to this trigger too.
         log.warning("search_status.background_check_failed", ticker=ticker, error=f"{type(exc).__name__}: {exc}")
     days, sentiment_status = await _load_search_results(ticker, session_factory)
-    return {"sentiment": sentiment_status, "days": days}
+    return {
+        "status": status,
+        "providers": providers_status,
+        "grouping": grouping_status,
+        "sentiment": sentiment_status,
+        "days": days,
+    }
