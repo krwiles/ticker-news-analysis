@@ -115,13 +115,23 @@ export function Layout() {
   }
 
   async function add(ticker: string) {
-    await addToWatchlist(ticker);
-    await refreshWatchlist();
+    try {
+      await addToWatchlist(ticker);
+      await refreshWatchlist();
+    } catch (err) {
+      // Caught rather than left as an unhandled rejection (e.g. the 10-ticker cap, a 404,
+      // a network blip) -- the button/sidebar just stay as they were; logged for visibility.
+      console.error(`Failed to add ${ticker} to watchlist:`, err);
+    }
   }
 
   async function remove(ticker: string) {
-    await removeFromWatchlist(ticker);
-    await refreshWatchlist();
+    try {
+      await removeFromWatchlist(ticker);
+      await refreshWatchlist();
+    } catch (err) {
+      console.error(`Failed to remove ${ticker} from watchlist:`, err);
+    }
   }
 
   return (

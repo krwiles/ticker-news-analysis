@@ -9,10 +9,9 @@ round trip -- these tests are about the watchlist endpoints, not Google sign-in 
 from datetime import datetime, timedelta, timezone
 
 from arq.jobs import JobStatus
-from fakes import FakeRedisKV
+from fakes import FakeRedisKV, sign_in as _sign_in
 from httpx import ASGITransport, AsyncClient
 
-from ticker_backend.auth import SESSION_COOKIE_NAME
 from ticker_backend.main import app
 from ticker_backend.models import Company, Headline, User, WatchlistEntry
 from ticker_backend.search import get_arq_redis, get_session_factory
@@ -78,14 +77,6 @@ async def _seed_watchlist_entry(session_factory, sub: str, ticker: str, last_vie
         now = datetime.now(timezone.utc)
         session.add(WatchlistEntry(user_sub=sub, ticker=ticker, added_at=now, last_viewed_at=last_viewed_at))
         await session.commit()
-
-
-async def _sign_in(client: AsyncClient, redis: FakeRedisKV, sub: str) -> None:
-    # A direct Redis write, matching auth.py's own session:{id} -> sub shape -- not a full
-    # Google sign-in round trip, which is already covered by test_auth.py.
-    session_id = f"test-session-{sub}"
-    await redis.set(f"session:{session_id}", sub)
-    client.cookies.set(SESSION_COOKIE_NAME, session_id)
 
 
 async def test_add_creates_an_entry_for_an_already_known_ticker(test_session_factory):
@@ -155,6 +146,59 @@ async def test_add_is_idempotent_for_an_already_watchlisted_ticker(test_session_
             .all()
         )
     assert len(rows) == 1
+
+
+async def test_add_recovers_from_a_concurrent_duplicate_insert_instead_of_reporting_404(test_session_factory):
+    """A rare race: two near-simultaneous adds for the same (user, ticker) can both pass the
+    'already watchlisted?' check before either commits (neither sees the other's not-yet-committed
+    row). The loser's commit hits the PRIMARY KEY violation, not the ticker FK -- it must recover
+    as an idempotent success, not misreport a perfectly valid, already-watchlisted ticker as 404.
+    Simulated deterministically: a real conflicting row already exists (as if a concurrent request
+    just won), and this request's own "already watchlisted?" check is forced to miss it once,
+    exactly as READ COMMITTED isolation would for two truly concurrent transactions."""
+    await _seed_user(test_session_factory, "user-1")
+    await _seed_company(test_session_factory, "MSFT")
+    now = datetime.now(timezone.utc)
+    await _seed_watchlist_entry(test_session_factory, "user-1", "MSFT", now)
+
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    from ticker_backend import watchlist as watchlist_module
+
+    original_get = AsyncSession.get
+    missed_once = {"done": False}
+
+    async def get_that_misses_once(self, model, ident, *args, **kwargs):
+        if model is watchlist_module.WatchlistEntry and not missed_once["done"]:
+            missed_once["done"] = True
+            return None
+        return await original_get(self, model, ident, *args, **kwargs)
+
+    redis = _FakeArqRedis()
+    app.dependency_overrides[get_session_factory] = lambda: test_session_factory
+    app.dependency_overrides[get_arq_redis] = lambda: redis
+    try:
+        AsyncSession.get = get_that_misses_once
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            await _sign_in(client, redis, "user-1")
+            response = await client.post("/api/watchlist", json={"ticker": "MSFT"})
+    finally:
+        AsyncSession.get = original_get
+        app.dependency_overrides.clear()
+
+    # A false 404 here would be the bug -- MSFT is a real, already-watchlisted ticker.
+    assert response.status_code == 200
+    assert response.json()["ticker"] == "MSFT"
+    async with test_session_factory() as session:
+        from sqlalchemy import select
+
+        rows = (
+            (await session.execute(select(WatchlistEntry).where(WatchlistEntry.user_sub == "user-1")))
+            .scalars()
+            .all()
+        )
+    assert len(rows) == 1  # never duplicated
 
 
 async def test_add_rejects_an_eleventh_ticker(test_session_factory):

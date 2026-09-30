@@ -6,6 +6,7 @@ incremented column (ADR 0019's domain-modeling pass) -- the same reasoning CONTE
 `Today` entry already applies elsewhere in this codebase.
 """
 
+import asyncio
 from datetime import datetime, timezone
 
 import structlog
@@ -54,6 +55,7 @@ async def add_to_watchlist(
     no `companies` row, enforced by the real FK (ADR 0019) rather than a separate
     pre-check -- `companies.ticker` only ever exists once some provider has confirmed the
     ticker is real, same gate `/api/search` itself relies on."""
+    # Normalize case the same way /api/search does, so "msft" and "MSFT" hit one row.
     ticker = body.ticker.upper()
     async with session_factory() as session:
         # Already watchlisted -- return its current state rather than erroring or duplicating.
@@ -62,20 +64,27 @@ async def add_to_watchlist(
             count = await _count_new_headlines(session, ticker, existing.last_viewed_at)
             return _entry_to_dict(existing, count)
 
+        # Enforce the spec's hard cap before inserting an 11th row.
         current_size = await session.scalar(
             select(func.count()).select_from(WatchlistEntry).where(WatchlistEntry.user_sub == user.sub)
         )
         if current_size >= MAX_WATCHLIST_SIZE:
             raise HTTPException(status_code=400, detail=f"Watchlist is full (max {MAX_WATCHLIST_SIZE} tickers)")
 
+        # Insert the new entry, starting its count at 0 (last_viewed_at = now).
         now = datetime.now(timezone.utc)
         entry = WatchlistEntry(user_sub=user.sub, ticker=ticker, added_at=now, last_viewed_at=now)
         session.add(entry)
         try:
             await session.commit()
         except IntegrityError:
-            # The ticker FK rejected this -- no companies row exists for it yet.
+            # Either the ticker FK rejected this, or a concurrent request for the same
+            # (user, ticker) won the race and committed first -- re-check rather than assume.
             await session.rollback()
+            concurrent_entry = await session.get(WatchlistEntry, (user.sub, ticker))
+            if concurrent_entry is not None:
+                count = await _count_new_headlines(session, ticker, concurrent_entry.last_viewed_at)
+                return _entry_to_dict(concurrent_entry, count)
             raise HTTPException(status_code=404, detail="Unknown ticker") from None
 
     return _entry_to_dict(entry, 0)
@@ -88,12 +97,15 @@ async def remove_from_watchlist(
     session_factory=Depends(get_session_factory),
 ) -> dict:
     """Idempotent -- no error if the ticker wasn't watchlisted to begin with."""
+    # Same case-normalization as add/search.
     ticker = ticker.upper()
     async with session_factory() as session:
+        # Look up the entry; deleting only if it actually exists is what makes this idempotent.
         entry = await session.get(WatchlistEntry, (user.sub, ticker))
         if entry is not None:
             await session.delete(entry)
             await session.commit()
+    # Always ok, whether or not there was anything to remove.
     return {"ok": True}
 
 
@@ -108,22 +120,29 @@ async def list_watchlist(
     each watchlisted ticker up for a possible background fetch, exactly like
     /api/search/status already does for one ticker. Safe to call this for up to 10 tickers
     at once: each call independently obeys rate_limit.py's existing per-ticker cooldown and
-    shared Finnhub window, untouched by this endpoint."""
+    shared Finnhub window, untouched by this endpoint. The background-fetch checks below run
+    concurrently, not one at a time -- each is an independent Redis round trip, so awaiting
+    them sequentially would needlessly multiply this endpoint's latency by the watchlist size."""
+    # Load this user's entries, oldest-added first (spec 0008's own add-order).
     async with session_factory() as session:
         rows = await session.execute(
             select(WatchlistEntry).where(WatchlistEntry.user_sub == user.sub).order_by(WatchlistEntry.added_at)
         )
         entries = list(rows.scalars())
+        # Each entry's current "new since last viewed" count, computed read-time.
         result = [
             _entry_to_dict(entry, await _count_new_headlines(session, entry.ticker, entry.last_viewed_at))
             for entry in entries
         ]
 
+    # Offer every entry up for a possible background fetch, concurrently and unawaited by the
+    # caller of this function's own result -- a failure on one ticker never blocks another.
     now = datetime.now(timezone.utc)
-    for entry in entries:
-        try:
-            await enqueue_background_fetch(arq_redis, entry.ticker, now)
-        except Exception as exc:  # noqa: BLE001 - swallowed and logged, same discipline as search_status
-            log.warning("watchlist.background_check_failed", ticker=entry.ticker, error=f"{type(exc).__name__}: {exc}")
+    checks = await asyncio.gather(
+        *(enqueue_background_fetch(arq_redis, entry.ticker, now) for entry in entries), return_exceptions=True
+    )
+    for entry, outcome in zip(entries, checks):
+        if isinstance(outcome, Exception):
+            log.warning("watchlist.background_check_failed", ticker=entry.ticker, error=f"{type(outcome).__name__}: {outcome}")
 
     return {"entries": result}

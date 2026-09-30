@@ -10,9 +10,8 @@ from httpx import ASGITransport, AsyncClient
 
 from arq.jobs import JobStatus
 
-from fakes import FakeRedisKV
+from fakes import FakeRedisKV, sign_in as _sign_in
 
-from ticker_backend.auth import SESSION_COOKIE_NAME
 from ticker_backend.main import app
 from ticker_backend.models import Company, Headline, Story, User, WatchlistEntry
 from ticker_backend.search import _compute_sentiment_status, get_arq_redis, get_session_factory
@@ -384,14 +383,6 @@ async def test_search_status_includes_per_headline_and_story_sentiment(test_sess
 
     assert story_dict["sentiment_average"] == 64.0
     assert story_dict["sentiment_enum"] == "neutral"
-
-
-async def _sign_in(client: AsyncClient, redis: FakeRedisKV, sub: str) -> None:
-    # A direct Redis write, matching auth.py's own session:{id} -> sub shape -- not a full
-    # Google sign-in round trip, which is already covered by test_auth.py.
-    session_id = f"test-session-{sub}"
-    await redis.set(f"session:{session_id}", sub)
-    client.cookies.set(SESSION_COOKIE_NAME, session_id)
 
 
 def _success_job() -> _FakeJob:

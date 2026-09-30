@@ -141,6 +141,24 @@ describe("Layout", () => {
     await waitFor(() => expect(screen.getByText("entry count: 0")).toBeInTheDocument());
   });
 
+  it("survives a failed add without an unhandled rejection, leaving the list unchanged", async () => {
+    fetchMe.mockResolvedValue({ user: { email: "a@example.com", name: "Ada", picture_url: null } });
+    fetchWatchlist.mockResolvedValue({ entries: [] });
+    addToWatchlist.mockRejectedValue(new Error("/api/watchlist responded 400"));
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    renderLayout();
+    await waitFor(() => expect(screen.getByText("entry count: 0")).toBeInTheDocument());
+
+    const user = userEvent.setup();
+    // The test fails on an unhandled rejection if add() doesn't catch this itself.
+    await user.click(screen.getByRole("button", { name: /^add msft$/i }));
+
+    expect(screen.getByText("entry count: 0")).toBeInTheDocument();
+    expect(consoleError).toHaveBeenCalled();
+    consoleError.mockRestore();
+  });
+
   it("does not render the sidebar while signed out", async () => {
     fetchMe.mockResolvedValue({ user: null });
 
