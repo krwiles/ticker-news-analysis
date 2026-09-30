@@ -19,8 +19,9 @@ from ticker_backend.rate_limit import should_defer_fetch
 
 log = structlog.get_logger()
 
-# How long ARQ keeps a finished fetch's result; must be > 0 or a joiner can hit ResultNotFound (ADR 0015).
-FETCH_RESULT_TTL_SECONDS = 5
+# How long ARQ keeps a finished fetch's result -- must outlast both ADR 0015's single-flight
+# join window and a live-refresh poll interval, or a late poll finds it already expired.
+FETCH_RESULT_TTL_SECONDS = 60
 
 
 def fetch_job_id(ticker: str) -> str:
