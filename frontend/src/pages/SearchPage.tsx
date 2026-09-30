@@ -68,11 +68,11 @@ export function SearchPage() {
     async function poll() {
       const requestId = ++latestRequestId;
       try {
-        const status = await fetchSearchStatus(ticker);
-        // Merge only sentiment + days -- /api/search/status doesn't return
-        // ticker/status/providers/grouping, so a full replace would drop them.
+        const polled = await fetchSearchStatus(ticker);
+        // Merge everything but ticker -- status/providers/grouping included, so a "deferred"
+        // page actually updates once the deferred fetch settles, not stuck forever.
         if (!cancelled && requestId === latestRequestId) {
-          setResults((prev) => (prev ? { ...prev, sentiment: status.sentiment, days: status.days } : prev));
+          setResults((prev) => (prev ? { ...prev, ...polled } : prev));
           setLastRefreshAt(Date.now());
         }
       } catch {

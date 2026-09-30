@@ -60,6 +60,9 @@ describe("fetchSearchStatus", () => {
   });
 
   const okResponse: SearchStatusResponse = {
+    status: "success",
+    providers: {},
+    grouping: "ok",
     sentiment: "processing",
     days: [],
   };

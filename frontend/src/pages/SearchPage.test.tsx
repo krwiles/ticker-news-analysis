@@ -73,6 +73,19 @@ function response(overrides: Partial<searchModule.SearchResponse> = {}): searchM
   };
 }
 
+// Same defaults as response() minus ticker -- a poll now refreshes status/providers/grouping
+// too, not just sentiment/days, so every fetchSearchStatus mock needs a full shape.
+function statusResponse(overrides: Partial<searchModule.SearchStatusResponse> = {}): searchModule.SearchStatusResponse {
+  return {
+    status: "success",
+    providers: { edgar: "ok", finnhub: "ok" },
+    grouping: "ok",
+    sentiment: "ok",
+    days: [],
+    ...overrides,
+  };
+}
+
 describe("SearchPage", () => {
   beforeEach(() => {
     fetchSearch.mockReset();
@@ -304,16 +317,44 @@ describe("SearchPage", () => {
       setVisibility("visible");
     });
 
+    it("clears a stuck 'deferred' state once a poll reports the fetch actually succeeded", async () => {
+      // Regression: a page that first loaded mid-cooldown ("deferred") used to stay stuck
+      // forever, since polling only merged sentiment/days, never status/providers/grouping.
+      vi.useFakeTimers({ shouldAdvanceTime: true });
+      fetchSearch.mockResolvedValue(response({ status: "deferred", providers: {}, grouping: "unknown" }));
+      fetchSearchStatus.mockResolvedValue(statusResponse({ status: "success", grouping: "ok" }));
+
+      renderSearchPage(["/search?ticker=AAPL"]);
+      await waitFor(() => {
+        expect(screen.getByText(/waiting for the next scheduled check/i)).toBeInTheDocument();
+      });
+      expect(screen.getByText(/status unknown/i)).toBeInTheDocument();
+
+      // Act: the deferred fetch settles by the next poll tick.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(10000);
+      });
+
+      // Assert: the page reflects the real, current outcome -- not stuck on the initial load's.
+      await waitFor(() => {
+        expect(screen.getByText(/all sources responded/i)).toBeInTheDocument();
+      });
+      expect(screen.getByText(/stories grouped normally/i)).toBeInTheDocument();
+      expect(screen.queryByText(/waiting for the next scheduled check/i)).not.toBeInTheDocument();
+    });
+
     it("polls /api/search/status once results exist, even when every headline is already fully resolved", async () => {
       // Arrange: nothing left to resolve -- the old behavior would never have polled here at all.
       vi.useFakeTimers({ shouldAdvanceTime: true });
       fetchSearch.mockResolvedValue(
         response({ sentiment: "ok", days: dayWith(headline({ sentiment_status: "ok", sentiment_enum: "positive", sentiment_score: 80 })) }),
       );
-      fetchSearchStatus.mockResolvedValue({
-        sentiment: "ok",
-        days: dayWith(headline({ sentiment_status: "ok", sentiment_enum: "positive", sentiment_score: 80 })),
-      });
+      fetchSearchStatus.mockResolvedValue(
+        statusResponse({
+          sentiment: "ok",
+          days: dayWith(headline({ sentiment_status: "ok", sentiment_enum: "positive", sentiment_score: 80 })),
+        }),
+      );
 
       // Act: load via the URL, then fast-forward one poll interval.
       renderSearchPage(["/search?ticker=AAPL"]);
@@ -334,18 +375,20 @@ describe("SearchPage", () => {
       fetchSearch.mockResolvedValue(
         response({ sentiment: "processing", days: dayWith(headline({ title: "Resolved via poll", url: "https://example.com/resolved" })) }),
       );
-      fetchSearchStatus.mockResolvedValue({
-        sentiment: "ok",
-        days: dayWith(
-          headline({
-            title: "Resolved via poll",
-            url: "https://example.com/resolved",
-            sentiment_status: "ok",
-            sentiment_enum: "positive",
-            sentiment_score: 82,
-          }),
-        ),
-      });
+      fetchSearchStatus.mockResolvedValue(
+        statusResponse({
+          sentiment: "ok",
+          days: dayWith(
+            headline({
+              title: "Resolved via poll",
+              url: "https://example.com/resolved",
+              sentiment_status: "ok",
+              sentiment_enum: "positive",
+              sentiment_score: 82,
+            }),
+          ),
+        }),
+      );
 
       // Act: load via the URL, wait for the initial "processing" render.
       renderSearchPage(["/search?ticker=AAPL"]);
@@ -372,10 +415,12 @@ describe("SearchPage", () => {
       // Arrange: same pending -> resolved setup as above.
       vi.useFakeTimers({ shouldAdvanceTime: true });
       fetchSearch.mockResolvedValue(response({ sentiment: "processing", days: dayWith(headline()) }));
-      fetchSearchStatus.mockResolvedValue({
-        sentiment: "ok",
-        days: dayWith(headline({ sentiment_status: "ok", sentiment_enum: "positive", sentiment_score: 80 })),
-      });
+      fetchSearchStatus.mockResolvedValue(
+        statusResponse({
+          sentiment: "ok",
+          days: dayWith(headline({ sentiment_status: "ok", sentiment_enum: "positive", sentiment_score: 80 })),
+        }),
+      );
 
       renderSearchPage(["/search?ticker=AAPL"]);
       await waitFor(() => {
@@ -416,27 +461,29 @@ describe("SearchPage", () => {
           ],
         }),
       );
-      fetchSearchStatus.mockResolvedValue({
-        sentiment: "error",
-        days: [
-          {
-            date: "2026-09-17",
-            is_today: true,
-            stories: [
-              story({ primary: headline({ url: "https://example.com/already-failed", sentiment_status: "error" }) }),
-              story({
-                primary: headline({
-                  url: "https://example.com/still-pending",
-                  title: "Still pending",
-                  sentiment_status: "ok",
-                  sentiment_enum: "neutral",
-                  sentiment_score: 55,
+      fetchSearchStatus.mockResolvedValue(
+        statusResponse({
+          sentiment: "error",
+          days: [
+            {
+              date: "2026-09-17",
+              is_today: true,
+              stories: [
+                story({ primary: headline({ url: "https://example.com/already-failed", sentiment_status: "error" }) }),
+                story({
+                  primary: headline({
+                    url: "https://example.com/still-pending",
+                    title: "Still pending",
+                    sentiment_status: "ok",
+                    sentiment_enum: "neutral",
+                    sentiment_score: 55,
+                  }),
                 }),
-              }),
-            ],
-          },
-        ],
-      });
+              ],
+            },
+          ],
+        }),
+      );
 
       renderSearchPage(["/search?ticker=AAPL"]);
       await waitFor(() => {
@@ -460,7 +507,7 @@ describe("SearchPage", () => {
       // Arrange
       vi.useFakeTimers({ shouldAdvanceTime: true });
       fetchSearch.mockResolvedValue(response({ days: dayWith(headline()) }));
-      fetchSearchStatus.mockResolvedValue({ sentiment: "ok", days: dayWith(headline()) });
+      fetchSearchStatus.mockResolvedValue(statusResponse({ sentiment: "ok", days: dayWith(headline()) }));
 
       renderSearchPage(["/search?ticker=AAPL"]);
       await waitFor(() => {
@@ -491,7 +538,7 @@ describe("SearchPage", () => {
       // Arrange
       vi.useFakeTimers({ shouldAdvanceTime: true });
       fetchSearch.mockResolvedValue(response({ days: dayWith(headline()) }));
-      fetchSearchStatus.mockResolvedValue({ sentiment: "ok", days: dayWith(headline()) });
+      fetchSearchStatus.mockResolvedValue(statusResponse({ sentiment: "ok", days: dayWith(headline()) }));
 
       renderSearchPage(["/search?ticker=AAPL"]);
       await waitFor(() => {
@@ -571,10 +618,10 @@ describe("SearchPage", () => {
 
       // Act: the newer call (#2) resolves first, the older one (#1) resolves after it.
       await act(async () => {
-        resolveSecond({ sentiment: "ok", days: dayWith(headline({ title: "Newer", url: "https://example.com/newer" })) });
+        resolveSecond(statusResponse({ sentiment: "ok", days: dayWith(headline({ title: "Newer", url: "https://example.com/newer" })) }));
       });
       await act(async () => {
-        resolveFirst({ sentiment: "ok", days: dayWith(headline({ title: "Stale", url: "https://example.com/stale" })) });
+        resolveFirst(statusResponse({ sentiment: "ok", days: dayWith(headline({ title: "Stale", url: "https://example.com/stale" })) }));
       });
 
       // Assert: the stale, later-resolving response never overwrites the newer one already applied.
