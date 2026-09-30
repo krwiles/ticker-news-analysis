@@ -1,7 +1,8 @@
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { MemoryRouter } from "react-router";
+import { MemoryRouter, Outlet, Route, Routes } from "react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { WatchlistOutletContext } from "../components/Layout";
 import * as searchModule from "../search";
 import { SearchPage } from "./SearchPage";
 
@@ -18,10 +19,23 @@ vi.mock("../search", async (importOriginal) => {
 const fetchSearch = vi.mocked(searchModule.fetchSearch);
 const fetchSearchStatus = vi.mocked(searchModule.fetchSearchStatus);
 
-function renderSearchPage(initialEntries: string[] = ["/search"]) {
+// Stands in for Layout as a real parent route, exercising the actual Outlet-context wiring
+// (ADR 0019). Defaults to signed-out; watchlist-button tests override it.
+function renderSearchPage(initialEntries: string[] = ["/search"], context: Partial<WatchlistOutletContext> = {}) {
+  const fullContext: WatchlistOutletContext = {
+    isSignedIn: false,
+    entries: [],
+    add: vi.fn(),
+    remove: vi.fn(),
+    ...context,
+  };
   return render(
     <MemoryRouter initialEntries={initialEntries}>
-      <SearchPage />
+      <Routes>
+        <Route element={<Outlet context={fullContext} />}>
+          <Route path="/search" element={<SearchPage />} />
+        </Route>
+      </Routes>
     </MemoryRouter>,
   );
 }
@@ -362,7 +376,7 @@ describe("SearchPage", () => {
         expect(screen.getByText(/analysis complete/i)).toBeInTheDocument();
       });
       await act(async () => {
-        await vi.advanceTimersByTimeAsync(5000);
+        await vi.advanceTimersByTimeAsync(10000);
       });
 
       // Assert: it polled anyway -- live refresh has no "nothing left to check" stop condition.
@@ -399,7 +413,7 @@ describe("SearchPage", () => {
 
       // Fast-forward past one poll interval.
       await act(async () => {
-        await vi.advanceTimersByTimeAsync(5000);
+        await vi.advanceTimersByTimeAsync(10000);
       });
 
       // Assert: the poll fired for the same ticker, and its result (sentiment + days) merged into the page --
@@ -429,13 +443,13 @@ describe("SearchPage", () => {
 
       // Act: advance past the tick that resolves it, then several more intervals' worth of time.
       await act(async () => {
-        await vi.advanceTimersByTimeAsync(5000);
+        await vi.advanceTimersByTimeAsync(10000);
       });
       await waitFor(() => {
         expect(fetchSearchStatus).toHaveBeenCalledTimes(1);
       });
       await act(async () => {
-        await vi.advanceTimersByTimeAsync(20000);
+        await vi.advanceTimersByTimeAsync(40000);
       });
 
       // Assert: polling never stops on its own -- four more intervals means four more calls.
@@ -492,7 +506,7 @@ describe("SearchPage", () => {
 
       // Act: fast-forward one poll interval.
       await act(async () => {
-        await vi.advanceTimersByTimeAsync(5000);
+        await vi.advanceTimersByTimeAsync(10000);
       });
 
       // Assert: the poll fired despite the page reading "error" the whole time, and the second
@@ -517,7 +531,7 @@ describe("SearchPage", () => {
       // Act: background the tab, then let two full poll intervals' worth of time pass.
       setVisibility("hidden");
       await act(async () => {
-        await vi.advanceTimersByTimeAsync(10000);
+        await vi.advanceTimersByTimeAsync(20000);
       });
 
       // Assert: nothing happened while hidden.
@@ -548,16 +562,16 @@ describe("SearchPage", () => {
       // Assert: starts at 0 right after the initial load counts as a refresh.
       expect(screen.getByText("last refresh 0s ago")).toBeInTheDocument();
 
-      // Act: three seconds pass, no poll due yet (interval is 5s).
+      // Act: three seconds pass, no poll due yet (interval is 10s).
       await act(async () => {
         await vi.advanceTimersByTimeAsync(3000);
       });
       expect(screen.getByText("last refresh 3s ago")).toBeInTheDocument();
 
-      // Act: cross the 5s poll interval -- a successful check resets the counter, even though
+      // Act: cross the 10s poll interval -- a successful check resets the counter, even though
       // nothing in the response actually changed.
       await act(async () => {
-        await vi.advanceTimersByTimeAsync(2000);
+        await vi.advanceTimersByTimeAsync(7000);
       });
       expect(screen.getByText("last refresh 0s ago")).toBeInTheDocument();
     });
@@ -577,16 +591,16 @@ describe("SearchPage", () => {
 
       // Act: cross a poll interval where the check fails.
       await act(async () => {
-        await vi.advanceTimersByTimeAsync(5000);
+        await vi.advanceTimersByTimeAsync(10000);
       });
       await waitFor(() => {
         expect(fetchSearchStatus).toHaveBeenCalledTimes(1);
       });
 
       // Assert: results are unaffected, and the counter kept counting up from the last real
-      // success -- 5s since load, none of it reset by the failed check.
+      // success -- 10s since load, none of it reset by the failed check.
       expect(screen.getByRole("link", { name: "Still here" })).toBeInTheDocument();
-      expect(screen.getByText("last refresh 5s ago")).toBeInTheDocument();
+      expect(screen.getByText("last refresh 10s ago")).toBeInTheDocument();
     });
 
     it("discards a stale poll response that resolves after a newer one -- refocus racing an in-flight check", async () => {
@@ -604,10 +618,10 @@ describe("SearchPage", () => {
         expect(screen.getByText(/analysis complete/i)).toBeInTheDocument();
       });
 
-      // Act: the regular 5s poll starts (call #1, left in flight), then a background+refocus
+      // Act: the regular 10s poll starts (call #1, left in flight), then a background+refocus
       // cycle fires an immediate second check (call #2) before call #1 has resolved.
       await act(async () => {
-        await vi.advanceTimersByTimeAsync(5000);
+        await vi.advanceTimersByTimeAsync(10000);
       });
       expect(fetchSearchStatus).toHaveBeenCalledTimes(1);
       setVisibility("hidden");
@@ -627,6 +641,68 @@ describe("SearchPage", () => {
       // Assert: the stale, later-resolving response never overwrites the newer one already applied.
       expect(screen.getByRole("link", { name: "Newer" })).toBeInTheDocument();
       expect(screen.queryByRole("link", { name: "Stale" })).not.toBeInTheDocument();
+    });
+  });
+
+  // The add/remove button (spec 0008): sourced from Layout's shared watchlist state via
+  // useOutletContext(), not a separate fetch -- see renderSearchPage's own context param.
+  describe("watchlist button", () => {
+    it("is absent while signed out, even once results are showing", async () => {
+      fetchSearch.mockResolvedValue(response({ days: dayWith(headline()) }));
+
+      renderSearchPage(["/search?ticker=AAPL"], { isSignedIn: false });
+      await waitFor(() => expect(screen.getByText(/analysis complete/i)).toBeInTheDocument());
+
+      expect(screen.queryByRole("button", { name: /watchlist/i })).not.toBeInTheDocument();
+    });
+
+    it("shows \"Add AAPL to watchlist\" when signed in and the ticker isn't already watchlisted", async () => {
+      fetchSearch.mockResolvedValue(response({ days: dayWith(headline()) }));
+
+      renderSearchPage(["/search?ticker=AAPL"], { isSignedIn: true, entries: [] });
+      await waitFor(() => expect(screen.getByText(/analysis complete/i)).toBeInTheDocument());
+
+      expect(screen.getByRole("button", { name: "Add AAPL to watchlist" })).toBeInTheDocument();
+    });
+
+    it("shows \"Remove AAPL from watchlist\" when the current ticker is already on the watchlist", async () => {
+      fetchSearch.mockResolvedValue(response({ days: dayWith(headline()) }));
+
+      renderSearchPage(["/search?ticker=AAPL"], {
+        isSignedIn: true,
+        entries: [{ ticker: "AAPL", added_at: "2026-09-30T00:00:00Z", new_headlines: 0 }],
+      });
+      await waitFor(() => expect(screen.getByText(/analysis complete/i)).toBeInTheDocument());
+
+      expect(screen.getByRole("button", { name: "Remove AAPL from watchlist" })).toBeInTheDocument();
+    });
+
+    it("calls the context's add() with the current ticker when clicked", async () => {
+      fetchSearch.mockResolvedValue(response({ days: dayWith(headline()) }));
+      const add = vi.fn().mockResolvedValue(undefined);
+      const user = userEvent.setup();
+
+      renderSearchPage(["/search?ticker=AAPL"], { isSignedIn: true, entries: [], add });
+      await waitFor(() => expect(screen.getByText(/analysis complete/i)).toBeInTheDocument());
+      await user.click(screen.getByRole("button", { name: "Add AAPL to watchlist" }));
+
+      expect(add).toHaveBeenCalledWith("AAPL");
+    });
+
+    it("calls the context's remove() with the current ticker when clicked", async () => {
+      fetchSearch.mockResolvedValue(response({ days: dayWith(headline()) }));
+      const remove = vi.fn().mockResolvedValue(undefined);
+      const user = userEvent.setup();
+
+      renderSearchPage(["/search?ticker=AAPL"], {
+        isSignedIn: true,
+        entries: [{ ticker: "AAPL", added_at: "2026-09-30T00:00:00Z", new_headlines: 0 }],
+        remove,
+      });
+      await waitFor(() => expect(screen.getByText(/analysis complete/i)).toBeInTheDocument());
+      await user.click(screen.getByRole("button", { name: "Remove AAPL from watchlist" }));
+
+      expect(remove).toHaveBeenCalledWith("AAPL");
     });
   });
 });

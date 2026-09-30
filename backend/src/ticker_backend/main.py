@@ -15,6 +15,7 @@ from ticker_backend.health import ui_router as ui_health_router
 from ticker_backend.logging import configure_logging
 from ticker_backend.search import api_lifespan
 from ticker_backend.search import router as search_router
+from ticker_backend.watchlist import router as watchlist_router
 
 configure_logging()
 log = structlog.get_logger()
@@ -51,6 +52,8 @@ def create_app() -> FastAPI:
             app.include_router(search_router)
             # /api/auth/* -- Google sign-in, session, sign-out -- see auth.py.
             app.include_router(auth_router)
+            # /api/watchlist -- add/remove/list a signed-in user's tracked tickers -- see watchlist.py.
+            app.include_router(watchlist_router)
         case "ui":
             log.info("app.mode", mode="ui", static_dir=str(STATIC_DIR))
             # Trivial per-container liveness only -- the full aggregate lives on api, see above.

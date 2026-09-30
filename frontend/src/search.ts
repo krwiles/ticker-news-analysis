@@ -64,8 +64,11 @@ export type SearchStatusResponse = Omit<SearchResponse, "ticker">;
 
 
 export async function fetchSearch(ticker: string): Promise<SearchResponse> {
-  // Same cross-origin shape as fetchHealth -- api's CORS config (main.py) already allows this origin.
-  const res = await fetch(`${API_BASE_URL}/api/search?ticker=${encodeURIComponent(ticker)}`);
+  // credentials: "include" (ADR 0019) -- /api/search now optionally records a view for a
+  // signed-in caller's own watchlist entry, which needs the session cookie to ride along.
+  const res = await fetch(`${API_BASE_URL}/api/search?ticker=${encodeURIComponent(ticker)}`, {
+    credentials: "include",
+  });
   // Treat any non-2xx as a failure the caller can catch, rather than
   // returning a body that doesn't match SearchResponse's shape.
   if (!res.ok) {

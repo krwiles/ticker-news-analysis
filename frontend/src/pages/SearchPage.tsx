@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
-import { useSearchParams } from "react-router";
+import { useOutletContext, useSearchParams } from "react-router";
+import type { WatchlistOutletContext } from "../components/Layout";
 import { DaySection } from "../components/DaySection";
 import { GroupingStatus } from "../components/GroupingStatus";
 import { RefreshIndicator } from "../components/RefreshIndicator";
@@ -8,11 +9,12 @@ import { SearchStatus } from "../components/SearchStatus";
 import { SentimentStatus } from "../components/SentimentStatus";
 import { fetchSearch, fetchSearchStatus, type SearchResponse } from "../search";
 
-// Same cadence as StatusPage's own health poll -- no evidence sentiment resolves at a
-// meaningfully different pace, so no reason to invent a different number.
-const STATUS_POLL_INTERVAL_MS = 5000;
+// Bumped from 5000 on adding the watchlist sidebar's own 20s poll -- a tuning adjustment,
+// not a behavior commitment (ADR 0019).
+const STATUS_POLL_INTERVAL_MS = 10000;
 
 export function SearchPage() {
+  const { isSignedIn, entries, add, remove } = useOutletContext<WatchlistOutletContext>();
   const [searchParams, setSearchParams] = useSearchParams();
   const [results, setResults] = useState<SearchResponse | null>(null);
   const [loading, setLoading] = useState(false);
@@ -124,6 +126,21 @@ export function SearchPage() {
     setSearchParams({ ticker: ticker.toUpperCase() });
   }
 
+  // Sourced from Layout's own shared watchlist state (ADR 0019), not a separate fetch --
+  // add/remove mutate that same state, so the sidebar reflects this instantly too.
+  const isWatched = results !== null && entries.some((entry) => entry.ticker === results.ticker);
+
+  async function handleWatchlistToggle() {
+    if (!results) {
+      return;
+    }
+    if (isWatched) {
+      await remove(results.ticker);
+    } else {
+      await add(results.ticker);
+    }
+  }
+
   return (
     <main className="mx-auto max-w-2xl px-6 py-16">
       <h1 className="text-2xl font-semibold text-slate-900 dark:text-slate-100">Search</h1>
@@ -162,6 +179,19 @@ export function SearchPage() {
           <div className="mb-4">
             <SentimentStatus sentiment={results.sentiment} />
           </div>
+
+          {/* Signed-in only (spec 0008 frames watchlists as a signed-in feature entirely) --
+              hidden rather than shown-but-broken for an anonymous visitor. */}
+          {isSignedIn && (
+            <div className="mb-4">
+              <button
+                onClick={handleWatchlistToggle}
+                className="rounded border border-slate-300 px-2 py-1 text-sm text-slate-600 hover:bg-slate-50 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800"
+              >
+                {isWatched ? `Remove ${results.ticker} from watchlist` : `Add ${results.ticker} to watchlist`}
+              </button>
+            </div>
+          )}
 
           {results.days.map((day) => (
             <DaySection key={day.date} day={day} />

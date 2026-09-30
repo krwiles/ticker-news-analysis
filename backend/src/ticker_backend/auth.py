@@ -20,8 +20,8 @@ from google.oauth2 import id_token
 from pydantic import BaseModel
 
 from ticker_backend.config import settings
+from ticker_backend.deps import get_arq_redis, get_session_factory
 from ticker_backend.models import User
-from ticker_backend.search import get_arq_redis, get_session_factory
 
 router = APIRouter()
 
@@ -147,21 +147,46 @@ async def sign_in_with_google(
     return user_dict
 
 
-@router.get("/api/auth/me")
-async def me(
-    request: Request,
-    session_factory=Depends(get_session_factory),
-    arq_redis: ArqRedis = Depends(get_arq_redis),
-) -> dict:
-    # No cookie, an unknown session id, and a session pointing at a deleted user all
-    # collapse to the same signed-out shape -- spec 0006's "never a broken state".
+async def _resolve_current_user(request: Request, session_factory, arq_redis: ArqRedis) -> User | None:
+    """The one lookup require_user/optional_user both share -- cookie -> Redis session -> User
+    row. No cookie, an unknown session id, and a session pointing at a deleted user all
+    collapse to the same `None` -- spec 0006's "never a broken state", extracted here so
+    every caller gets it for free rather than re-deriving it."""
     session_id = request.cookies.get(SESSION_COOKIE_NAME)
     sub = await _resolve_session(arq_redis, session_id) if session_id else None
     if sub is None:
-        return {"user": None}
-
+        return None
     async with session_factory() as session:
-        user = await session.get(User, sub)
+        return await session.get(User, sub)
+
+
+async def require_user(
+    request: Request,
+    session_factory=Depends(get_session_factory),
+    arq_redis: ArqRedis = Depends(get_arq_redis),
+) -> User:
+    """FastAPI dependency for endpoints that only make sense for a signed-in caller (ADR
+    0019) -- raises 401 rather than returning None, so a signed-out request never reaches
+    the endpoint body at all."""
+    user = await _resolve_current_user(request, session_factory, arq_redis)
+    if user is None:
+        raise HTTPException(status_code=401, detail="Sign-in required")
+    return user
+
+
+async def optional_user(
+    request: Request,
+    session_factory=Depends(get_session_factory),
+    arq_redis: ArqRedis = Depends(get_arq_redis),
+) -> User | None:
+    """FastAPI dependency for endpoints that work either way but behave differently once
+    signed in (ADR 0019) -- e.g. /api/search's view-recording side effect. Never raises;
+    signed-out is just None, same as `/api/auth/me` already treated it."""
+    return await _resolve_current_user(request, session_factory, arq_redis)
+
+
+@router.get("/api/auth/me")
+async def me(user: User | None = Depends(optional_user)) -> dict:
     if user is None:
         return {"user": None}
     return {"user": _user_to_dict(user)}
