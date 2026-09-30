@@ -31,7 +31,7 @@ piece of state, not two independent pollers. This codebase has no existing share
 
 | File | Change |
 | --- | --- |
-| `db/migrations/<timestamp>_create_watchlist_entries.sql` (new) | `watchlist_entries(user_sub, ticker, added_at, last_viewed_at)`, composite PK `(user_sub, ticker)`, no FKs (matches this codebase's convention). |
+| `db/migrations/<timestamp>_create_watchlist_entries.sql` (new) | `watchlist_entries(user_sub, ticker, added_at, last_viewed_at)`, composite PK `(user_sub, ticker)`, FKs to `users(sub)` and `companies(ticker)` — matching the real precedent `headlines.ticker → companies.ticker` already sets (ADR 0019's correction). |
 | `backend/src/ticker_backend/models.py` | New `WatchlistEntry` ORM class mirroring the migration. |
 | `backend/src/ticker_backend/auth.py` | Extracts `/api/auth/me`'s inline cookie→session→user lookup into `require_user` (raises `401`) and `optional_user` (returns `None`), both as FastAPI dependencies; `/api/auth/me` refactored to call `optional_user` internally — same response shape, no behavior change. |
 | `backend/src/ticker_backend/watchlist.py` (new) | New router: `POST /api/watchlist`, `DELETE /api/watchlist/{ticker}`, `GET /api/watchlist` (see ADR 0019 for each endpoint's exact contract). |

@@ -15,18 +15,25 @@ one table rather than two:
 
 ```sql
 CREATE TABLE watchlist_entries (
-    user_sub TEXT NOT NULL,
-    ticker TEXT NOT NULL,
+    user_sub TEXT NOT NULL REFERENCES users (sub),
+    ticker TEXT NOT NULL REFERENCES companies (ticker),
     added_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     last_viewed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (user_sub, ticker)
 );
 ```
 
-No foreign keys, matching this codebase's existing no-`relationship()`/no-FK convention (`users.sub` and
-`companies.ticker` are both plain natural-key columns elsewhere). `last_viewed_at` defaults to the same instant
-as `added_at`, so a freshly-added ticker starts at "0 new" rather than reflecting headlines from before it was
-ever watched.
+Real foreign keys, not omitted — an earlier draft of this ADR claimed this codebase has no FK convention at
+all, which turned out to be a mixup: the SQLAlchemy models never declare `ForeignKey()`/`relationship()`
+(checked directly), but the migrations themselves already add real Postgres-level constraints
+(`headlines.ticker → companies.ticker`, `headlines.story_id → stories.id`). `watchlist_entries` follows that
+same precedent, and the `ticker` FK does real work: it's what enforces the "add requires an existing
+`companies` row" rule from the spec/ADR's own goal, at the database, not via a separate existence check the
+app would have to run first (and could race against a concurrent removal of that ticker's data, however
+unlikely at this app's scale). `POST /api/watchlist` catches the resulting `IntegrityError` and translates it
+to the endpoint's `400`/`404`, the same shape a pre-check would have produced, just enforced where it can't be
+bypassed by skipping a step. `last_viewed_at` defaults to the same instant as `added_at`, so a freshly-added
+ticker starts at "0 new" rather than reflecting headlines from before it was ever watched.
 
 Viewing a ticker's page only updates `last_viewed_at` for tickers that already have a row in this table — a
 signed-in user looking at a ticker they haven't watchlisted writes nothing. The count the spec describes
