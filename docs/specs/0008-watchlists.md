@@ -32,8 +32,11 @@ tickers and see, at a glance, which of them have something new to look at.
 - Viewing a ticker's own page — whether reached by clicking it in the sidebar, searching it manually, browser
   back/forward, or a bookmark — resets that ticker's "new since last viewed" count to zero, regardless of which
   path was used to get there.
-- The sidebar's counts stay current on their own, the same way spec 0007 keeps a ticker's own page current —
-  no manual refresh is needed to see an up-to-date count.
+- While the app is open and visible, it periodically checks every watchlisted ticker's count to keep the
+  sidebar current on its own — the same visibility-driven pattern spec 0007 uses for a ticker's own page — with
+  no manual refresh needed. Whether a given check causes a fresh fetch from an external provider, or just reads
+  already-current data, is entirely the backend's call (per spec 0007 / ADR 0018's rate limiting) and never
+  visible to the user either way.
 - The watchlist is hidden entirely for signed-out visitors.
 
 ## Non-goals
@@ -66,6 +69,10 @@ itself, whatever ticker is currently searched shows either "Add SYMBOL to watchl
 watchlist," reflecting whether it's already on the list; clicking it adds or removes the ticker and the sidebar
 updates to match. The list never exceeds 10 tickers; the exact treatment of an attempt to add an 11th (a
 disabled button, an inline message, etc.) is left to implementation rather than committed to as behavior here.
+While any page is open and visible, the sidebar's counts are periodically checked and updated in place with no
+action from the user; switching away or backgrounding the tab pauses this the same way it pauses spec 0007's
+own per-page checks, and the underlying provider fetches those checks may or may not trigger are governed by the
+same shared rate limit, invisibly to the user.
 
 ## Success criteria
 
@@ -79,6 +86,8 @@ disabled button, an inline message, etc.) is left to implementation rather than 
 - Clicking a sidebar row navigates to that ticker's normal page, identical to a manual search for it.
 - The sidebar is entirely absent for signed-out visitors.
 - Sidebar counts reflect reality without the user needing to manually refresh the page.
+- While the app is open and visible, watchlisted tickers' counts are checked and updated periodically on their
+  own; backgrounding the tab pauses this, matching spec 0007's own visibility-driven pattern.
 - The sidebar list order is add-order; removing and re-adding a ticker moves it to the end.
 
 ## Technical approach
