@@ -139,7 +139,9 @@ async def test_search_skips_awaiting_a_deferred_job_and_returns_existing_data(te
     assert response.status_code == 200
     assert result_calls == []  # .result() was never awaited
     body = response.json()
-    assert body["status"] == "complete_failure"
+    # "deferred", not "complete_failure" -- nothing went wrong, it's just postponed. Reusing
+    # the failure label is the exact bug a real user hit: the page looked permanently broken.
+    assert body["status"] == "deferred"
     assert body["providers"] == {}
     assert body["grouping"] == "unknown"
     today = next(d for d in body["days"] if d["is_today"])
@@ -284,10 +286,13 @@ async def test_search_only_enqueues_the_fetch_job(test_session_factory):
     assert fake_redis.enqueued_job_ids == ["fetch_headlines:AAPL"]
 
 
-async def test_search_status_triggers_a_background_check_but_never_awaits_its_result(test_session_factory):
-    """ADR 0018 -- the polling endpoint now triggers a background refresh check (for the shared
-    rate limit's sake), but must never await that check's own eventual result; a fake whose
-    .result() would record a call if ever invoked proves it stays fire-and-forget."""
+async def test_search_status_triggers_a_background_check_but_never_awaits_a_pending_result(test_session_factory):
+    """ADR 0018/0019 -- the polling endpoint triggers a background refresh check (for the
+    shared rate limit's sake), but must never *wait* on a still-pending job's eventual result;
+    a fake whose .result() would record a call if ever invoked proves it stays fire-and-forget
+    for a job that's deferred/queued/in-progress. A separate test covers the complete case,
+    where reading the (already-available) result is exactly the fix for a real bug: without it,
+    a page that first loaded mid-cooldown stayed reporting "deferred" forever."""
     await _seed_headline(test_session_factory, "TSLA", "Polled headline", "https://example.com/poll-1")
 
     result_calls: list[None] = []
@@ -296,7 +301,7 @@ async def test_search_status_triggers_a_background_check_but_never_awaits_its_re
         result_calls.append(None)
         return {}
 
-    job = _FakeJob()
+    job = _FakeJob(status=JobStatus.deferred)
     job.result = _record_call
     redis = _FakeArqRedis(job)
 
@@ -311,11 +316,43 @@ async def test_search_status_triggers_a_background_check_but_never_awaits_its_re
 
     assert response.status_code == 200
     body = response.json()
-    assert set(body.keys()) == {"sentiment", "days"}
+    assert set(body.keys()) == {"status", "providers", "grouping", "sentiment", "days"}
+    # Distinct from "complete_failure" -- nothing went wrong, just nothing settled yet.
+    assert body["status"] == "deferred"
+    assert body["providers"] == {}
+    assert body["grouping"] == "unknown"
     today = next(d for d in body["days"] if d["is_today"])
     assert today["stories"][0]["primary"]["title"] == "Polled headline"
-    assert result_calls == []  # never awaited
+    assert result_calls == []  # never awaited while still pending
     assert redis.enqueued_job_names == ["fetch_headlines_job"]  # but a background check did fire
+
+
+async def test_search_status_reports_the_real_outcome_once_the_background_check_completes(test_session_factory):
+    """The actual bug fix: once the deferred/triggered job has genuinely finished, its real
+    status/providers/grouping are read (an instant, already-available result, not a wait) and
+    reported -- not left frozen on whatever the page's initial load happened to show."""
+    await _seed_headline(test_session_factory, "TSLA", "Polled headline", "https://example.com/poll-2")
+
+    job = _FakeJob(
+        result={"status": "success", "providers": {"edgar": "ok", "finnhub": "ok"}, "grouping": "ok"},
+        status=JobStatus.complete,
+    )
+    redis = _FakeArqRedis(job)
+
+    app.dependency_overrides[get_session_factory] = lambda: test_session_factory
+    app.dependency_overrides[get_arq_redis] = lambda: redis
+    try:
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            response = await client.get("/api/search/status", params={"ticker": "TSLA"})
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "success"
+    assert body["providers"] == {"edgar": "ok", "finnhub": "ok"}
+    assert body["grouping"] == "ok"
 
 
 async def test_search_status_survives_a_background_check_that_blows_up(test_session_factory):
@@ -361,9 +398,10 @@ async def test_search_status_includes_per_headline_and_story_sentiment(test_sess
         story_id=story_id, sentiment_score=46, sentiment_status="ok",
     )
 
-    # ADR 0018: search_status now also depends on get_arq_redis for its background-check trigger.
+    # Not testing the complete-job path here -- keep the fake job pending, not a bare
+    # _FakeJob() whose result() of None would rely on the outer except to paper over it.
     app.dependency_overrides[get_session_factory] = lambda: test_session_factory
-    app.dependency_overrides[get_arq_redis] = lambda: _FakeArqRedis(_FakeJob())
+    app.dependency_overrides[get_arq_redis] = lambda: _FakeArqRedis(_FakeJob(status=JobStatus.deferred))
     try:
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://test") as client:

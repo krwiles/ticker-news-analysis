@@ -9,13 +9,16 @@ const MESSAGE: Record<SearchResponse["status"], string> = {
   success: "All sources responded.",
   partial_failure: "Some results may be missing — one source didn't respond.",
   complete_failure: "Couldn't fetch new results right now — showing previously saved data.",
+  deferred: "Waiting for the next scheduled check — showing previously saved data.",
 };
 
 // Same dot-plus-label shape as StatusTile.tsx, kept separate -- different domain (search status vs. health).
+// deferred gets amber like partial_failure, not red -- it's a postponement, not a failure.
 const DOT_COLOR: Record<SearchResponse["status"], string> = {
   success: "bg-emerald-500",
   partial_failure: "bg-amber-500",
   complete_failure: "bg-red-500",
+  deferred: "bg-amber-500",
 };
 
 export function SearchStatus({ status }: SearchStatusProps) {

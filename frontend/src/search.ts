@@ -46,23 +46,21 @@ export type SentimentStatus = "ok" | "skipped" | "error" | "processing";
 
 export interface SearchResponse {
   ticker: string;
-  // success: all providers ok. partial_failure: some didn't. complete_failure: nothing new fetched.
-  status: "success" | "partial_failure" | "complete_failure";
+  // success: all providers ok. partial_failure: some didn't. complete_failure: a fetch ran and
+  // failed. deferred: rate-limited/cooldown -- nothing went wrong, it'll run later on its own.
+  status: "success" | "partial_failure" | "complete_failure" | "deferred";
   providers: Record<string, string>; // e.g. {"edgar": "ok", "finnhub": "error"} -- per-provider detail behind the one overall `status`
   // Independent of `status` -- a grouping problem is a distinct concern from "did EDGAR/Finnhub respond" (ADR 0012).
-  // "unknown" means the fetch job itself never returned, so grouping's outcome genuinely can't be known.
+  // "unknown" means there's no fetch outcome to report yet, so grouping's own outcome can't be known either.
   grouping: "ok" | "skipped" | "error" | "unknown";
   sentiment: SentimentStatus;
   // Newest day first; Today always present (even with zero Stories), earlier days only when non-empty.
   days: DayGroup[];
 }
 
-// Deliberately narrower than SearchResponse (no ticker/status/providers/grouping -- this endpoint
-// only re-reads sentiment state). A poller must merge these keys in, never replace the object.
-export interface SearchStatusResponse {
-  sentiment: SentimentStatus;
-  days: DayGroup[];
-}
+// Same shape as SearchResponse minus ticker -- a poller merges all of these keys in fresh
+// each time, never replaces the object (ticker itself is the only thing missing here).
+export type SearchStatusResponse = Omit<SearchResponse, "ticker">;
 
 
 export async function fetchSearch(ticker: string): Promise<SearchResponse> {
@@ -79,8 +77,8 @@ export async function fetchSearch(ticker: string): Promise<SearchResponse> {
   return res.json();
 }
 
-// Read-only poll target -- never enqueues fetch_headlines_job or sentiment_job
-// (search.py's search_status route structurally can't; see lesson 26).
+// Poll target -- never *awaits* a pending fetch, but can trigger one rate-limited in the
+// background and report its outcome once complete (ADR 0018).
 export async function fetchSearchStatus(ticker: string): Promise<SearchStatusResponse> {
   const res = await fetch(`${API_BASE_URL}/api/search/status?ticker=${encodeURIComponent(ticker)}`);
   // Treat any non-2xx as a failure the caller can catch, rather than
