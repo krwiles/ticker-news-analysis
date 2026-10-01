@@ -789,11 +789,17 @@ mounted) then a real search + sentiment pass; fix the stale session-signing-key 
    it — a deferred job is guaranteed to actually run later); the manual Refresh button is gone, replaced by a
    silently-updating page and a "last refresh Ns ago" counter. Watchlists (below) builds its own per-ticker
    counts on top of this mechanism, not a new one.
-1. **Watchlists** — a user's single, implicit list of tracked tickers (max 10), shown in the currently-empty
-   left sidebar with a per-ticker "new headlines since last viewed" count; added via an "Add SYMBOL to
-   watchlist" button on the search page itself (so only real, already-resolved tickers can be added — no
-   separate validation path needed); hidden entirely when signed out. Grilled through the live-refresh split
-   above; not yet spec'd as its own doc (would be spec 0008) or planned.
+1. **Watchlists** — ✅ done (2026-09-30/10-01, spec `docs/specs/0008-*.md`, ADR `docs/adr/0019-*.md`, plan
+   `docs/plans/0043-*.md`). A signed-in user's single, implicit list of up to 10 tracked tickers, shown in a
+   new left sidebar with a per-ticker "new since last viewed" count (read-time `COUNT` against a stored
+   `last_viewed_at`, not an incremented column); added via the search page's own "Add/Remove SYMBOL to/from
+   watchlist" button; `Layout` now owns auth identity and watchlist state, shared with child routes via
+   React Router's `Outlet` context so the sidebar and the button stay instantly in sync. Along the way, fixed
+   a real, user-reported bug in spec 0007's own live-refresh (a deferred/rate-limited fetch was permanently
+   indistinguishable from a genuine failure in the UI) and a second bug the fix itself introduced (the fetch
+   job's result TTL was far shorter than any poll interval) — both caught only by live verification, not unit
+   tests. **A further live-refresh oddity logged below, unresolved:** the "last refresh Ns ago" counter
+   sometimes resets early even with the tab genuinely focused, cause not yet found.
 2. **Notifications** — new news on a watchlist, optionally sentiment-filtered; depends on watchlists existing.
 3. **Admin panel (container logs)** — needs a real admin-role concept, which doesn't exist yet (accounts do,
    roles don't) — the smallest new spec among these three, but a real one.
