@@ -6,10 +6,11 @@ import * as authModule from "../auth";
 import * as watchlistModule from "../watchlist";
 import { Layout, type WatchlistOutletContext } from "./Layout";
 
-// Module-mocked one layer up, same shape as SearchPage.test.tsx's own search.ts mock.
+// All three mocked, not just fetchMe -- AuthControls's real "Sign out" button calls the
+// real signOut() otherwise, a genuine fetch() that only CI (no server on :8000) caught.
 vi.mock("../auth", async (importOriginal) => {
   const actual = await importOriginal<typeof authModule>();
-  return { ...actual, fetchMe: vi.fn() };
+  return { ...actual, fetchMe: vi.fn(), signInWithGoogle: vi.fn(), signOut: vi.fn() };
 });
 vi.mock("../watchlist", async (importOriginal) => {
   const actual = await importOriginal<typeof watchlistModule>();
