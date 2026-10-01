@@ -950,6 +950,22 @@ close for this project, so not pursued).
       (`frontend/src/config.ts`), and there's no HTTPS or real CORS origin yet. Needs its own spec/ADR.
   - **Ordering:** the no-tooling steps can happen any time; something proper should be in place *before* the app
     is public or accounts go live, since that's when the sensitive secrets appear.
+- **Potential bug (2026-10-01): live-refresh's "last refresh Ns ago" counter resets early / looks like it
+  freezes, even with the tab reportedly focused the whole time.** Reported live on a real ticker page: the
+  counter sits at "0s ago" for a stretch, then only ever climbs to around "8s ago" before resetting, never
+  reaching a clean "10s ago" (`STATUS_POLL_INTERVAL_MS`). The obvious suspect — spec 0007's deliberate
+  pause-while-hidden behavior (`SearchPage.tsx`'s `visibilitychange` handling, which fires an *immediate*
+  check on refocus rather than waiting for the next tick) — doesn't fit: the user confirmed the tab stayed
+  focused throughout, no window/app switching. I reproduced the pause-while-hidden mechanism itself working
+  exactly as designed (an automated browser tab not holding real OS focus correctly reported
+  `document.visibilityState === "hidden"` and polled zero times over 20+ seconds), which confirms that *part*
+  of the system, but doesn't explain the user's own report where the tab genuinely had focus. Not
+  investigated further yet — candidates for next time: an overlapping/duplicate `setInterval` from the
+  live-refresh effect re-running more than expected, the backend's own per-request latency on
+  `/api/search/status` (now doing more work since the deferred-status fix — checking job status and
+  sometimes reading a job result) pushing the effective cadence down, or something about the browser's own
+  background-tab timer throttling applying even to a tab that looks focused. Needs a real (non-automated)
+  browser session with Network-tab timestamps on `/api/search/status` calls to pin down.
 ## Preferences
 - Wants an example data table created once the spec round produces a real entity to model it on (lesson 6 above), not before — don't front-load schema/domain work into earlier lessons. Satisfied: spec 0001 + `CONTEXT.md` now exist, arc 2 is modeled on them.
 - Confirmed (2026-09-08): prefers small vertical slices over front-loaded theory or a build-everything-then-explain approach — a short concept intro right before building each slice, then verify it against the live stack, then move to the next slice. This is why arc 2 became 6 (now 7) lessons instead of 3.
