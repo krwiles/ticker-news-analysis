@@ -9,6 +9,7 @@ interface SidebarProps {
 // Purely presentational -- Layout owns the state and polling (ADR 0019), and doesn't mount
 // this at all while signed out (spec 0008).
 export function Sidebar({ entries, onRemove }: SidebarProps) {
+  // An empty watchlist renders nothing, same as being signed out (spec 0008).
   if (entries.length === 0) {
     return null;
   }

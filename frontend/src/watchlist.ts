@@ -15,6 +15,8 @@ export interface WatchlistResponse {
 // every endpoint here requires sign-in (require_user, ADR 0019).
 export async function fetchWatchlist(): Promise<WatchlistResponse> {
   const res = await fetch(`${API_BASE_URL}/api/watchlist`, { credentials: "include" });
+  // Treat any non-2xx as a failure the caller can catch, rather than
+  // returning a body that doesn't match WatchlistResponse's shape.
   if (!res.ok) {
     throw new Error(`/api/watchlist responded ${res.status}`);
   }
@@ -30,6 +32,8 @@ export async function addToWatchlist(ticker: string): Promise<WatchlistEntry> {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ ticker }),
   });
+  // Treat any non-2xx as a failure the caller can catch, rather than
+  // returning a body that doesn't match WatchlistEntry's shape.
   if (!res.ok) {
     throw new Error(`/api/watchlist responded ${res.status}`);
   }
@@ -42,6 +46,7 @@ export async function removeFromWatchlist(ticker: string): Promise<void> {
     method: "DELETE",
     credentials: "include",
   });
+  // Treat any non-2xx as a failure the caller can catch -- this call has no body to mismatch.
   if (!res.ok) {
     throw new Error(`/api/watchlist/${ticker} responded ${res.status}`);
   }
