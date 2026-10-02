@@ -68,21 +68,23 @@ The fix: `/api/search` checks `await job.status()` (ARQ's `JobStatus` enum, conf
 `deferred` from `queued`/`in_progress`/`complete`) immediately after getting a job handle, before deciding
 whether to await it:
 
-- **`deferred`** — skip the await entirely. Build the response from current Postgres state immediately, using
-  the same fallback shape already coded for a timed-out/failed job (`providers_status = {}`, `grouping_status
-  = "unknown"`).
+- **`deferred`** — skip the await entirely. Build the response from current Postgres state immediately, with
+  `status = "deferred"` (its own value, distinct from a genuine failure — see the Addendum below) and the same
+  `providers_status = {}`/`grouping_status = "unknown"` fallback shape otherwise.
 - **`queued` / `in_progress`** — await as today, bounded by `job_timeout_seconds`; this means "about to run"
   or "running," not "waiting for a rate-limit window," so the existing wait is still the right call.
 
 **Considered:** always awaiting regardless of status, relying on `job_timeout_seconds` (10s) to bound the wait
 (rejected) — a deferred job can be scheduled well past 10 seconds out, so this would turn a rate-limited
-background poll into a misleading `complete_failure` on an otherwise perfectly healthy, data-having page.
+background poll into a misleadingly labeled failure on an otherwise perfectly healthy, data-having page (this
+is exactly the mislabeling the Addendum below describes finding in practice, from a different code path).
 
 ## Consequences
 
 - **`/api/search/status`'s docstring claim — "no fetch_headlines_job... enqueue, just current Postgres
   state" — is no longer entirely true.** It still never *awaits* a fetch, but it can now *trigger* one in the
-  background. Needs a doc update when this is built so the claim doesn't mislead a future reader.
+  background. **Done** — see the Addendum below, which also covers a real bug this gap in follow-through let
+  ship.
 - **The rate counter protects the app as a whole, not just live-refresh.** Any future caller of the fetch job
   (a scheduled watchlist refresh, per ADR 0004's own anticipated future) automatically gets the same
   protection for free, since the gate lives at the enqueue-for-background-purposes layer, not inside the
@@ -96,3 +98,36 @@ background poll into a misleading `complete_failure` on an otherwise perfectly h
 - **This composes with ADR 0015 without changing it.** The deterministic job ID and the
   enqueue-returns-`None`-so-join-instead behavior are exactly what already existed; deferred execution is just
   a new *score* on the same queue entry, not a new mechanism layered awkwardly on top.
+
+## Addendum (2026-10-01): a deferred check needed its own visible status, not a reused failure label
+
+The gap this ADR's own first Consequence flagged and never closed turned into a real bug: `/api/search` labeled
+a deferred job `"complete_failure"` — the exact same `status` value used for a genuine fetch failure. A page
+loaded (or revisited) while its ticker happened to be on the rate-limit cooldown showed "Couldn't fetch new
+results right now" and stayed showing it *permanently*, even once the deferred fetch went on to succeed —
+because `/api/search/status`'s own poll only ever refreshed `sentiment`/`days`, never `status`/`providers`/
+`grouping`, so nothing could ever correct the mislabeled state. Spec 0007 has been updated to describe the
+fix's actual behavior directly (a postponed check gets its own distinct, non-alarming status, not silence and
+not a failure label) rather than carrying a stale "entirely invisible" guarantee this fix deliberately moved
+away from.
+
+**The fix, in the same two places this ADR already designed:**
+- `/api/search` now returns `status = "deferred"` — a fourth value alongside `success`/`partial_failure`/
+  `complete_failure` — when `job.status() == JobStatus.deferred`, instead of reusing `complete_failure`.
+- `/api/search/status`'s response shape grew: it now also returns `status`/`providers`/`grouping`, not just
+  `sentiment`/`days`. It checks its own triggered job's status, and when that job is actually `complete`,
+  reads its (already-available, non-blocking — not a new wait) result and reports the real outcome; otherwise
+  it reports `"deferred"` with the same `{}`/`"unknown"` fallback `/api/search` uses. The frontend's poll now
+  merges this entire response, not two fields, so a page that loaded mid-cooldown actually updates once the
+  deferred fetch settles instead of being stuck on its first label forever.
+- A second, independent bug surfaced only by live timing, not by any unit test (fakes don't model Redis TTL
+  expiry): `FETCH_RESULT_TTL_SECONDS` was 5 seconds — sized only for ADR 0015's single-flight join window —
+  far shorter than any realistic poll interval, so a poll landing even slightly late after a job actually
+  completed still found its result already expired and fell back to reporting `"deferred"` again. Bumped to 60
+  seconds, comfortably outlasting a poll interval with margin.
+
+**Considered:** reverting to silence (matching the original spec text exactly) instead of adding a visible
+`"deferred"` status (rejected, by explicit preference once both were seen working) — true silence was the
+originally specified behavior, but showing a calm, honest "a check is already scheduled" reads as more
+trustworthy than a page that simply never explains why nothing happened, for a state (rate-limit deferral)
+that's now a routine, expected part of normal operation rather than a rare edge case.

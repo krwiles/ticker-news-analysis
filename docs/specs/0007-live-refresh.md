@@ -33,8 +33,11 @@ frequent *repeated* ones over time).
   or "new" markers in this version.
 - However often this happens, it never causes visible errors, stalls, or degraded behavior — even with many
   pages open across many visitors at once, all sharing the same underlying provider rate limits.
-- A background refresh that fails or is skipped is entirely invisible to the visitor: the page simply keeps
-  showing whatever it last successfully loaded, and quietly tries again later.
+- A background check that fails outright (a network error, a timeout) is entirely invisible: the page simply
+  keeps showing whatever it last successfully loaded, and quietly tries again later.
+- A background check that comes back *postponed* by the shared provider rate limit — not failed, just not its
+  turn yet — says so plainly, with its own calm, factual status distinct from both success and failure: nothing
+  is wrong, a check is already scheduled to run on its own.
 - The manual "Refresh" button is removed. In its place, the page shows a live "last refresh Ns ago" indicator —
   how long it's been since the last *successful* check with the backend, counting up in whole seconds from 0. It
   resets to zero on every successful check, whether or not that check found anything new, so it always answers
@@ -52,8 +55,9 @@ frequent *repeated* ones over time).
   follow-up spec building on this one.
 - No live-refresh anywhere else in the app (the status page, etc.) — scoped to a ticker's own search results
   page only.
-- No user-visible error state or retry control for a failed background check — always silent to the visitor
-  (still logged server-side for diagnosis, an implementation detail, not a behavior commitment).
+- No user-visible error state or retry control for a background check that fails outright — always silent to
+  the visitor (still logged server-side for diagnosis, an implementation detail, not a behavior commitment). A
+  postponed check is not an error and is covered separately above, not by this non-goal.
 
 ## Core entities & terminology
 
@@ -71,7 +75,9 @@ their own, in the same place they'd already sort to; a headline's sentiment pill
 nothing happens in the background. Switching back checks immediately, so in practice you'd see the indicator
 reset to 0 right away rather than showing a large stale number from however long you were gone. If a check fails
 for any reason, nothing about the page changes, and the indicator simply keeps counting up from whenever the
-last successful check was; the next check happens on schedule as if nothing went wrong.
+last successful check was; the next check happens on schedule as if nothing went wrong. If a check instead comes
+back postponed by the shared rate limit, the page's status area shows that plainly — a calm, distinct message,
+not an error — while everything already on the page stays exactly as it was until a later check actually runs.
 
 ## Success criteria
 
@@ -83,7 +89,9 @@ last successful check was; the next check happens on schedule as if nothing went
 - This behavior is identical for anonymous and signed-in visitors.
 - No visible errors, stalls, or degradation occur from this feature, regardless of how many pages are open at
   once across however many visitors.
-- A failed or skipped background check produces no visible change to the page at all.
+- A background check that fails outright produces no visible change to the page at all.
+- A background check that comes back postponed by the rate limit shows its own distinct, non-alarming status,
+  never the same treatment as a failure.
 - The manual "Refresh" button no longer exists anywhere on the page.
 - A "last refresh Ns ago" indicator is visible and counts up once per second, starting from 0.
 - The indicator resets to zero on every successful check, including one that finds nothing new.
