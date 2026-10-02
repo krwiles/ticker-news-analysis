@@ -30,6 +30,24 @@
   Official docs for `verify_oauth2_token`, used in `auth.py`'s `_verify_google_credential` (ADR 0016). The
   installed package's own docstring was the source that caught both real exception types it can raise —
   worth checking directly rather than trusting a tutorial's simplified try/except.
+- [Roy Fielding's dissertation — Chapter 5, §5.1.3 "Stateless"](https://ics.uci.edu/~fielding/pubs/dissertation/rest_arch_style.htm)
+  The original source defining REST's stateless constraint. Verified directly (2026-09-30) rather than trusted from memory — the exact quote ("each request... cannot take advantage of any stored context on the server") is what lesson 40 builds its "stateless ≠ sessionless" distinction on.
+- [OWASP Session Management Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Session_Management_Cheat_Sheet.html)
+  Session-ID-in-cookie pattern (never store session data in the cookie itself) and the HttpOnly/Secure/SameSite attribute rationale. Use for: `auth.py`'s session cookie design (ADR 0016), lesson 40.
+- [MDN — `RequestInit.credentials`](https://developer.mozilla.org/en-US/docs/Web/API/RequestInit#credentials)
+  Confirmed directly (2026-09-30): the fetch spec's default is `"same-origin"`, not `"omit"` — cookies ride automatically same-origin, cross-origin needs `"include"` explicitly. Use for: why `auth.ts`/`search.ts` pass `credentials: "include"`.
+- [OWASP Secrets Management Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Secrets_Management_Cheat_Sheet.html)
+  The primary source for lessons 38-39: lifecycle (create/rotate/revoke/expire), least privilege, container injection, CI/CD hardening, and the revoke-rotate-clean-investigate incident order. Use for: the "why" behind every secrets decision in ADR 0017.
+- [Docker Compose — use secrets](https://docs.docker.com/compose/how-tos/use-secrets/)
+  Official docs for the top-level `secrets:` block and per-service grants; states the env-var exposure rationale directly. Use for: `docker-compose.yml`'s secrets wiring.
+- [pydantic-settings — settings sources and secrets](https://pydantic.dev/docs/validation/latest/concepts/pydantic_settings/)
+  Source-priority order (env and dotenv outrank `secrets_dir`) and file-name-to-field mapping. The old `docs.pydantic.dev` URL 301-redirects here. Use for: `config.py`'s `secrets_dir`.
+- [The Twelve-Factor App — Config](https://12factor.net/config)
+  The "could you open-source it today?" litmus test for separating config from code. Use for: deciding secret vs. plain config.
+- [Kubernetes — Secrets](https://kubernetes.io/docs/concepts/configuration/secret/)
+  Documents that Secrets are stored unencrypted in etcd by default. Use for: Phase 4 (Kubernetes) planning.
+- [HashiCorp Vault — what is Vault](https://developer.hashicorp.com/vault/docs/what-is-vault) and [dynamic database credentials](https://developer.hashicorp.com/vault/docs/secrets/databases)
+  Official docs for the deferred Phase 4 item. Use for: rungs 3-4 of lesson 38's ladder.
 
 ## Wisdom (Communities)
 

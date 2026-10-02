@@ -81,8 +81,24 @@ meant to prevent elsewhere.
 **User**:
 A real person who has signed in at least once, identified by their Google identity (spec 0006, ADR 0016).
 Keyed on Google's own stable `sub` claim, not email — `email`/`name`/`picture_url` are read-only mirrors of
-Google's own data, overwritten on every sign-in, never edited in-app. Distinct from an anonymous visitor: every
-existing feature (search, Stories, sentiment) works identically for both, and nothing is scoped to a User yet —
-that's later, separate specs (watchlists, notifications) that build on this one existing at all.
+Google's own data, overwritten on every sign-in, never edited in-app. Distinct from an anonymous visitor:
+search, Stories, and sentiment all work identically for both — a Watchlist (below) is the first thing actually
+scoped to a signed-in User.
 _Avoid_: Account (not yet a distinct concept from User — revisit only if a User ever needs to represent
 something broader than one signed-in identity, e.g. a shared team)
+
+**Watchlist**:
+A signed-in User's single, implicit set of up to 10 tracked Tickers (spec 0008, ADR 0019). "Single, implicit"
+means exactly one per User, with no name of its own — there's no scenario where a User has zero or multiple
+Watchlists, so the word always refers to the same one thing for that User.
+_Avoid_: "List" alone (ambiguous with the sidebar UI element that displays it, or with `days`/`headlines`
+elsewhere in this codebase's own plain lists)
+
+**Watchlist entry**:
+One Ticker's membership in a User's Watchlist — the join between User and Company/Ticker, carrying when it was
+added and when that User last viewed that Ticker's own page. Its identity *is* the (User, Ticker) pairing, not
+a separate id: there is never more than one live entry for the same User and Ticker at once. Removing and
+re-adding the same Ticker creates a new entry, not a resumed one — its "last viewed" starts over. The
+"headlines since last viewed" count shown for an entry is never stored on it; like `Story`'s grouping, it's
+computed fresh from Headline data each time it's read.
+_Avoid_: "Watchlist item" (pick one term and keep it — this glossary uses "entry")

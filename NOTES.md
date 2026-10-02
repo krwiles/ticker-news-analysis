@@ -708,15 +708,11 @@ same discipline the arc lists above already use — not a fixed contract.
 Story Grouping — Milvus fully built, in continuous production use) · Arc 5 (spec 0005, Headline Sentiment
 Analysis) · Arc 6 (concurrency/multi-user readiness, secret scanner) · Arc 7 (spec 0006, User Accounts).
 
-**Phase 1 — quick, independent wins (no dependencies, any order):**
+**Phase 1 — quick, independent wins — ✅ all done:**
 - ~~Dark mode~~ — ✅ built (plan: `docs/plans/0038-*.md`), see the completed writeup below.
-- Extract the sentiment system prompt out of its literal string (idea below).
-- Fix `RECENT_HEADLINES_WINDOW`'s day-granularity mismatch (idea below).
-- Wire in Kaizen UI (NVIDIA's design system) — an original stack item never picked up; the app still uses
-  plain Tailwind. Pairs naturally with dark mode, since both touch the same visual layer.
-- Set up the already-decided MCP servers (Docker MCP Gateway + Postgres MCP + Milvus MCP) — the decision was
-  made and the trigger condition met back around lesson 19; it's just never been installed. Pure tooling, no
-  product code involved.
+- ~~Fix `RECENT_HEADLINES_WINDOW`'s day-granularity mismatch~~ — ✅ fixed (plan: `docs/plans/0039-*.md`).
+- ~~Extract the sentiment system prompt~~ — ✅ done (plan: `docs/plans/0041-*.md`), see the completed writeup below.
+- ~~Kaizen UI~~ / ~~Postgres+Milvus MCP servers~~ — decided against, see "Not on this roadmap" below.
 
 **Phase 2 — secrets management** (recommended before Phase 3 pushes the app further public-facing): the
 2026-09-21 secrets-management idea below already says "something proper should be in place before ... accounts
@@ -724,9 +720,93 @@ go live" — accounts are live now. Start with the no-new-tooling tier (keys onl
 `secrets:`, spend-limited provider keys — gitleaks is already done); Vault is the heavier original-stack item,
 deferrable to Phase 4.
 
+**→ Phase 2 status (2026-09-28): ✅ built** (plan `docs/plans/0040-*.md`, ADR `docs/adr/0017-*.md`, lessons 38-39,
+`reference/secrets-management.html`) on branch `secrets-management`. The decisions below were built as agreed,
+with these changes found during execution — see plan 0040's "What actually happened" for detail:
+`api`'s `SENTIMENT_CONFIGURED` is an explicit flag written by `init-secrets.sh` (the `${OPENAI_API_KEY:+true}`
+idea couldn't work once the key left `.env`); `database_url` is now a property returning a SQLAlchemy `URL`; and
+**the Finnhub key was being printed in worker logs** via a `?token=` URL param that `httpx` logs at INFO — now sent
+as an `X-Finnhub-Token` header, with `httpx` logging silenced. **Still open (ADR 0017):** MinIO/Milvus share
+`minioadmin`, Redis has no password, Postgres/MinIO passwords are weak dev values — all required before a real
+deployment; Vault (rungs 3-4) is Phase 4. The user may want to rotate the Finnhub key, since it sat in local
+container logs (README runbook has the steps).
+
+*Original grilled record, kept for the reasoning:*
+
+*Goal (user's own framing): learn how secrets management is used in a production, publicly-deployed system —
+build it production-shaped even though it runs locally.* Vault stays Phase 4, but the mechanism is chosen so
+Phase 4 only swaps the secret's *source* (files at a path), not the interface the app reads.
+
+*Facts established by reading the code (2026-09-28):* only `worker` actually uses `FINNHUB_API_KEY`/
+`OPENAI_API_KEY` (`providers.py`, `sentiment.py`); `api` only checks whether the OpenAI key is *set*
+(`search.py:_compute_sentiment_status`); `ui` uses neither — yet the shared `&app-env` anchor gives all three
+services both. The "session-signing key"/"Google client secret" concerns in the 2026-09-21 idea below are
+**void**: ADR 0016 chose Redis-backed sessions (no signing key) and GIS never uses a client secret. The real
+secret set is just Finnhub key, OpenAI key, Postgres password, MinIO creds. Redis (now holding live session
+IDs) has no password and every service's port is published on all host interfaces. `settings = Settings()` runs
+at import time and tests import with no secrets present, so a fail-fast check can't live in `Settings` itself.
+`pydantic-settings` ranks env vars *above* `secrets_dir`, so a stale key left in `.env` would silently override
+a secrets file.
+
+*Decisions (all agreed):*
+1. **Least-privilege per service, still ONE image / three modes (`APP_MODE` untouched)** — split `&app-env`
+   into a shared non-secret base + per-service extras. `worker`: Finnhub, OpenAI, Postgres password, SEC user
+   agent, DB, Redis, Milvus. `api`: Postgres password, Redis, `GOOGLE_CLIENT_ID`, and a derived boolean
+   `sentiment_configured` (Compose `${OPENAI_API_KEY:+true}`) instead of the real key — `search.py` reads that
+   setting, not `bool(settings.openai_api_key)`. `ui`: no app secrets at all.
+2. **Compose file-based `secrets:` (`/run/secrets/...`) read via `pydantic-settings` `secrets_dir`** for the
+   Finnhub key, OpenAI key, and Postgres password. `.env` keeps only non-secret config. `db` uses
+   `POSTGRES_PASSWORD_FILE`; `api`/`worker` build the DSN from parts (user/host/db/password).
+3. **Host tooling keeps a dev URL in `.env`** — `dbmate` and pytest can't read `/run/secrets`; `DATABASE_URL`/
+   `TEST_DATABASE_URL` stay as documented local-only dev credentials (`ticker/ticker`) that must match the secret.
+4. **Missing-secret behavior:** OpenAI stays *optional* (designed feature, spec 0005). Finnhub key and Postgres
+   password are *required* in the modes that use them — fail fast at `create_app()`/worker startup with a clear
+   error (not in `Settings`, per the import-time fact above).
+5. **Every published port binds to `127.0.0.1`** (5432, 6379, 9000/9001, 19530/9091). Redis `requirepass` and
+   non-default Postgres/MinIO passwords are deferred to real-deployment time.
+6. **Bootstrap:** committed, idempotent `scripts/init-secrets.sh` — hidden prompts, files at mode 600, plus a
+   `--from-env` flag that moves the user's existing keys out of `.env` (and strips them from it) without ever
+   printing them. Secrets live in a gitignored `./secrets/` directory.
+7. **MinIO/Milvus shared `minioadmin` credentials: deferred, recorded plainly as a known remaining item** —
+   changing them means coordinated changes in two services (lesson 16's MinIO breakage is the precedent) and
+   loopback binding removes the exposure meanwhile.
+8. **Docs:** short **ADR 0017** (per-service least-privilege, file over env, Vault deferred with a compatible
+   interface, loopback binding, partial MinIO coverage) + plan 0040 + a README rotation runbook and
+   provider-dashboard checklist (OpenAI project budget cap + restricted key, Finnhub key check — plain
+   checklist, not a wizard). No lesson HTML unless asked.
+
+*Defaults I said I'd apply unless the user objected (they didn't):* branch off `working`, PR into `working`;
+CI's `docker-build` job also runs `docker compose config -q` with dummy secret files; live verification via
+`docker compose exec` on each service (`ui` has no keys, `api` has no OpenAI key, `worker` has the files
+mounted) then a real search + sentiment pass; fix the stale session-signing-key bullet below.
+
 **Phase 3 — features that build on accounts** (Arc 7 was the unlocking dependency, now done):
-1. **Watchlists** — a user's tracked tickers, auto-refreshed via `jobs.py`'s existing single-flight machinery
-   (ADR 0015) rather than a new mechanism.
+0. **Live-refreshing search results** — ✅ done (2026-09-29, spec `docs/specs/0007-*.md`, ADR `docs/adr/0018-*.md`,
+   plan `docs/plans/0042-*.md`). Split out during grilling from the original "Watchlists" idea below, since it
+   applies to every ticker page for every visitor, not just signed-in users, and needed its own real design for
+   a shared Finnhub rate limit (60/min free tier). `/api/search/status` now also triggers a rate-limited
+   background fetch (ARQ's native `_defer_by`, gating the whole job rather than just the Finnhub call inside
+   it — a deferred job is guaranteed to actually run later); the manual Refresh button is gone, replaced by a
+   silently-updating page and a "last refresh Ns ago" counter. Watchlists (below) builds its own per-ticker
+   counts on top of this mechanism, not a new one.
+1. **Watchlists** — ✅ done (2026-09-30/10-01, spec `docs/specs/0008-*.md`, ADR `docs/adr/0019-*.md`, plan
+   `docs/plans/0043-*.md`). A signed-in user's single, implicit list of up to 10 tracked tickers, shown in a
+   new left sidebar with a per-ticker "new since last viewed" count (read-time `COUNT` against a stored
+   `last_viewed_at`, not an incremented column); added via the search page's own "Add/Remove SYMBOL to/from
+   watchlist" button; `Layout` now owns auth identity and watchlist state, shared with child routes via
+   React Router's `Outlet` context so the sidebar and the button stay instantly in sync. Along the way, fixed
+   a real, user-reported bug in spec 0007's own live-refresh (a deferred/rate-limited fetch was permanently
+   indistinguishable from a genuine failure in the UI) and a second bug the fix itself introduced (the fetch
+   job's result TTL was far shorter than any poll interval) — both caught only by live verification, not unit
+   tests. **A further live-refresh oddity logged below, unresolved:** the "last refresh Ns ago" counter
+   sometimes resets early even with the tab genuinely focused, cause not yet found. **A `mattpocock-skills:
+   code-review` pass (Standards + Spec axes, `working` vs `main`) found and fixed real issues**: spec 0007 and
+   ADR 0018 still promised a skipped check stays "entirely invisible," contradicting the deferred-status fix
+   above on purpose (the user prefers the new visible behavior) — both docs rewritten to describe it directly,
+   closing out ADR 0018's own long-flagged "needs a doc update" item; missing per-step comments in three places
+   and 12+ lines of duplicated test boilerplate (extracted into one fixture) were also fixed. Separately, a
+   real bug only CI caught (`Layout.test.tsx` had a genuinely unmocked `fetch()` that happened to "work"
+   locally because the dev stack was running) is also fixed.
 2. **Notifications** — new news on a watchlist, optionally sentiment-filtered; depends on watchlists existing.
 3. **Admin panel (container logs)** — needs a real admin-role concept, which doesn't exist yet (accounts do,
    roles don't) — the smallest new spec among these three, but a real one.
@@ -738,7 +818,12 @@ deferrable to Phase 4.
   having a real cluster to deploy against.
 
 **Not on this roadmap, decided against already:** Next.js, GitLab CI/CD (both deliberately dropped early on —
-see the `nvidia-vulnops-portfolio-stack` project memory for the full reasoning).
+see the `nvidia-vulnops-portfolio-stack` project memory for the full reasoning); **Kaizen UI** (2026-09-28 —
+NVIDIA's own internal design system, not realistically usable from outside NVIDIA; the app keeps plain
+Tailwind v4); **Postgres MCP / Milvus MCP / Docker MCP Gateway** (2026-09-28 — reassessed rather than installed
+on the old trigger condition: Bash already gives ad-hoc Postgres (`docker compose exec db psql`) and Milvus
+(REST health endpoint, `pymilvus`) access, which is what these would mostly formalize; no capability gap they'd
+close for this project, so not pursued).
 
 ## Known issues & ideas
 - **Dark mode for the frontend** — ✅ built (2026-09-27, plan `docs/plans/0038-*.md`), scoped via `/grill-me`:
@@ -762,18 +847,29 @@ see the `nvidia-vulnops-portfolio-stack` project memory for the full reasoning).
   on both pages, a real ticker search (AAPL) showed correctly-themed badges/sentiment pills across many real
   cards in both modes with no half-dark artifacts, and the choice persisted across a reload with no flash of
   the wrong theme.
-- **Idea: extract the sentiment system prompt out of a literal string.** `_SENTIMENT_SYSTEM_PROMPT` in
-  `sentiment.py` is hardcoded in the module. Consider `Settings` (env-configurable) or an external file, so
-  it can be tuned without a code change/redeploy. Not decided which; revisit when actually needed.
-- **Idea (2026-09-23, found while re-verifying plan 0036): `RECENT_HEADLINES_WINDOW`'s exact-timestamp
-  cutoff can silently exclude a headline that Finnhub itself just fetched.** Finnhub's `from`/`to` range
-  is day-granularity, so a headline published early on the oldest included day can be fetched and grouped
-  into a real Story, while the app's own "still needs sentiment"/"show in search" cutoff (`now - 7 days`,
-  an exact timestamp) excludes it a few hours later than its own published time. Confirmed live: 12 of 114
-  real Stories for a freshly-fetched ticker showed a permanently-zero aggregate this way — not the plan
-  0036 race (verified: zero headlines had `sentiment_status = 'ok'` with `story_id IS NULL`), just an
-  unrelated boundary mismatch. Not designed or scoped yet; likely direction is aligning the cutoff to
-  day-granularity too, or accepting the small edge window.
+- **Extract the sentiment system prompt out of a literal string** — ✅ done (2026-09-28, plan
+  `docs/plans/0041-*.md`), the idea first noted 2026-09-21. Moved to `Settings.sentiment_system_prompt`
+  (env-configurable), not an external file, for consistency with the rest of this project's config. Verified
+  live: overriding `SENTIMENT_SYSTEM_PROMPT` changes worker behavior with no code change or image rebuild.
+- **`RECENT_HEADLINES_WINDOW`'s exact-timestamp cutoff vs. Finnhub's day-granularity fetch** — ✅ fixed
+  (2026-09-27, plan `docs/plans/0039-*.md`), the idea first noted 2026-09-23 while re-verifying plan 0036.
+  Confirmed by reading the actual code (not re-guessed from the idea's own text): `sentiment.py`'s
+  `_fetch_pending_headlines` used an exact-instant cutoff (`now - RECENT_HEADLINES_WINDOW`) to decide
+  sentiment-scoring eligibility, while `providers.py`'s Finnhub fetch uses a day-granularity `from`/`to`
+  range — a headline published early on the oldest included day gets fetched fine, but can fall outside the
+  exact-instant cutoff by the time the sentiment job's own query runs moments later, permanently stranding
+  it at `sentiment_status = NULL` (time only moves forward, so a headline that misses this once misses it
+  forever). New `recent_headlines_cutoff()` in `config.py` aligns the cutoff to the start of the oldest
+  included UTC day instead — a strict superset of the old exact-instant cutoff, so it only ever widens the
+  window (by at most a day, on the oldest day only), never narrows it. Used at all three existing call
+  sites (`search.py`, `sentiment.py`, `jobs.py`); `providers.py` needed no change (EDGAR's own fetch filter
+  already used the safe exact-instant form, and a day-aligned downstream cutoff is a superset of that too).
+  New `tests/test_config.py` (3 tests, including the exact regression scenario), 106/106 backend tests, zero
+  regressions. **Live-verified against the real running stack**, not just unit tests: since no
+  naturally-occurring gap headline existed at the moment of the fix, inserted a synthetic one at the exact
+  boundary and called the real deployed `_fetch_pending_headlines`/`_load_search_results` functions directly
+  inside the running `api` container — both correctly picked it up; cleaned up afterward. A real
+  `/api/search?ticker=AAPL` call confirmed existing behavior unaffected.
 - **Idea (2026-09-21): an admin panel in the UI showing each container's logs.** Not designed yet; things to
   settle when it's picked up:
   - **Where the logs come from:** today every container just writes to its own stdout, readable only via
@@ -842,7 +938,9 @@ see the `nvidia-vulnops-portfolio-stack` project memory for the full reasoning).
     by hand.
   - **More secrets are coming:** the Google OAuth client secret and a session-signing key (both more sensitive
     than a news API key), any notification-provider credentials, and the Postgres credentials, which are the
-    dev defaults `ticker/ticker` today.
+    dev defaults `ticker/ticker` today. **Correction (2026-09-28): the first two never materialized** — ADR 0016
+    chose Redis-backed sessions (no signing key) and GIS's credential flow uses no client secret. See the
+    Roadmap's Phase 2 status for the decisions that replace this section's open questions.
   - **Options, cheapest first:**
     - *No new tooling:* pass keys only to `worker` (giving `api` a plain "sentiment configured" flag instead of
       the key); use Docker Compose's file-based `secrets:` instead of env vars; add a secret scanner such as
@@ -865,6 +963,22 @@ see the `nvidia-vulnops-portfolio-stack` project memory for the full reasoning).
       (`frontend/src/config.ts`), and there's no HTTPS or real CORS origin yet. Needs its own spec/ADR.
   - **Ordering:** the no-tooling steps can happen any time; something proper should be in place *before* the app
     is public or accounts go live, since that's when the sensitive secrets appear.
+- **Potential bug (2026-10-01): live-refresh's "last refresh Ns ago" counter resets early / looks like it
+  freezes, even with the tab reportedly focused the whole time.** Reported live on a real ticker page: the
+  counter sits at "0s ago" for a stretch, then only ever climbs to around "8s ago" before resetting, never
+  reaching a clean "10s ago" (`STATUS_POLL_INTERVAL_MS`). The obvious suspect — spec 0007's deliberate
+  pause-while-hidden behavior (`SearchPage.tsx`'s `visibilitychange` handling, which fires an *immediate*
+  check on refocus rather than waiting for the next tick) — doesn't fit: the user confirmed the tab stayed
+  focused throughout, no window/app switching. I reproduced the pause-while-hidden mechanism itself working
+  exactly as designed (an automated browser tab not holding real OS focus correctly reported
+  `document.visibilityState === "hidden"` and polled zero times over 20+ seconds), which confirms that *part*
+  of the system, but doesn't explain the user's own report where the tab genuinely had focus. Not
+  investigated further yet — candidates for next time: an overlapping/duplicate `setInterval` from the
+  live-refresh effect re-running more than expected, the backend's own per-request latency on
+  `/api/search/status` (now doing more work since the deferred-status fix — checking job status and
+  sometimes reading a job result) pushing the effective cadence down, or something about the browser's own
+  background-tab timer throttling applying even to a tab that looks focused. Needs a real (non-automated)
+  browser session with Network-tab timestamps on `/api/search/status` calls to pin down.
 ## Preferences
 - Wants an example data table created once the spec round produces a real entity to model it on (lesson 6 above), not before — don't front-load schema/domain work into earlier lessons. Satisfied: spec 0001 + `CONTEXT.md` now exist, arc 2 is modeled on them.
 - Confirmed (2026-09-08): prefers small vertical slices over front-loaded theory or a build-everything-then-explain approach — a short concept intro right before building each slice, then verify it against the live stack, then move to the next slice. This is why arc 2 became 6 (now 7) lessons instead of 3.

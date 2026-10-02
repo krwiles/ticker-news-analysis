@@ -1,16 +1,6 @@
+# One image, three modes (ADR 0001) -- but each mode gets only the config and secrets it uses (ADR 0017).
 x-app: &app
   build: .
-  environment:
-    &app-env
-    DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
-    REDIS_URL: redis://redis:6379/0
-    MILVUS_URI: http://milvus:19530
-    FINNHUB_API_KEY: ${FINNHUB_API_KEY}
-    OPENAI_API_KEY: ${OPENAI_API_KEY}
-    SEC_EDGAR_USER_AGENT: ${SEC_EDGAR_USER_AGENT}
-    # Not a secret (ADR 0016) -- shared here anyway since api is the only container that
-    # needs it (token verification), same one-container-needs-it precedent as the two keys above.
-    GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID}
   depends_on:
     &app-depends-on
     db:
@@ -18,15 +8,37 @@ x-app: &app
     redis:
       condition: service_healthy
 
+# Non-secret config shared by the two modes that touch Postgres/Redis (api, worker). ui gets none.
+x-data-env: &data-env
+  POSTGRES_USER: ${POSTGRES_USER}
+  POSTGRES_DB: ${POSTGRES_DB}
+  REDIS_URL: redis://redis:6379/0
+  # api's own /api/health aggregate check calls Milvus too (health.py), not just worker's own usage.
+  MILVUS_URI: http://milvus:19530
+
+# File-based secrets, mounted read-only at /run/secrets/<name> in only the services that list them
+# (ADR 0017). Created by scripts/init-secrets.sh; ./secrets/ is gitignored.
+secrets:
+  postgres_password:
+    file: ./secrets/postgres_password
+  finnhub_api_key:
+    file: ./secrets/finnhub_api_key
+  openai_api_key:
+    file: ./secrets/openai_api_key
+
 services:
   db:
     image: postgres:17-alpine
     environment:
       POSTGRES_USER: ${POSTGRES_USER}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      # The postgres image reads the password from this file itself -- no plain env var (ADR 0017).
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
       POSTGRES_DB: ${POSTGRES_DB}
+    secrets:
+      - postgres_password
     ports:
-      - "5432:5432"
+      # Loopback only -- reachable from this machine (dbmate, psql, tests), not the LAN (ADR 0017).
+      - "127.0.0.1:5432:5432"
     volumes:
       - db-data:/var/lib/postgresql/data
     healthcheck:
@@ -38,7 +50,7 @@ services:
   redis:
     image: redis:7-alpine
     ports:
-      - "6379:6379"
+      - "127.0.0.1:6379:6379"
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
@@ -85,8 +97,8 @@ services:
       MINIO_ACCESS_KEY: ${MILVUS_MINIO_ACCESS_KEY}
       MINIO_SECRET_KEY: ${MILVUS_MINIO_SECRET_KEY}
     ports:
-      - "9000:9000"
-      - "9001:9001"
+      - "127.0.0.1:9000:9000"
+      - "127.0.0.1:9001:9001"
     volumes:
       - minio-data:/minio_data
     command: minio server /minio_data --console-address :9001
@@ -110,8 +122,8 @@ services:
     volumes:
       - milvus-data:/var/lib/milvus
     ports:
-      - "19530:19530"
-      - "9091:9091"
+      - "127.0.0.1:19530:19530"
+      - "127.0.0.1:9091:9091"
     depends_on:
       etcd:
         condition: service_healthy
@@ -127,24 +139,36 @@ services:
   api:
     <<: *app
     environment:
-      <<: *app-env
+      <<: *data-env
       APP_MODE: api
+      # Not a secret (ADR 0016) -- api is the only container that verifies Google tokens.
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID}
+      # api never holds the OpenAI key; this non-secret mirror (written by init-secrets.sh) is all it needs.
+      SENTIMENT_CONFIGURED: ${SENTIMENT_CONFIGURED:-false}
+    secrets:
+      - postgres_password
     ports:
       - "8000:8000"
 
+  # ui serves static files only -- no app secrets and no data-store config at all (ADR 0017).
   ui:
     <<: *app
     environment:
-      <<: *app-env
       APP_MODE: ui
     ports:
       - "3000:8000"
 
+  # The only container that calls Finnhub, OpenAI, EDGAR, and Milvus -- so the only one holding those secrets.
   worker:
     <<: *app
     environment:
-      <<: *app-env
+      <<: *data-env
       APP_MODE: worker
+      SEC_EDGAR_USER_AGENT: ${SEC_EDGAR_USER_AGENT}
+    secrets:
+      - postgres_password
+      - finnhub_api_key
+      - openai_api_key
     # Only worker will ever actually call Milvus (lesson 18+) -- api/ui
     # don't need this dependency, and milvus's own healthcheck has a real
     # 90s start_period, so making this shared (like db/redis are, via

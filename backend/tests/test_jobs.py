@@ -4,12 +4,15 @@ the fakes below mimic the one ARQ behavior this relies on (a taken job ID makes
 enqueue_job() return None), which the live stack check in plan 0031 proves for real."""
 
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import select
 
+from fakes import FakeRedisKV
+
 from ticker_backend.jobs import (
     FETCH_RESULT_TTL_SECONDS,
+    enqueue_background_fetch,
     enqueue_or_join_fetch,
     enqueue_sentiment,
     enqueue_sentiment_after_fetch,
@@ -17,6 +20,7 @@ from ticker_backend.jobs import (
     sentiment_job_id,
 )
 from ticker_backend.models import Company, Headline
+from ticker_backend.rate_limit import record_finnhub_fetch
 from ticker_backend.worker import WorkerSettings
 
 
@@ -55,18 +59,23 @@ class _FakeJob:
         return self._result
 
 
-class _FakeArqRedis:
+class _FakeArqRedis(FakeRedisKV):
     """Mimics ArqRedis.enqueue_job()'s uniqueness rule: the first enqueue of a job ID claims it
     and returns a Job; any later enqueue of the same ID returns None."""
 
     def __init__(self, taken_ids: set[str] | None = None):
+        super().__init__()
         self.taken_ids = set(taken_ids or ())
         # Every enqueue attempt (name, args, job ID), and just the IDs that were actually accepted.
         self.attempts: list[tuple[str, tuple, str | None]] = []
         self.accepted_ids: list[str] = []
+        # Every _defer_by an enqueue attempt was made with, alongside the job ID -- additive, kept
+        # separate from `attempts` so its existing exact-tuple assertions stay unaffected.
+        self.defer_by_seen: list[tuple[str | None, float | None]] = []
 
-    async def enqueue_job(self, name, *args, _job_id=None, **kwargs):
+    async def enqueue_job(self, name, *args, _job_id=None, _defer_by=None, **kwargs):
         self.attempts.append((name, args, _job_id))
+        self.defer_by_seen.append((_job_id, _defer_by))
         # Yield once so two concurrent callers genuinely interleave, like two real requests would.
         await asyncio.sleep(0)
         if _job_id in self.taken_ids:
@@ -85,6 +94,48 @@ def _join_factory(shared_result):
         return _FakeJob(job_id, result=shared_result)
 
     return factory, joined
+
+
+async def test_background_fetch_enqueues_immediately_with_room_in_the_budget():
+    """See docs/adr/0018-*.md -- search.py's /api/search/status calls this, never
+    enqueue_or_join_fetch directly, so a background check can be deferred without ever
+    touching /api/search's own always-immediate path."""
+    redis = _FakeArqRedis()
+    now = datetime(2026, 9, 29, 12, 0, 0, tzinfo=timezone.utc)
+
+    job = await enqueue_background_fetch(redis, "AAPL", now)
+
+    assert job.job_id == "fetch_headlines:AAPL"
+    assert redis.defer_by_seen == [("fetch_headlines:AAPL", None)]
+
+
+async def test_background_fetch_defers_the_whole_job_when_the_ticker_is_on_cooldown():
+    # Arrange: AAPL was just fetched a second ago.
+    redis = _FakeArqRedis()
+    now = datetime(2026, 9, 29, 12, 0, 0, tzinfo=timezone.utc)
+    await record_finnhub_fetch(redis, "AAPL", now)
+
+    # Act: a background check one second later.
+    await enqueue_background_fetch(redis, "AAPL", now + timedelta(seconds=1))
+
+    # Assert: enqueued with a real, positive _defer_by -- not skipped, not run immediately.
+    ((job_id, defer_by),) = redis.defer_by_seen
+    assert job_id == "fetch_headlines:AAPL"
+    assert defer_by is not None and defer_by > 0
+
+
+async def test_background_fetch_still_single_flights_a_deferred_job():
+    # Arrange: this ticker's job ID is already taken (whether by a running job or a deferred one --
+    # enqueue_job()'s own ID-collision check doesn't distinguish, per ADR 0018).
+    redis = _FakeArqRedis(taken_ids={"fetch_headlines:AAPL"})
+    factory, joined = _join_factory(shared_result="whatever the existing job returns")
+    now = datetime(2026, 9, 29, 12, 0, 0, tzinfo=timezone.utc)
+
+    job = await enqueue_background_fetch(redis, "AAPL", now, job_factory=factory)
+
+    # Assert: joined the existing job rather than a second one being created.
+    assert joined == [("fetch_headlines:AAPL", redis)]
+    assert await job.result() == "whatever the existing job returns"
 
 
 def test_fetch_job_id_is_per_ticker_and_case_insensitive():

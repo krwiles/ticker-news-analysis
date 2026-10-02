@@ -1,12 +1,12 @@
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { MemoryRouter } from "react-router";
+import { MemoryRouter, Outlet, Route, Routes } from "react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { WatchlistOutletContext } from "../components/Layout";
 import * as searchModule from "../search";
 import { SearchPage } from "./SearchPage";
 
 // Module-mocked one layer up from search.test.ts -- SearchPage just consumes fetchSearch/fetchSearchStatus.
-// hasPendingSentiment is a pure function, kept real (importOriginal) since the polling tests need it.
 vi.mock("../search", async (importOriginal) => {
   const actual = await importOriginal<typeof searchModule>();
   return {
@@ -19,10 +19,23 @@ vi.mock("../search", async (importOriginal) => {
 const fetchSearch = vi.mocked(searchModule.fetchSearch);
 const fetchSearchStatus = vi.mocked(searchModule.fetchSearchStatus);
 
-function renderSearchPage(initialEntries: string[] = ["/search"]) {
+// Stands in for Layout as a real parent route, exercising the actual Outlet-context wiring
+// (ADR 0019). Defaults to signed-out; watchlist-button tests override it.
+function renderSearchPage(initialEntries: string[] = ["/search"], context: Partial<WatchlistOutletContext> = {}) {
+  const fullContext: WatchlistOutletContext = {
+    isSignedIn: false,
+    entries: [],
+    add: vi.fn(),
+    remove: vi.fn(),
+    ...context,
+  };
   return render(
     <MemoryRouter initialEntries={initialEntries}>
-      <SearchPage />
+      <Routes>
+        <Route element={<Outlet context={fullContext} />}>
+          <Route path="/search" element={<SearchPage />} />
+        </Route>
+      </Routes>
     </MemoryRouter>,
   );
 }
@@ -65,6 +78,19 @@ function story(overrides: Partial<searchModule.Story> = {}): searchModule.Story 
 function response(overrides: Partial<searchModule.SearchResponse> = {}): searchModule.SearchResponse {
   return {
     ticker: "AAPL",
+    status: "success",
+    providers: { edgar: "ok", finnhub: "ok" },
+    grouping: "ok",
+    sentiment: "ok",
+    days: [],
+    ...overrides,
+  };
+}
+
+// Same defaults as response() minus ticker -- a poll now refreshes status/providers/grouping
+// too, not just sentiment/days, so every fetchSearchStatus mock needs a full shape.
+function statusResponse(overrides: Partial<searchModule.SearchStatusResponse> = {}): searchModule.SearchStatusResponse {
+  return {
     status: "success",
     providers: { edgar: "ok", finnhub: "ok" },
     grouping: "ok",
@@ -217,23 +243,17 @@ describe("SearchPage", () => {
     });
   });
 
-  it("shows a Refresh button once results exist, and clicking it re-fetches the same ticker", async () => {
+  it("never shows a manual refresh control, even once results exist -- spec 0007 replaces it with live refresh", async () => {
     // Arrange
     fetchSearch.mockResolvedValue(response());
 
     // Act: run the initial search.
     renderSearchPage();
     await searchFor("AAPL");
+    await screen.findByText("All sources responded.");
 
-    const refreshButton = await screen.findByRole("button", { name: /refresh/i });
-
-    // Clear the initial search's call so the assertion below is about the Refresh click alone.
-    fetchSearch.mockClear();
-    const user = userEvent.setup();
-    await user.click(refreshButton);
-
-    // Assert: Refresh re-fetches the same ticker.
-    expect(fetchSearch).toHaveBeenCalledWith("AAPL");
+    // Assert: no button of any kind exists for triggering a fetch manually.
+    expect(screen.queryByRole("button", { name: /refresh/i })).not.toBeInTheDocument();
   });
 
   it("shows an error message when fetchSearch rejects, not a crash", async () => {
@@ -296,27 +316,71 @@ describe("SearchPage", () => {
     return [{ date: "2026-09-17", is_today: true, stories: [story({ primary: h })] }];
   }
 
-  // First frontend tests exercising a timer-driven effect -- shouldAdvanceTime keeps real-time
-  // utilities (RTL's waitFor) working while advanceTimersByTime fast-forwards the poll interval.
-  describe("sentiment polling", () => {
+  // Toggles jsdom's document.visibilityState and fires the event SearchPage listens for --
+  // spec 0007's own pause/resume behavior is keyed on this, not on window focus/blur.
+  function setVisibility(state: "visible" | "hidden") {
+    Object.defineProperty(document, "visibilityState", { value: state, configurable: true });
+    document.dispatchEvent(new Event("visibilitychange"));
+  }
+
+  // Live-refresh (spec 0007) replaces the old manual Refresh button and the "only poll while
+  // sentiment is pending" gate: unconditional polling, pause/resume, and a "last refresh" counter.
+  describe("live refresh", () => {
     afterEach(() => {
       vi.useRealTimers();
+      setVisibility("visible");
     });
 
-    it("never polls when every headline already has a real sentiment attempt", async () => {
-      // Arrange: the one headline on the page already resolved -- nothing left to poll for.
+    it("clears a stuck 'deferred' state once a poll reports the fetch actually succeeded", async () => {
+      // Regression: a page that first loaded mid-cooldown ("deferred") used to stay stuck
+      // forever, since polling only merged sentiment/days, never status/providers/grouping.
+      vi.useFakeTimers({ shouldAdvanceTime: true });
+      fetchSearch.mockResolvedValue(response({ status: "deferred", providers: {}, grouping: "unknown" }));
+      fetchSearchStatus.mockResolvedValue(statusResponse({ status: "success", grouping: "ok" }));
+
+      renderSearchPage(["/search?ticker=AAPL"]);
+      await waitFor(() => {
+        expect(screen.getByText(/waiting for the next scheduled check/i)).toBeInTheDocument();
+      });
+      expect(screen.getByText(/status unknown/i)).toBeInTheDocument();
+
+      // Act: the deferred fetch settles by the next poll tick.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(10000);
+      });
+
+      // Assert: the page reflects the real, current outcome -- not stuck on the initial load's.
+      await waitFor(() => {
+        expect(screen.getByText(/all sources responded/i)).toBeInTheDocument();
+      });
+      expect(screen.getByText(/stories grouped normally/i)).toBeInTheDocument();
+      expect(screen.queryByText(/waiting for the next scheduled check/i)).not.toBeInTheDocument();
+    });
+
+    it("polls /api/search/status once results exist, even when every headline is already fully resolved", async () => {
+      // Arrange: nothing left to resolve -- the old behavior would never have polled here at all.
+      vi.useFakeTimers({ shouldAdvanceTime: true });
       fetchSearch.mockResolvedValue(
         response({ sentiment: "ok", days: dayWith(headline({ sentiment_status: "ok", sentiment_enum: "positive", sentiment_score: 80 })) }),
       );
+      fetchSearchStatus.mockResolvedValue(
+        statusResponse({
+          sentiment: "ok",
+          days: dayWith(headline({ sentiment_status: "ok", sentiment_enum: "positive", sentiment_score: 80 })),
+        }),
+      );
 
-      // Act: load via the URL.
+      // Act: load via the URL, then fast-forward one poll interval.
       renderSearchPage(["/search?ticker=AAPL"]);
       await waitFor(() => {
         expect(screen.getByText(/analysis complete/i)).toBeInTheDocument();
       });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(10000);
+      });
 
-      // Assert: the status endpoint was never touched.
-      expect(fetchSearchStatus).not.toHaveBeenCalled();
+      // Assert: it polled anyway -- live refresh has no "nothing left to check" stop condition.
+      expect(fetchSearchStatus).toHaveBeenCalledWith("AAPL");
     });
 
     it("polls /api/search/status while a headline still has no sentiment attempt, and merges the resolved update", async () => {
@@ -325,18 +389,20 @@ describe("SearchPage", () => {
       fetchSearch.mockResolvedValue(
         response({ sentiment: "processing", days: dayWith(headline({ title: "Resolved via poll", url: "https://example.com/resolved" })) }),
       );
-      fetchSearchStatus.mockResolvedValue({
-        sentiment: "ok",
-        days: dayWith(
-          headline({
-            title: "Resolved via poll",
-            url: "https://example.com/resolved",
-            sentiment_status: "ok",
-            sentiment_enum: "positive",
-            sentiment_score: 82,
-          }),
-        ),
-      });
+      fetchSearchStatus.mockResolvedValue(
+        statusResponse({
+          sentiment: "ok",
+          days: dayWith(
+            headline({
+              title: "Resolved via poll",
+              url: "https://example.com/resolved",
+              sentiment_status: "ok",
+              sentiment_enum: "positive",
+              sentiment_score: 82,
+            }),
+          ),
+        }),
+      );
 
       // Act: load via the URL, wait for the initial "processing" render.
       renderSearchPage(["/search?ticker=AAPL"]);
@@ -347,7 +413,7 @@ describe("SearchPage", () => {
 
       // Fast-forward past one poll interval.
       await act(async () => {
-        await vi.advanceTimersByTimeAsync(5000);
+        await vi.advanceTimersByTimeAsync(10000);
       });
 
       // Assert: the poll fired for the same ticker, and its result (sentiment + days) merged into the page --
@@ -359,14 +425,16 @@ describe("SearchPage", () => {
       expect(screen.getByRole("link", { name: "Resolved via poll" })).toBeInTheDocument();
     });
 
-    it("stops polling once every headline reaches a terminal status -- no further calls after the tick that resolved it", async () => {
+    it("keeps polling indefinitely -- reaching a terminal status on every headline never stops it", async () => {
       // Arrange: same pending -> resolved setup as above.
       vi.useFakeTimers({ shouldAdvanceTime: true });
       fetchSearch.mockResolvedValue(response({ sentiment: "processing", days: dayWith(headline()) }));
-      fetchSearchStatus.mockResolvedValue({
-        sentiment: "ok",
-        days: dayWith(headline({ sentiment_status: "ok", sentiment_enum: "positive", sentiment_score: 80 })),
-      });
+      fetchSearchStatus.mockResolvedValue(
+        statusResponse({
+          sentiment: "ok",
+          days: dayWith(headline({ sentiment_status: "ok", sentiment_enum: "positive", sentiment_score: 80 })),
+        }),
+      );
 
       renderSearchPage(["/search?ticker=AAPL"]);
       await waitFor(() => {
@@ -375,17 +443,17 @@ describe("SearchPage", () => {
 
       // Act: advance past the tick that resolves it, then several more intervals' worth of time.
       await act(async () => {
-        await vi.advanceTimersByTimeAsync(5000);
+        await vi.advanceTimersByTimeAsync(10000);
       });
       await waitFor(() => {
         expect(fetchSearchStatus).toHaveBeenCalledTimes(1);
       });
       await act(async () => {
-        await vi.advanceTimersByTimeAsync(20000);
+        await vi.advanceTimersByTimeAsync(40000);
       });
 
-      // Assert: no further polling happened once every headline had a terminal status.
-      expect(fetchSearchStatus).toHaveBeenCalledTimes(1);
+      // Assert: polling never stops on its own -- four more intervals means four more calls.
+      expect(fetchSearchStatus).toHaveBeenCalledTimes(5);
     });
 
     it("keeps polling even when the page-level status reads error, as long as another headline is still pending", async () => {
@@ -407,27 +475,29 @@ describe("SearchPage", () => {
           ],
         }),
       );
-      fetchSearchStatus.mockResolvedValue({
-        sentiment: "error",
-        days: [
-          {
-            date: "2026-09-17",
-            is_today: true,
-            stories: [
-              story({ primary: headline({ url: "https://example.com/already-failed", sentiment_status: "error" }) }),
-              story({
-                primary: headline({
-                  url: "https://example.com/still-pending",
-                  title: "Still pending",
-                  sentiment_status: "ok",
-                  sentiment_enum: "neutral",
-                  sentiment_score: 55,
+      fetchSearchStatus.mockResolvedValue(
+        statusResponse({
+          sentiment: "error",
+          days: [
+            {
+              date: "2026-09-17",
+              is_today: true,
+              stories: [
+                story({ primary: headline({ url: "https://example.com/already-failed", sentiment_status: "error" }) }),
+                story({
+                  primary: headline({
+                    url: "https://example.com/still-pending",
+                    title: "Still pending",
+                    sentiment_status: "ok",
+                    sentiment_enum: "neutral",
+                    sentiment_score: 55,
+                  }),
                 }),
-              }),
-            ],
-          },
-        ],
-      });
+              ],
+            },
+          ],
+        }),
+      );
 
       renderSearchPage(["/search?ticker=AAPL"]);
       await waitFor(() => {
@@ -436,7 +506,7 @@ describe("SearchPage", () => {
 
       // Act: fast-forward one poll interval.
       await act(async () => {
-        await vi.advanceTimersByTimeAsync(5000);
+        await vi.advanceTimersByTimeAsync(10000);
       });
 
       // Assert: the poll fired despite the page reading "error" the whole time, and the second
@@ -447,38 +517,192 @@ describe("SearchPage", () => {
       });
     });
 
-    it("restarts polling on a manual Refresh even when the overall status is the same before and after", async () => {
-      // Arrange: Refresh always re-enqueues a retry server-side (search.py), but if the frontend only
-      // watched the coarse `sentiment` value it would see "error" both before and after and never notice.
+    it("pauses polling while the page is hidden, and checks immediately on becoming visible again", async () => {
+      // Arrange
       vi.useFakeTimers({ shouldAdvanceTime: true });
-      fetchSearch.mockResolvedValueOnce(
-        response({ sentiment: "error", days: dayWith(headline({ sentiment_status: "error" })) }),
-      );
+      fetchSearch.mockResolvedValue(response({ days: dayWith(headline()) }));
+      fetchSearchStatus.mockResolvedValue(statusResponse({ sentiment: "ok", days: dayWith(headline()) }));
+
       renderSearchPage(["/search?ticker=AAPL"]);
       await waitFor(() => {
-        expect(screen.getByText(/analysis failed/i)).toBeInTheDocument();
+        expect(screen.getByText(/analysis complete/i)).toBeInTheDocument();
       });
+
+      // Act: background the tab, then let two full poll intervals' worth of time pass.
+      setVisibility("hidden");
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(20000);
+      });
+
+      // Assert: nothing happened while hidden.
       expect(fetchSearchStatus).not.toHaveBeenCalled();
 
-      // Act: click Refresh -- the retried headline is pending again server-side. fireEvent, not userEvent,
-      // to avoid userEvent's own real-timer internals fighting the fake timers here.
-      fetchSearch.mockResolvedValueOnce(response({ sentiment: "error", days: dayWith(headline()) }));
+      // Act: switch back.
       await act(async () => {
-        fireEvent.click(screen.getByRole("button", { name: /refresh/i }));
-      });
-      await waitFor(() => {
-        expect(fetchSearch).toHaveBeenCalledTimes(2);
+        setVisibility("visible");
       });
 
-      // Assert: polling starts even though sentiment read "error" both times.
-      fetchSearchStatus.mockResolvedValue({
-        sentiment: "ok",
-        days: dayWith(headline({ sentiment_status: "ok", sentiment_enum: "positive", sentiment_score: 80 })),
+      // Assert: a check fires immediately on refocus, without waiting for the next interval tick.
+      await waitFor(() => {
+        expect(fetchSearchStatus).toHaveBeenCalledTimes(1);
+      });
+    });
+
+    it("shows a live 'last refresh Ns ago' indicator that counts up and resets on every successful check", async () => {
+      // Arrange
+      vi.useFakeTimers({ shouldAdvanceTime: true });
+      fetchSearch.mockResolvedValue(response({ days: dayWith(headline()) }));
+      fetchSearchStatus.mockResolvedValue(statusResponse({ sentiment: "ok", days: dayWith(headline()) }));
+
+      renderSearchPage(["/search?ticker=AAPL"]);
+      await waitFor(() => {
+        expect(screen.getByText(/analysis complete/i)).toBeInTheDocument();
+      });
+
+      // Assert: starts at 0 right after the initial load counts as a refresh.
+      expect(screen.getByText("last refresh 0s ago")).toBeInTheDocument();
+
+      // Act: three seconds pass, no poll due yet (interval is 10s).
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(3000);
+      });
+      expect(screen.getByText("last refresh 3s ago")).toBeInTheDocument();
+
+      // Act: cross the 10s poll interval -- a successful check resets the counter, even though
+      // nothing in the response actually changed.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(7000);
+      });
+      expect(screen.getByText("last refresh 0s ago")).toBeInTheDocument();
+    });
+
+    it("leaves the displayed results and the refresh counter untouched when a background check fails", async () => {
+      // Arrange
+      vi.useFakeTimers({ shouldAdvanceTime: true });
+      fetchSearch.mockResolvedValue(
+        response({ days: dayWith(headline({ title: "Still here", url: "https://example.com/still-here" })) }),
+      );
+      fetchSearchStatus.mockRejectedValue(new Error("network hiccup"));
+
+      renderSearchPage(["/search?ticker=AAPL"]);
+      await waitFor(() => {
+        expect(screen.getByText(/analysis complete/i)).toBeInTheDocument();
+      });
+
+      // Act: cross a poll interval where the check fails.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(10000);
+      });
+      await waitFor(() => {
+        expect(fetchSearchStatus).toHaveBeenCalledTimes(1);
+      });
+
+      // Assert: results are unaffected, and the counter kept counting up from the last real
+      // success -- 10s since load, none of it reset by the failed check.
+      expect(screen.getByRole("link", { name: "Still here" })).toBeInTheDocument();
+      expect(screen.getByText("last refresh 10s ago")).toBeInTheDocument();
+    });
+
+    it("discards a stale poll response that resolves after a newer one -- refocus racing an in-flight check", async () => {
+      // Arrange: two controlled promises, so the test decides which one resolves first.
+      vi.useFakeTimers({ shouldAdvanceTime: true });
+      fetchSearch.mockResolvedValue(response({ days: dayWith(headline()) }));
+      let resolveFirst!: (v: searchModule.SearchStatusResponse) => void;
+      let resolveSecond!: (v: searchModule.SearchStatusResponse) => void;
+      fetchSearchStatus
+        .mockImplementationOnce(() => new Promise((resolve) => (resolveFirst = resolve)))
+        .mockImplementationOnce(() => new Promise((resolve) => (resolveSecond = resolve)));
+
+      renderSearchPage(["/search?ticker=AAPL"]);
+      await waitFor(() => {
+        expect(screen.getByText(/analysis complete/i)).toBeInTheDocument();
+      });
+
+      // Act: the regular 10s poll starts (call #1, left in flight), then a background+refocus
+      // cycle fires an immediate second check (call #2) before call #1 has resolved.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(10000);
+      });
+      expect(fetchSearchStatus).toHaveBeenCalledTimes(1);
+      setVisibility("hidden");
+      await act(async () => {
+        setVisibility("visible");
+      });
+      expect(fetchSearchStatus).toHaveBeenCalledTimes(2);
+
+      // Act: the newer call (#2) resolves first, the older one (#1) resolves after it.
+      await act(async () => {
+        resolveSecond(statusResponse({ sentiment: "ok", days: dayWith(headline({ title: "Newer", url: "https://example.com/newer" })) }));
       });
       await act(async () => {
-        await vi.advanceTimersByTimeAsync(5000);
+        resolveFirst(statusResponse({ sentiment: "ok", days: dayWith(headline({ title: "Stale", url: "https://example.com/stale" })) }));
       });
-      expect(fetchSearchStatus).toHaveBeenCalledWith("AAPL");
+
+      // Assert: the stale, later-resolving response never overwrites the newer one already applied.
+      expect(screen.getByRole("link", { name: "Newer" })).toBeInTheDocument();
+      expect(screen.queryByRole("link", { name: "Stale" })).not.toBeInTheDocument();
+    });
+  });
+
+  // The add/remove button (spec 0008): sourced from Layout's shared watchlist state via
+  // useOutletContext(), not a separate fetch -- see renderSearchPage's own context param.
+  describe("watchlist button", () => {
+    it("is absent while signed out, even once results are showing", async () => {
+      fetchSearch.mockResolvedValue(response({ days: dayWith(headline()) }));
+
+      renderSearchPage(["/search?ticker=AAPL"], { isSignedIn: false });
+      await waitFor(() => expect(screen.getByText(/analysis complete/i)).toBeInTheDocument());
+
+      expect(screen.queryByRole("button", { name: /watchlist/i })).not.toBeInTheDocument();
+    });
+
+    it("shows \"Add AAPL to watchlist\" when signed in and the ticker isn't already watchlisted", async () => {
+      fetchSearch.mockResolvedValue(response({ days: dayWith(headline()) }));
+
+      renderSearchPage(["/search?ticker=AAPL"], { isSignedIn: true, entries: [] });
+      await waitFor(() => expect(screen.getByText(/analysis complete/i)).toBeInTheDocument());
+
+      expect(screen.getByRole("button", { name: "Add AAPL to watchlist" })).toBeInTheDocument();
+    });
+
+    it("shows \"Remove AAPL from watchlist\" when the current ticker is already on the watchlist", async () => {
+      fetchSearch.mockResolvedValue(response({ days: dayWith(headline()) }));
+
+      renderSearchPage(["/search?ticker=AAPL"], {
+        isSignedIn: true,
+        entries: [{ ticker: "AAPL", added_at: "2026-09-30T00:00:00Z", new_headlines: 0 }],
+      });
+      await waitFor(() => expect(screen.getByText(/analysis complete/i)).toBeInTheDocument());
+
+      expect(screen.getByRole("button", { name: "Remove AAPL from watchlist" })).toBeInTheDocument();
+    });
+
+    it("calls the context's add() with the current ticker when clicked", async () => {
+      fetchSearch.mockResolvedValue(response({ days: dayWith(headline()) }));
+      const add = vi.fn().mockResolvedValue(undefined);
+      const user = userEvent.setup();
+
+      renderSearchPage(["/search?ticker=AAPL"], { isSignedIn: true, entries: [], add });
+      await waitFor(() => expect(screen.getByText(/analysis complete/i)).toBeInTheDocument());
+      await user.click(screen.getByRole("button", { name: "Add AAPL to watchlist" }));
+
+      expect(add).toHaveBeenCalledWith("AAPL");
+    });
+
+    it("calls the context's remove() with the current ticker when clicked", async () => {
+      fetchSearch.mockResolvedValue(response({ days: dayWith(headline()) }));
+      const remove = vi.fn().mockResolvedValue(undefined);
+      const user = userEvent.setup();
+
+      renderSearchPage(["/search?ticker=AAPL"], {
+        isSignedIn: true,
+        entries: [{ ticker: "AAPL", added_at: "2026-09-30T00:00:00Z", new_headlines: 0 }],
+        remove,
+      });
+      await waitFor(() => expect(screen.getByText(/analysis complete/i)).toBeInTheDocument());
+      await user.click(screen.getByRole("button", { name: "Remove AAPL from watchlist" }));
+
+      expect(remove).toHaveBeenCalledWith("AAPL");
     });
   });
 });

@@ -2,7 +2,10 @@
 existed for these before; fetch_headlines_job gained real logic (triggering sentiment) worth
 covering directly, rather than only through the framework-agnostic functions it wraps."""
 
-from ticker_backend.worker import fetch_headlines_job
+import pytest
+
+from ticker_backend.config import settings
+from ticker_backend.worker import WorkerSettings, fetch_headlines_job
 
 
 async def test_fetch_headlines_job_triggers_sentiment_after_fetch_finishes(monkeypatch):
@@ -10,9 +13,9 @@ async def test_fetch_headlines_job_triggers_sentiment_after_fetch_finishes(monke
     triggered from here, not from search(), which can't know when a background-run job finishes."""
     calls = []
 
-    async def fake_fetch_and_persist_headlines(ticker):
-        # Arrange: records that the real fetch ran, before sentiment is ever triggered.
-        calls.append(("fetch", ticker))
+    async def fake_fetch_and_persist_headlines(ticker, redis=None):
+        # Arrange: records that the real fetch ran (and which redis handle it got), before sentiment is triggered.
+        calls.append(("fetch", ticker, redis))
         return {"status": "success", "providers": {}, "grouping": "ok"}
 
     async def fake_enqueue_sentiment_after_fetch(redis, ticker, session_factory=None):
@@ -25,7 +28,17 @@ async def test_fetch_headlines_job_triggers_sentiment_after_fetch_finishes(monke
     # Act: run the real job wrapper, ARQ's own ctx dict carries the Redis pool under "redis".
     result = await fetch_headlines_job({"redis": "the-real-redis-pool"}, "AAPL")
 
-    # Assert: fetch ran first, sentiment triggered after with the ticker and ctx's redis handle,
+    # Assert: fetch ran first (with ctx's redis, for the rate limit -- ADR 0018), then sentiment,
     # and the fetch job's own result is returned unchanged.
-    assert calls == [("fetch", "AAPL"), ("sentiment", "the-real-redis-pool", "AAPL")]
+    assert calls == [("fetch", "AAPL", "the-real-redis-pool"), ("sentiment", "the-real-redis-pool", "AAPL")]
     assert result == {"status": "success", "providers": {}, "grouping": "ok"}
+
+
+async def test_worker_startup_refuses_to_run_without_its_required_secrets(monkeypatch):
+    # Arrange: a worker whose Finnhub key never arrived (ADR 0017).
+    monkeypatch.setattr(settings, "app_mode", "worker")
+    monkeypatch.setattr(settings, "finnhub_api_key", "")
+
+    # Act + Assert: ARQ's on_startup hook raises, so the container exits instead of failing on the first job.
+    with pytest.raises(RuntimeError, match="finnhub_api_key"):
+        await WorkerSettings.on_startup({})

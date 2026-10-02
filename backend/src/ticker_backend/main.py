@@ -9,12 +9,13 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from ticker_backend.auth import router as auth_router
-from ticker_backend.config import settings
+from ticker_backend.config import require_secrets, settings
 from ticker_backend.health import router as health_router
 from ticker_backend.health import ui_router as ui_health_router
 from ticker_backend.logging import configure_logging
 from ticker_backend.search import api_lifespan
 from ticker_backend.search import router as search_router
+from ticker_backend.watchlist import router as watchlist_router
 
 configure_logging()
 log = structlog.get_logger()
@@ -23,6 +24,9 @@ STATIC_DIR = Path(__file__).resolve().parent.parent.parent / "static"
 
 
 def create_app() -> FastAPI:
+    # Refuse to boot without this mode's required secrets (ADR 0017) -- ui needs none.
+    require_secrets(settings)
+
     # Only api mode enqueues jobs -- ui has no reason to hold an ARQ Redis
     # pool open for its whole lifetime.
     lifespan = api_lifespan if settings.app_mode == "api" else None
@@ -48,6 +52,8 @@ def create_app() -> FastAPI:
             app.include_router(search_router)
             # /api/auth/* -- Google sign-in, session, sign-out -- see auth.py.
             app.include_router(auth_router)
+            # /api/watchlist -- add/remove/list a signed-in user's tracked tickers -- see watchlist.py.
+            app.include_router(watchlist_router)
         case "ui":
             log.info("app.mode", mode="ui", static_dir=str(STATIC_DIR))
             # Trivial per-container liveness only -- the full aggregate lives on api, see above.

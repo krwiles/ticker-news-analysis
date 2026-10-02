@@ -11,7 +11,7 @@ import structlog
 from arq import cron, func
 from arq.connections import RedisSettings
 
-from ticker_backend.config import settings
+from ticker_backend.config import require_secrets, settings
 from ticker_backend.health import WORKER_HEARTBEAT_KEY
 from ticker_backend.jobs import FETCH_RESULT_TTL_SECONDS, enqueue_sentiment_after_fetch
 from ticker_backend.logging import configure_logging
@@ -36,7 +36,8 @@ async def fetch_headlines_job(ctx: dict, ticker: str) -> dict:
     """Thin ARQ wrapper — the actual logic stays framework-agnostic in
     providers.py so it's callable directly from a test (lesson 9) or, later,
     from a cron_jobs entry for the future watchlist feature."""
-    result = await fetch_and_persist_headlines(ticker)
+    # ctx["redis"] threads through to the shared Finnhub rate limit (ADR 0018).
+    result = await fetch_and_persist_headlines(ticker, redis=ctx["redis"])
     # Sentiment starts only once this job's own fetch+grouping is truly done (plan 0036) --
     # never from search(), which can't know when a background-run job finishes.
     await enqueue_sentiment_after_fetch(ctx["redis"], ticker)
@@ -51,6 +52,11 @@ async def sentiment_job(ctx: dict, ticker: str) -> dict:
     return await compute_and_persist_sentiment(ticker)
 
 
+async def startup(ctx: dict) -> None:
+    """ARQ's on_startup hook -- refuses to run without this mode's required secrets (ADR 0017)."""
+    require_secrets(settings)
+
+
 class WorkerSettings:
     """ARQ discovers this class by name (`arq ticker_backend.worker.WorkerSettings`,
     see docker-compose.yml's worker command) -- not imported and called
@@ -58,6 +64,7 @@ class WorkerSettings:
 
     # Enqueue-able job functions -- what /api/search's `enqueue_job(...)` is dispatching to (ADR 0004).
     # func() wraps each to set how long ARQ keeps its result: brief for fetch, none for sentiment (ADR 0015).
+    on_startup = startup
     functions = [
         func(fetch_headlines_job, keep_result=FETCH_RESULT_TTL_SECONDS),
         func(sentiment_job, keep_result=0),

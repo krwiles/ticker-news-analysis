@@ -9,7 +9,7 @@ const MESSAGE: Record<SearchResponse["grouping"], string> = {
   ok: "Stories grouped normally.",
   skipped: "Story grouping isn't configured — headlines shown individually.",
   error: "Story grouping failed — headlines shown individually.",
-  unknown: "Story grouping status unknown — the fetch didn't complete.",
+  unknown: "Story grouping status unknown — waiting on the next check.",
 };
 
 // skipped is a deliberate, expected state (no OPENAI_API_KEY configured),

@@ -12,14 +12,16 @@ from arq import ArqRedis
 from arq.jobs import Job
 from sqlalchemy import update
 
-from ticker_backend.config import RECENT_HEADLINES_WINDOW, settings
+from ticker_backend.config import recent_headlines_cutoff, settings
 from ticker_backend.db import async_session_factory
 from ticker_backend.models import Headline
+from ticker_backend.rate_limit import should_defer_fetch
 
 log = structlog.get_logger()
 
-# How long ARQ keeps a finished fetch's result; must be > 0 or a joiner can hit ResultNotFound (ADR 0015).
-FETCH_RESULT_TTL_SECONDS = 5
+# How long ARQ keeps a finished fetch's result -- must outlast both ADR 0015's single-flight
+# join window and a live-refresh poll interval, or a late poll finds it already expired.
+FETCH_RESULT_TTL_SECONDS = 60
 
 
 def fetch_job_id(ticker: str) -> str:
@@ -48,6 +50,26 @@ async def enqueue_or_join_fetch(arq_redis: ArqRedis, ticker: str, job_factory=Jo
     return job
 
 
+async def enqueue_background_fetch(
+    arq_redis: ArqRedis, ticker: str, now: datetime, job_factory=Job
+) -> Job:
+    """Like enqueue_or_join_fetch, but for a background-refresh check only (search.py's
+    /api/search/status) -- /api/search itself never calls this, so an explicit search is never
+    subject to the defer below (ADR 0018)."""
+    # Check the shared Finnhub budget and this ticker's own cooldown before enqueuing at all.
+    should_defer, defer_by = await should_defer_fetch(arq_redis, ticker, now)
+    # Same deterministic ID fetch jobs always use, so ADR 0015's join behavior applies whether
+    # deferred or not -- defers the *whole* job, never just the Finnhub call inside it.
+    job_id = fetch_job_id(ticker)
+    job = await arq_redis.enqueue_job(
+        "fetch_headlines_job", ticker, _job_id=job_id, _defer_by=defer_by if should_defer else None
+    )
+    # ID already taken -- another caller's fetch (running or already deferred) is in flight, so join it.
+    if job is None:
+        job = job_factory(job_id, redis=arq_redis)
+    return job
+
+
 async def enqueue_sentiment(arq_redis: ArqRedis, ticker: str) -> Job | None:
     """Starts the ticker's sentiment job unless one is already queued or running. Fire-and-forget:
     nobody awaits the returned Job -- but callers do care whether a *new* job actually started
@@ -67,7 +89,8 @@ async def _reset_stale_sentiment_status(ticker: str, session_factory) -> None:
     is left out of the target set entirely and there's nothing worth resetting to pending for.
     The WHERE below only ever matches 'error'/'skipped' rows, so it can never race against and
     overwrite a row the job just wrote 'ok' to (plan 0032's safety property)."""
-    cutoff = datetime.now(timezone.utc) - RECENT_HEADLINES_WINDOW
+    # Day-aligned, not an exact instant -- see docs/plans/0039-*.md.
+    cutoff = recent_headlines_cutoff(datetime.now(timezone.utc))
     async with session_factory() as session:
         await session.execute(
             update(Headline)

@@ -14,7 +14,7 @@ import httpx
 import structlog
 from sqlalchemy import select, update
 
-from ticker_backend.config import RECENT_HEADLINES_WINDOW, settings
+from ticker_backend.config import recent_headlines_cutoff, settings
 from ticker_backend.db import async_session_factory
 from ticker_backend.models import Headline, Story
 from ticker_backend.providers import ProviderFetchError, embedding_input_text
@@ -26,15 +26,7 @@ log = structlog.get_logger()
 OPENAI_SENTIMENT_MODEL = "gpt-5-nano"
 
 # Structured Outputs schema (spec 0005) guarantees this exact shape back, not free text to parse.
-# gloss must never restate the enum itself ("positive") -- the prompt below is what prevents that.
-_SENTIMENT_SYSTEM_PROMPT = (
-    "Score this stock news headline from 0 (most negative) to 100 (most positive). "
-    "Give a concise, natural one-word gloss describing the specific character of the "
-    "news, such as bullish, reassuring, routine, speculative, operational, regulatory, "
-    "concerning, or alarming. This list is illustrative, not a fixed vocabulary. "
-    "Choose a different word when it is more precise, and never use positive, neutral, "
-    "or negative as the gloss. Give a one-sentence rationale for the score."
-)
+# The system prompt itself lives in Settings, not here -- see config.py's sentiment_system_prompt.
 _SENTIMENT_SCHEMA = {
     "type": "object",
     "properties": {
@@ -58,7 +50,7 @@ async def get_sentiment(text: str, client: httpx.AsyncClient) -> dict:
             json={
                 "model": OPENAI_SENTIMENT_MODEL,
                 "messages": [
-                    {"role": "system", "content": _SENTIMENT_SYSTEM_PROMPT},
+                    {"role": "system", "content": settings.sentiment_system_prompt},
                     {"role": "user", "content": text},
                 ],
                 "response_format": {
@@ -163,7 +155,8 @@ async def _fetch_pending_headlines(ticker: str, session_factory) -> list[Headlin
     0014's own Non-goal: no dedicated backfill, only whatever a later request's own scope happens
     to include again). Newest first (spec 0005): the most recently published headlines are what a
     user actually came back to check, so they're worth resolving before older ones."""
-    cutoff = datetime.now(timezone.utc) - RECENT_HEADLINES_WINDOW
+    # Day-aligned, not an exact instant -- see docs/plans/0039-*.md.
+    cutoff = recent_headlines_cutoff(datetime.now(timezone.utc))
     # Only a real score (`ok`) is permanent -- this WHERE clause is the entire enforcement of
     # that rule (spec 0005); `skipped`/`error` both stay eligible for retry.
     async with session_factory() as session:

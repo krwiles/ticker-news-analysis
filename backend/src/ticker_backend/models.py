@@ -141,3 +141,23 @@ class User(Base):
 
     def __repr__(self) -> str:
         return f"User(sub={self.sub!r}, email={self.email!r})"
+
+
+class WatchlistEntry(Base):
+    """One Ticker a User is tracking -- see CONTEXT.md's `Watchlist entry`.
+
+    Identity is the `(user_sub, ticker)` pair itself, not a surrogate id -- there is never
+    more than one live entry for the same user and ticker. `last_viewed_at` lives on the same
+    row as `added_at` rather than a separate table: only the most recent view matters here,
+    not a history of views (ADR 0019's domain-modeling pass).
+    """
+
+    __tablename__ = "watchlist_entries"
+
+    user_sub: Mapped[str] = mapped_column(Text, primary_key=True)
+    ticker: Mapped[str] = mapped_column(Text, primary_key=True)
+    added_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    last_viewed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    def __repr__(self) -> str:
+        return f"WatchlistEntry(user_sub={self.user_sub!r}, ticker={self.ticker!r})"

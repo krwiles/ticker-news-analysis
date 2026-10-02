@@ -1,7 +1,12 @@
-from datetime import timedelta
+from datetime import datetime, time, timedelta, timezone
+from pathlib import Path
 from typing import Literal
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from sqlalchemy.engine import URL
+
+# Where Docker Compose mounts file-based secrets inside a container (ADR 0017).
+SECRETS_DIR = "/run/secrets"
 
 
 class Settings(BaseSettings):
@@ -11,18 +16,30 @@ class Settings(BaseSettings):
     see docs/adr/0001-single-image-multi-mode-containers.md.
     """
 
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+    # None off-container (no /run/secrets) -- avoids pydantic-settings' missing-directory warning.
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        secrets_dir=SECRETS_DIR if Path(SECRETS_DIR).is_dir() else None,
+        extra="ignore",
+    )
 
     app_mode: str = "api"
-    database_url: str = "postgresql+asyncpg://ticker:ticker@db:5432/ticker"
+    # The DSN is assembled from these parts (see database_url) so the password can arrive as a file secret.
+    postgres_user: str = "ticker"
+    postgres_db: str = "ticker"
+    postgres_host: str = "db"
+    postgres_password: str = ""
     redis_url: str = "redis://redis:6379/0"
     # Standalone Milvus (spec 0002) -- worker-only, see docker-compose.yml for why.
     milvus_uri: str = "http://milvus:19530"
     # The ui and api containers are different origins -- only this one is allowed in (main.py's CORS).
     ui_origin: str = "http://localhost:3000"
+    # Secrets below (and postgres_password) come from /run/secrets files -- see ADR 0017.
     finnhub_api_key: str = ""
     # OpenAI's embeddings API (spec 0002 story-grouping, lesson 18) -- see ADR 0007.
     openai_api_key: str = ""
+    # api never holds the OpenAI key (least privilege) -- it gets this non-secret mirror instead.
+    sentiment_configured: bool = False
     # SEC requires a descriptive User-Agent identifying the app + a contact
     # email on every request — not a secret, just a compliance string.
     sec_edgar_user_agent: str = "TickerNewsAnalysis contact@example.com"
@@ -35,9 +52,53 @@ class Settings(BaseSettings):
     google_client_id: str = ""
     # Environment-driven -- True over plain HTTP makes the browser refuse the cookie (ADR 0016).
     cookie_secure: bool = False
+    # Env-configurable so it can be tuned without a code change or image rebuild (idea noted 2026-09-21).
+    sentiment_system_prompt: str = (
+        "Score this stock news headline from 0 (most negative) to 100 (most positive). "
+        "Give a concise, natural one-word gloss describing the specific character of the "
+        "news, such as bullish, reassuring, routine, speculative, operational, regulatory, "
+        "concerning, or alarming. This list is illustrative, not a fixed vocabulary. "
+        "Choose a different word when it is more precise, and never use positive, neutral, "
+        "or negative as the gloss. Give a one-sentence rationale for the score."
+    )
+
+    @property
+    def database_url(self) -> URL:
+        """A SQLAlchemy URL object, not a string -- URL.create escapes special characters in the password."""
+        return URL.create(
+            "postgresql+asyncpg",
+            username=self.postgres_user,
+            password=self.postgres_password,
+            host=self.postgres_host,
+            port=5432,
+            database=self.postgres_db,
+        )
 
 
 settings = Settings()
+
+# Secrets each mode cannot run without -- the OpenAI key is deliberately absent (spec 0005 degrades without it).
+REQUIRED_SECRETS_BY_MODE = {
+    "ui": [],
+    "api": ["postgres_password"],
+    "worker": ["postgres_password", "finnhub_api_key"],
+}
+
+
+def require_secrets(cfg: Settings) -> None:
+    """Fail fast at startup, naming what's missing (never its value). Called from create_app() and the
+    worker's startup hook, not Settings itself -- Settings() builds at import time, and tests import with no secrets."""
+    # An unrecognized mode must not silently pass as "needs nothing" -- worker has no other guard like this.
+    if cfg.app_mode not in REQUIRED_SECRETS_BY_MODE:
+        raise RuntimeError(f"Unrecognized APP_MODE {cfg.app_mode!r} -- expected one of {list(REQUIRED_SECRETS_BY_MODE)}.")
+    # Collect every required secret for this mode that is empty.
+    missing = [name for name in REQUIRED_SECRETS_BY_MODE[cfg.app_mode] if not getattr(cfg, name)]
+    # Refuse to start with a clear, actionable message instead of failing later on an opaque auth error.
+    if missing:
+        raise RuntimeError(
+            f"APP_MODE={cfg.app_mode!r} is missing required secret(s): {', '.join(missing)}. "
+            "Run scripts/init-secrets.sh to create them (see README, ADR 0017)."
+        )
 
 # How far back a search looks -- a fixed business rule (spec 0001). Lives here, not providers.py/
 # search.py, so either can import it without pulling in the other's own import chain.
@@ -47,6 +108,16 @@ RECENT_HEADLINES_WINDOW = timedelta(days=7)
 # import-chain reason as RECENT_HEADLINES_WINDOW above.
 SENTIMENT_NEGATIVE_MAX = 40
 SENTIMENT_POSITIVE_MIN = 70
+
+
+def recent_headlines_cutoff(now: datetime) -> datetime:
+    """The earliest published_at a headline can have and still count as "recent" -- aligned to the
+    start of the oldest included UTC day, not an exact instant, so it can never fall inside the
+    same-day granularity gap Finnhub's own from/to date range fetches by (providers.py, docs/plans/
+    0039-*.md). `now` is a parameter, not datetime.now() called internally, matching
+    build_daily_view's own testable-purity style (search.py)."""
+    oldest_day = (now - RECENT_HEADLINES_WINDOW).date()
+    return datetime.combine(oldest_day, time.min, tzinfo=timezone.utc)
 
 
 def derive_sentiment_enum(score: int | float) -> Literal["positive", "neutral", "negative"]:

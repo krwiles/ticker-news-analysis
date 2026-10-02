@@ -13,13 +13,15 @@ from zoneinfo import ZoneInfo
 import structlog
 from arq import ArqRedis, create_pool
 from arq.connections import RedisSettings
-from fastapi import APIRouter, Depends, FastAPI, Request
+from arq.jobs import JobStatus
+from fastapi import APIRouter, Depends, FastAPI
 from sqlalchemy import select
 
-from ticker_backend.config import RECENT_HEADLINES_WINDOW, derive_sentiment_enum, settings
-from ticker_backend.db import async_session_factory
-from ticker_backend.jobs import enqueue_or_join_fetch
-from ticker_backend.models import Headline, Story
+from ticker_backend.auth import optional_user
+from ticker_backend.config import derive_sentiment_enum, recent_headlines_cutoff, settings
+from ticker_backend.deps import get_arq_redis, get_session_factory
+from ticker_backend.jobs import enqueue_background_fetch, enqueue_or_join_fetch
+from ticker_backend.models import Headline, Story, User, WatchlistEntry
 
 log = structlog.get_logger()
 router = APIRouter()
@@ -39,19 +41,6 @@ async def api_lifespan(app: FastAPI):
     yield
     await app.state.arq_redis.aclose()
 
-
-async def get_arq_redis(request: Request) -> ArqRedis:
-    """FastAPI dependency — real requests get api_lifespan's pool; lesson
-    10's tests override this to avoid needing a real Redis connection for
-    endpoint tests that don't care about the job layer."""
-    return request.app.state.arq_redis
-
-
-def get_session_factory():
-    """FastAPI dependency, not a plain default -- FastAPI introspects path
-    operation parameters, and a bare async_sessionmaker breaks that.
-    Depends() injects it without being treated as request data."""
-    return async_session_factory
 
 
 def _headline_to_dict(headline: Headline) -> dict:
@@ -157,7 +146,8 @@ def _compute_sentiment_status(headlines: list[Headline]) -> str:
     already-queried headline rows, never stored anywhere (spec 0005/ADR 0014). Checked in this
     priority order deliberately: an error surfaces even while other headlines are still pending,
     rather than being masked by "processing"."""
-    if not settings.openai_api_key:
+    # api never holds the OpenAI key itself (ADR 0017) -- it reads the non-secret mirror instead.
+    if not settings.sentiment_configured:
         return "skipped"
     if any(h.sentiment_status == "error" for h in headlines):
         return "error"
@@ -170,7 +160,8 @@ async def _load_search_results(ticker: str, session_factory) -> tuple[list[dict]
     """Queries Postgres for this ticker's recent headlines and builds both the day view and the
     page-level sentiment status from the same rows -- shared by /api/search and
     /api/search/status (lesson 26) so the two never drift out of sync with each other."""
-    cutoff = datetime.now(timezone.utc) - RECENT_HEADLINES_WINDOW
+    # Day-aligned, not an exact instant -- see docs/plans/0039-*.md.
+    cutoff = recent_headlines_cutoff(datetime.now(timezone.utc))
 
     # Query Postgres directly for this ticker's recent headlines -- neither
     # job hands back headline data itself, per the module docstring.
@@ -194,16 +185,38 @@ async def _load_search_results(ticker: str, session_factory) -> tuple[list[dict]
     return days, sentiment_status
 
 
+async def _record_view_if_watchlisted(session_factory, user: User | None, ticker: str) -> None:
+    """Upserts last_viewed_at on a signed-in user's existing watchlist entry for this
+    ticker -- never creates one (ADR 0019: only a ticker already on the watchlist has its
+    count affected by a view). Swallowed/logged on failure, same discipline as jobs.py's
+    enqueue_sentiment_after_fetch -- a hiccup here must never turn a healthy search into an
+    error."""
+    if user is None:
+        return
+    try:
+        async with session_factory() as session:
+            entry = await session.get(WatchlistEntry, (user.sub, ticker))
+            if entry is not None:
+                entry.last_viewed_at = datetime.now(timezone.utc)
+                await session.commit()
+    except Exception as exc:  # noqa: BLE001 - swallowed and logged, see docstring
+        log.warning("search.view_record_failed", ticker=ticker, error=f"{type(exc).__name__}: {exc}")
+
+
 @router.get("/api/search")
 async def search(
     ticker: str,
     arq_redis: ArqRedis = Depends(get_arq_redis),
     session_factory=Depends(get_session_factory),
+    user: User | None = Depends(optional_user),
 ) -> dict:
     """See the module docstring for the two-step shape. Ticker
     case-normalization happens here, once -- the frontend deliberately
     doesn't uppercase before calling this."""
     ticker = ticker.upper()
+    # Watchlists (ADR 0019): a signed-in visitor's own view of this ticker resets their
+    # watchlist entry's count, if they have one -- never gates or slows the search itself.
+    await _record_view_if_watchlisted(session_factory, user, ticker)
 
     # Default in case the job below never returns a real result at all.
     providers_status: dict[str, str] = {}
@@ -212,11 +225,16 @@ async def search(
     try:
         # Start lesson 7's fetch job -- or join the one already running for this ticker (ADR 0015) -- and wait for it.
         job = await enqueue_or_join_fetch(arq_redis, ticker)
-        result = await job.result(timeout=settings.job_timeout_seconds)
-        # Pull the job's own status, per-provider detail, and grouping outcome out of its result.
-        status = result["status"]
-        providers_status = result["providers"]
-        grouping_status = result["grouping"]
+        # A background check may have deferred this job's ID (ADR 0018) -- never wait on that.
+        # Distinct from a real failure: nothing went wrong, it'll run later on its own.
+        if await job.status() == JobStatus.deferred:
+            status = "deferred"
+        else:
+            result = await job.result(timeout=settings.job_timeout_seconds)
+            # Pull the job's own status, per-provider detail, and grouping outcome out of its result.
+            status = result["status"]
+            providers_status = result["providers"]
+            grouping_status = result["grouping"]
     except Exception as exc:  # noqa: BLE001 - timeout or unexpected job failure both surface the same way
         # asyncio.TimeoutError carries no message (str(exc) is empty) -- the
         # exception's own type is the only thing that says what happened.
@@ -242,13 +260,44 @@ async def search(
 
 
 @router.get("/api/search/status")
-async def search_status(ticker: str, session_factory=Depends(get_session_factory)) -> dict:
-    """Read-only -- no fetch_headlines_job or sentiment_job enqueue, just current Postgres state
-    (lesson 26/ADR 0014). The frontend's poll loop calls this, not /api/search itself, so polling
-    for sentiment doesn't re-trigger a full EDGAR/Finnhub/embeddings/grouping pass on every tick.
-    No status/providers/grouping in the response -- those only ever exist as the fetch job's own
-    return value, never persisted, so there's nothing here to report them from."""
+async def search_status(
+    ticker: str, session_factory=Depends(get_session_factory), arq_redis: ArqRedis = Depends(get_arq_redis)
+) -> dict:
+    """Never *waits* on a pending fetch -- but it does now *trigger* one in the background (ADR
+    0018), rate-limited via jobs.py's enqueue_background_fetch, and reports that job's real
+    outcome once it's actually complete. Fixes a real bug hit live: /api/search's own
+    "deferred" label used to be the page's last word on status/providers/grouping forever,
+    since this endpoint never refreshed them -- a page could stay stuck looking like a
+    permanent failure even after the deferred fetch went on to succeed. This is what
+    live-refresh (spec 0007) polls, not /api/search itself, so a tick never re-triggers a full
+    EDGAR/Finnhub/embeddings/grouping pass synchronously."""
     # Same case-normalization as search() above.
     ticker = ticker.upper()
+    # Defaults for when there's nothing fresh to report yet (still pending, or the trigger
+    # itself failed) -- "deferred", not "complete_failure": nothing went wrong.
+    status = "deferred"
+    providers_status: dict[str, str] = {}
+    grouping_status = "unknown"
+    try:
+        # Trigger a background refresh check -- the enqueue call itself is awaited (a quick
+        # Redis round trip); a still-pending job's eventual result is not (ADR 0018).
+        job = await enqueue_background_fetch(arq_redis, ticker, datetime.now(timezone.utc))
+        if await job.status() == JobStatus.complete:
+            # Already finished (may have settled since an earlier poll) -- bounded, not
+            # unawaited, since the result should already be sitting there, not still running.
+            result = await job.result(timeout=2)
+            status = result["status"]
+            providers_status = result["providers"]
+            grouping_status = result["grouping"]
+    except Exception as exc:  # noqa: BLE001 - logged and swallowed, same discipline as jobs.py's own
+        # A hiccup here (a Redis blip, say) must never turn an otherwise-healthy poll into a 500 --
+        # spec 0007's "never causes visible errors" promise applies to this trigger too.
+        log.warning("search_status.background_check_failed", ticker=ticker, error=f"{type(exc).__name__}: {exc}")
     days, sentiment_status = await _load_search_results(ticker, session_factory)
-    return {"sentiment": sentiment_status, "days": days}
+    return {
+        "status": status,
+        "providers": providers_status,
+        "grouping": grouping_status,
+        "sentiment": sentiment_status,
+        "days": days,
+    }

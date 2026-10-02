@@ -27,7 +27,10 @@ describe("fetchSearch", () => {
 
     await fetchSearch("AAPL");
 
-    expect(mockFetch).toHaveBeenCalledWith("http://localhost:8000/api/search?ticker=AAPL");
+    // credentials: "include" (ADR 0019) -- /api/search now optionally cares about the session cookie.
+    expect(mockFetch).toHaveBeenCalledWith("http://localhost:8000/api/search?ticker=AAPL", {
+      credentials: "include",
+    });
   });
 
   it("returns the parsed JSON body on a successful response", async () => {
@@ -60,6 +63,9 @@ describe("fetchSearchStatus", () => {
   });
 
   const okResponse: SearchStatusResponse = {
+    status: "success",
+    providers: {},
+    grouping: "ok",
     sentiment: "processing",
     days: [],
   };

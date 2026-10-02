@@ -8,6 +8,8 @@ def configure_logging() -> None:
     # Hand the record to structlog's own renderer as-is -- no stdlib
     # formatting of its own, so it doesn't fight with the JSON below.
     logging.basicConfig(format="%(message)s", level=logging.INFO)
+    # httpx logs every request URL at INFO -- silenced so a URL-borne credential can never reach the logs.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
     structlog.configure(
         # Runs left to right -- every call becomes one JSON line with a timestamp + level.
         processors=[

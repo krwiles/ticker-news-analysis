@@ -8,28 +8,37 @@ from datetime import datetime, timezone
 
 from httpx import ASGITransport, AsyncClient
 
+from arq.jobs import JobStatus
+
+from fakes import FakeRedisKV, sign_in as _sign_in
+
 from ticker_backend.main import app
-from ticker_backend.models import Company, Headline, Story
+from ticker_backend.models import Company, Headline, Story, User, WatchlistEntry
 from ticker_backend.search import _compute_sentiment_status, get_arq_redis, get_session_factory
 
 
 class _FakeJob:
-    # Stands in for a real ARQ Job -- lets a test dictate the job's outcome
-    # (a result, or a raised exception) without a real queue behind it.
-    def __init__(self, result=None, exc: Exception | None = None):
+    # Stands in for a real ARQ Job; status defaults to complete since only ADR 0018's new
+    # deferred-job test needs to override it.
+    def __init__(self, result=None, exc: Exception | None = None, status=JobStatus.complete):
         self._result = result
         self._exc = exc
+        self._status = status
 
     async def result(self, timeout=None):
         if self._exc is not None:
             raise self._exc
         return self._result
 
+    async def status(self):
+        return self._status
 
-class _FakeArqRedis:
-    # Stands in for a real ArqRedis pool -- enqueue_job() hands back the fake job above, and
-    # records every job name (and its deterministic ID, ADR 0015) so a test can inspect what fired.
+
+class _FakeArqRedis(FakeRedisKV):
+    # Stands in for a real ArqRedis pool -- records every enqueue_job() call; FakeRedisKV supplies
+    # get/set/incr/expire (ADR 0016/0018: the rate-limit gate runs on the same connection).
     def __init__(self, job: _FakeJob):
+        super().__init__()
         self._job = job
         self.enqueued_job_names: list[str] = []
         self.enqueued_job_ids: list[str | None] = []
@@ -99,6 +108,44 @@ async def test_search_success_returns_seeded_data(test_session_factory):
     today = next(d for d in body["days"] if d["is_today"])
     assert len(today["stories"]) == 1
     assert today["stories"][0]["primary"]["title"] == "A real headline"
+
+
+async def test_search_skips_awaiting_a_deferred_job_and_returns_existing_data(test_session_factory):
+    """ADR 0018 -- a background-refresh check can defer this ticker's job via ARQ's own
+    scheduling (rate limit or cooldown). /api/search must never sit waiting on that: joining a
+    deferred job should return immediately with current data, not hang for job_timeout_seconds."""
+    await _seed_headline(test_session_factory, "NVDA", "Existing headline", "https://example.com/3")
+
+    # The fake job is deferred -- records whether .result() was ever awaited, rather than
+    # raising from inside it (which search()'s own broad except would just swallow, hiding a bug).
+    result_calls: list[None] = []
+
+    async def _record_call(*args, **kwargs):
+        result_calls.append(None)
+        return {"status": "success", "providers": {}, "grouping": "ok"}
+
+    job = _FakeJob(status=JobStatus.deferred)
+    job.result = _record_call
+
+    app.dependency_overrides[get_session_factory] = lambda: test_session_factory
+    app.dependency_overrides[get_arq_redis] = lambda: _FakeArqRedis(job)
+    try:
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            response = await client.get("/api/search", params={"ticker": "NVDA"})
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    assert result_calls == []  # .result() was never awaited
+    body = response.json()
+    # "deferred", not "complete_failure" -- nothing went wrong, it's just postponed. Reusing
+    # the failure label is the exact bug a real user hit: the page looked permanently broken.
+    assert body["status"] == "deferred"
+    assert body["providers"] == {}
+    assert body["grouping"] == "unknown"
+    today = next(d for d in body["days"] if d["is_today"])
+    assert today["stories"][0]["primary"]["title"] == "Existing headline"
 
 
 async def test_search_job_timeout_still_returns_existing_data(test_session_factory):
@@ -187,7 +234,7 @@ def _headline_with_status(status):
 def test_sentiment_status_skipped_when_not_configured(monkeypatch):
     from ticker_backend.config import settings
 
-    monkeypatch.setattr(settings, "openai_api_key", "")
+    monkeypatch.setattr(settings, "sentiment_configured", False)
     # Even a headline with a real score doesn't override "skipped" -- the
     # config check runs first, before any headline row is even considered.
     assert _compute_sentiment_status([_headline_with_status("ok")]) == "skipped"
@@ -196,7 +243,7 @@ def test_sentiment_status_skipped_when_not_configured(monkeypatch):
 def test_sentiment_status_error_even_while_others_are_still_pending(monkeypatch):
     from ticker_backend.config import settings
 
-    monkeypatch.setattr(settings, "openai_api_key", "test-key-not-real")
+    monkeypatch.setattr(settings, "sentiment_configured", True)
     # Error takes priority over "processing" -- it must surface, not be masked by a pending headline.
     assert _compute_sentiment_status([_headline_with_status("error"), _headline_with_status(None)]) == "error"
 
@@ -204,7 +251,7 @@ def test_sentiment_status_error_even_while_others_are_still_pending(monkeypatch)
 def test_sentiment_status_processing_when_any_headline_still_pending(monkeypatch):
     from ticker_backend.config import settings
 
-    monkeypatch.setattr(settings, "openai_api_key", "test-key-not-real")
+    monkeypatch.setattr(settings, "sentiment_configured", True)
     # One headline still unresolved (NULL status) is enough to keep the page "processing".
     assert _compute_sentiment_status([_headline_with_status("ok"), _headline_with_status(None)]) == "processing"
 
@@ -212,7 +259,7 @@ def test_sentiment_status_processing_when_any_headline_still_pending(monkeypatch
 def test_sentiment_status_ok_when_everything_resolved(monkeypatch):
     from ticker_backend.config import settings
 
-    monkeypatch.setattr(settings, "openai_api_key", "test-key-not-real")
+    monkeypatch.setattr(settings, "sentiment_configured", True)
     # Every headline resolved to a real score -- nothing left pending or failed.
     assert _compute_sentiment_status([_headline_with_status("ok"), _headline_with_status("ok")]) == "ok"
 
@@ -239,13 +286,27 @@ async def test_search_only_enqueues_the_fetch_job(test_session_factory):
     assert fake_redis.enqueued_job_ids == ["fetch_headlines:AAPL"]
 
 
-async def test_search_status_endpoint_never_touches_arq(test_session_factory):
-    """The polling endpoint takes no arq_redis dependency at all -- it
-    structurally cannot enqueue a job, proven here by never overriding
-    get_arq_redis and still getting a clean 200 (lesson 26/ADR 0014)."""
+async def test_search_status_triggers_a_background_check_but_never_awaits_a_pending_result(test_session_factory):
+    """ADR 0018/0019 -- the polling endpoint triggers a background refresh check (for the
+    shared rate limit's sake), but must never *wait* on a still-pending job's eventual result;
+    a fake whose .result() would record a call if ever invoked proves it stays fire-and-forget
+    for a job that's deferred/queued/in-progress. A separate test covers the complete case,
+    where reading the (already-available) result is exactly the fix for a real bug: without it,
+    a page that first loaded mid-cooldown stayed reporting "deferred" forever."""
     await _seed_headline(test_session_factory, "TSLA", "Polled headline", "https://example.com/poll-1")
 
+    result_calls: list[None] = []
+
+    async def _record_call(*args, **kwargs):
+        result_calls.append(None)
+        return {}
+
+    job = _FakeJob(status=JobStatus.deferred)
+    job.result = _record_call
+    redis = _FakeArqRedis(job)
+
     app.dependency_overrides[get_session_factory] = lambda: test_session_factory
+    app.dependency_overrides[get_arq_redis] = lambda: redis
     try:
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://test") as client:
@@ -255,9 +316,68 @@ async def test_search_status_endpoint_never_touches_arq(test_session_factory):
 
     assert response.status_code == 200
     body = response.json()
-    assert set(body.keys()) == {"sentiment", "days"}
+    assert set(body.keys()) == {"status", "providers", "grouping", "sentiment", "days"}
+    # Distinct from "complete_failure" -- nothing went wrong, just nothing settled yet.
+    assert body["status"] == "deferred"
+    assert body["providers"] == {}
+    assert body["grouping"] == "unknown"
     today = next(d for d in body["days"] if d["is_today"])
     assert today["stories"][0]["primary"]["title"] == "Polled headline"
+    assert result_calls == []  # never awaited while still pending
+    assert redis.enqueued_job_names == ["fetch_headlines_job"]  # but a background check did fire
+
+
+async def test_search_status_reports_the_real_outcome_once_the_background_check_completes(test_session_factory):
+    """The actual bug fix: once the deferred/triggered job has genuinely finished, its real
+    status/providers/grouping are read (an instant, already-available result, not a wait) and
+    reported -- not left frozen on whatever the page's initial load happened to show."""
+    await _seed_headline(test_session_factory, "TSLA", "Polled headline", "https://example.com/poll-2")
+
+    job = _FakeJob(
+        result={"status": "success", "providers": {"edgar": "ok", "finnhub": "ok"}, "grouping": "ok"},
+        status=JobStatus.complete,
+    )
+    redis = _FakeArqRedis(job)
+
+    app.dependency_overrides[get_session_factory] = lambda: test_session_factory
+    app.dependency_overrides[get_arq_redis] = lambda: redis
+    try:
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            response = await client.get("/api/search/status", params={"ticker": "TSLA"})
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "success"
+    assert body["providers"] == {"edgar": "ok", "finnhub": "ok"}
+    assert body["grouping"] == "ok"
+
+
+async def test_search_status_survives_a_background_check_that_blows_up(test_session_factory):
+    """ADR 0018/spec 0007 -- a hiccup in the rate-limit check (a Redis blip, say) must never turn
+    an otherwise-healthy poll into a 500; same swallow-and-log discipline as jobs.py's own
+    enqueue_sentiment_after_fetch."""
+    await _seed_headline(test_session_factory, "TSLA", "Still here", "https://example.com/poll-2")
+
+    class _BrokenRedis(_FakeArqRedis):
+        async def enqueue_job(self, *args, **kwargs):
+            raise ConnectionError("redis hiccup")
+
+    app.dependency_overrides[get_session_factory] = lambda: test_session_factory
+    app.dependency_overrides[get_arq_redis] = lambda: _BrokenRedis(_FakeJob())
+    try:
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            response = await client.get("/api/search/status", params={"ticker": "TSLA"})
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    body = response.json()
+    today = next(d for d in body["days"] if d["is_today"])
+    assert today["stories"][0]["primary"]["title"] == "Still here"
 
 
 async def test_search_status_includes_per_headline_and_story_sentiment(test_session_factory):
@@ -278,7 +398,10 @@ async def test_search_status_includes_per_headline_and_story_sentiment(test_sess
         story_id=story_id, sentiment_score=46, sentiment_status="ok",
     )
 
+    # Not testing the complete-job path here -- keep the fake job pending, not a bare
+    # _FakeJob() whose result() of None would rely on the outer except to paper over it.
     app.dependency_overrides[get_session_factory] = lambda: test_session_factory
+    app.dependency_overrides[get_arq_redis] = lambda: _FakeArqRedis(_FakeJob(status=JobStatus.deferred))
     try:
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://test") as client:
@@ -298,4 +421,118 @@ async def test_search_status_includes_per_headline_and_story_sentiment(test_sess
 
     assert story_dict["sentiment_average"] == 64.0
     assert story_dict["sentiment_enum"] == "neutral"
+
+
+def _success_job() -> _FakeJob:
+    return _FakeJob(result={"status": "success", "providers": {}, "grouping": "skipped"})
+
+
+async def test_search_records_a_view_for_a_signed_in_user_with_a_matching_watchlist_entry(test_session_factory):
+    """ADR 0019: a signed-in user's own view of a watchlisted ticker resets that entry's
+    last_viewed_at, which is what its "new since last viewed" count is computed from."""
+    await _seed_headline(test_session_factory, "MSFT", "A headline", "https://example.com/wl-1")
+    async with test_session_factory() as session:
+        await session.merge(User(sub="user-1"))
+        old = datetime(2020, 1, 1, tzinfo=timezone.utc)
+        session.add(WatchlistEntry(user_sub="user-1", ticker="MSFT", added_at=old, last_viewed_at=old))
+        await session.commit()
+
+    redis = _FakeArqRedis(_success_job())
+    app.dependency_overrides[get_session_factory] = lambda: test_session_factory
+    app.dependency_overrides[get_arq_redis] = lambda: redis
+    try:
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            await _sign_in(client, redis, "user-1")
+            response = await client.get("/api/search", params={"ticker": "MSFT"})
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    async with test_session_factory() as session:
+        entry = await session.get(WatchlistEntry, ("user-1", "MSFT"))
+    assert entry.last_viewed_at > old
+
+
+async def test_search_does_not_create_an_entry_for_a_ticker_not_on_the_watchlist(test_session_factory):
+    """A signed-in user searching a ticker they haven't watchlisted must not gain a
+    watchlist entry as a side effect -- only an existing entry's view is ever recorded.
+    A real companies row exists for MSFT (it's been searched before, just never
+    watchlisted) so a broken auto-create wouldn't be accidentally masked by the ticker FK
+    rejecting the insert outright -- caught by a deliberate break that a companies-less
+    ticker let through silently."""
+    await _seed_headline(test_session_factory, "MSFT", "A headline", "https://example.com/wl-3")
+    async with test_session_factory() as session:
+        await session.merge(User(sub="user-1"))
+        await session.commit()
+
+    redis = _FakeArqRedis(_success_job())
+    app.dependency_overrides[get_session_factory] = lambda: test_session_factory
+    app.dependency_overrides[get_arq_redis] = lambda: redis
+    try:
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            await _sign_in(client, redis, "user-1")
+            response = await client.get("/api/search", params={"ticker": "MSFT"})
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    async with test_session_factory() as session:
+        entry = await session.get(WatchlistEntry, ("user-1", "MSFT"))
+    assert entry is None
+
+
+async def test_search_view_recording_survives_a_broken_session_factory(test_session_factory):
+    """ADR 0019: a hiccup recording the view must never turn an otherwise-healthy search
+    into a failure -- same swallow-and-log discipline as jobs.py's own
+    enqueue_sentiment_after_fetch. Forced by handing the view-recording step a session
+    factory that raises, while the endpoint's own data load still uses the real one."""
+    await _seed_headline(test_session_factory, "MSFT", "A headline", "https://example.com/wl-2")
+    async with test_session_factory() as session:
+        await session.merge(User(sub="user-1"))
+        old = datetime(2020, 1, 1, tzinfo=timezone.utc)
+        session.add(WatchlistEntry(user_sub="user-1", ticker="MSFT", added_at=old, last_viewed_at=old))
+        await session.commit()
+
+    class _BrokenSessionFactory:
+        def __call__(self):
+            return self
+
+        async def __aenter__(self):
+            raise RuntimeError("db hiccup")
+
+        async def __aexit__(self, *args):
+            return False
+
+    from ticker_backend import search as search_module
+
+    original_record = search_module._record_view_if_watchlisted
+
+    async def _broken_record(session_factory, user, ticker):
+        # Exercises the real function's own try/except with a factory engineered to raise,
+        # rather than swapping in a fake that skips the function's own error handling.
+        return await original_record(_BrokenSessionFactory(), user, ticker)
+
+    redis = _FakeArqRedis(_success_job())
+    app.dependency_overrides[get_session_factory] = lambda: test_session_factory
+    app.dependency_overrides[get_arq_redis] = lambda: redis
+    try:
+        search_module._record_view_if_watchlisted = _broken_record
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            await _sign_in(client, redis, "user-1")
+            response = await client.get("/api/search", params={"ticker": "MSFT"})
+    finally:
+        search_module._record_view_if_watchlisted = original_record
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    body = response.json()
+    today = next(d for d in body["days"] if d["is_today"])
+    assert today["stories"][0]["primary"]["title"] == "A headline"
+    # The broken factory means the view was never actually recorded -- still 200, not 500.
+    async with test_session_factory() as session:
+        entry = await session.get(WatchlistEntry, ("user-1", "MSFT"))
+    assert entry.last_viewed_at == old
 

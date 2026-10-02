@@ -13,6 +13,10 @@ import pytest
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+# Settings() builds at import time and create_app() now refuses to start without the DB password (ADR 0017);
+# seeded here, before any ticker_backend import, with the same local-only dev value TEST_DATABASE_URL uses.
+os.environ.setdefault("POSTGRES_PASSWORD", "ticker")
+
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 
 # dbmate's own scheme, reused below for the asyncpg engine by swapping the scheme and dropping the query string.
@@ -53,8 +57,8 @@ async def _clean_tables(test_session_factory):
     transaction -- simpler with async SQLAlchemy, and cheap at this data
     size (persist-and-truncate, not drop/recreate every run)."""
     async with test_session_factory() as session:
-        # All four in one statement -- headlines/stories reference each other, Postgres refuses to truncate one alone.
-        # users has no FK relationship yet but is truncated alongside them for the same fresh-table-per-test reason.
-        await session.execute(text("TRUNCATE TABLE headlines, companies, stories, users"))
+        # All five in one statement -- watchlist_entries FKs to users/companies, Postgres refuses to
+        # truncate a referenced table alone without CASCADE.
+        await session.execute(text("TRUNCATE TABLE headlines, companies, stories, users, watchlist_entries"))
         await session.commit()
     yield

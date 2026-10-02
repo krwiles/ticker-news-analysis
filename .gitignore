@@ -1,6 +1,9 @@
 # env
 .env
 
+# File-based secrets mounted into containers by docker-compose.yml (ADR 0017) -- never commit.
+secrets/
+
 # Google's own default name for a downloaded OAuth client credentials file --
 # unneeded here (spec 0006/ADR 0016 uses GIS's credential flow, no client
 # secret) but guarded against anyway, since Google's console offers it by
