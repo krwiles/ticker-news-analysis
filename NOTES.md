@@ -799,7 +799,14 @@ mounted) then a real search + sentiment pass; fix the stale session-signing-key 
    indistinguishable from a genuine failure in the UI) and a second bug the fix itself introduced (the fetch
    job's result TTL was far shorter than any poll interval) — both caught only by live verification, not unit
    tests. **A further live-refresh oddity logged below, unresolved:** the "last refresh Ns ago" counter
-   sometimes resets early even with the tab genuinely focused, cause not yet found.
+   sometimes resets early even with the tab genuinely focused, cause not yet found. **A `mattpocock-skills:
+   code-review` pass (Standards + Spec axes, `working` vs `main`) found and fixed real issues**: spec 0007 and
+   ADR 0018 still promised a skipped check stays "entirely invisible," contradicting the deferred-status fix
+   above on purpose (the user prefers the new visible behavior) — both docs rewritten to describe it directly,
+   closing out ADR 0018's own long-flagged "needs a doc update" item; missing per-step comments in three places
+   and 12+ lines of duplicated test boilerplate (extracted into one fixture) were also fixed. Separately, a
+   real bug only CI caught (`Layout.test.tsx` had a genuinely unmocked `fetch()` that happened to "work"
+   locally because the dev stack was running) is also fixed.
 2. **Notifications** — new news on a watchlist, optionally sentiment-filtered; depends on watchlists existing.
 3. **Admin panel (container logs)** — needs a real admin-role concept, which doesn't exist yet (accounts do,
    roles don't) — the smallest new spec among these three, but a real one.
